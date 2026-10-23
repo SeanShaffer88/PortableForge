@@ -10,7 +10,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::session::Session;
+use crate::diff::diff_snapshots;
+use crate::session::{Phase, Session};
+use crate::snapshot::Snapshot;
 use crate::wsb::{SandboxConfig, SandboxMode};
 
 // ---------------------------------------------------------------- preflight
@@ -359,6 +361,92 @@ pub fn specimen_plan(runtime: &crate::diff::Diff) -> Vec<Specimen> {
     out
 }
 
+// ------------------------------------------------------------ post-capture
+
+/// What the host should do next, judged from the agent's state file.
+/// The agent (already shipping as the `portableforge-agent` binary)
+/// writes `state.json` into the exchange folder as it works; this is
+/// the host half of the live wiring — the wizard polls this instead of
+/// guessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostAction {
+    /// Nothing to do yet — the agent has not finished (or not started).
+    Wait,
+    /// The capture finished; run `post_capture`.
+    Harvest,
+    /// The agent reported a failure, in its own plain words.
+    Failed(String),
+}
+
+pub fn next_host_action(state: Option<&Session>) -> HostAction {
+    let Some(s) = state else {
+        return HostAction::Wait;
+    };
+    if let Some(line) = s.log.iter().find(|l| l.starts_with("FAILED")) {
+        return HostAction::Failed(line.clone());
+    }
+    match s.phase {
+        Phase::Done => HostAction::Harvest,
+        _ => HostAction::Wait,
+    }
+}
+
+/// The result of reading a finished capture back from the exchange
+/// folder: both change lists, the ready-made review for the "What it
+/// left behind" step, and the first-run specimen plan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptureOutcome {
+    pub install_diff: crate::diff::Diff,
+    pub runtime_diff: crate::diff::Diff,
+    pub review: crate::review::Review,
+    pub specimens: Vec<Specimen>,
+}
+
+/// Read the three notes the agent leaves in the exchange folder
+/// (`before.json`, `after-install.json`, `after-runtime.json` — each a
+/// snapshot the agent's own commands produce) and turn them into the
+/// review the wizard shows. A missing note is a plain error naming
+/// exactly which one and which step makes it.
+pub fn post_capture(layout: &SessionLayout) -> Result<CaptureOutcome, String> {
+    fn load(layout: &SessionLayout, name: &str, step: &str) -> Result<Snapshot, String> {
+        let path = layout.exchange.join(name);
+        let text = std::fs::read_to_string(&path).map_err(|_| {
+            format!(
+                "The note {name} is missing from the session folder. It is made by the {step} step — that step may not have finished."
+            )
+        })?;
+        Snapshot::from_json(&text)
+    }
+    let before = load(layout, "before.json", "clean test box")?;
+    let after_install = load(layout, "after-install.json", "install")?;
+    let after_runtime = load(layout, "after-runtime.json", "try it out")?;
+
+    let install_diff = diff_snapshots(&before, &after_install);
+    let runtime_diff = diff_snapshots(&after_install, &after_runtime);
+
+    // Directories the install itself created (parents of added files),
+    // which the classifier uses to tell program files from settings.
+    let mut install_dirs: Vec<String> = Vec::new();
+    for change in install_diff.real_file_changes() {
+        if let Some(idx) = change.path.rfind('\\') {
+            let dir = change.path[..idx].to_string();
+            if !install_dirs.iter().any(|d| d.eq_ignore_ascii_case(&dir)) {
+                install_dirs.push(dir);
+            }
+        }
+    }
+
+    let classifications = crate::classify::classify(&install_diff, &runtime_diff, &install_dirs);
+    let review = crate::review::Review::from_classifications(classifications);
+    let specimens = specimen_plan(&runtime_diff);
+    Ok(CaptureOutcome {
+        install_diff,
+        runtime_diff,
+        review,
+        specimens,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +493,58 @@ mod tests {
         let (prog, _arg) = sandbox_launch_command(&layout);
         assert_eq!(prog, "WindowsSandbox.exe");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn post_capture_builds_review_from_exchange_notes() {
+        use crate::snapshot::{sha256_hex, FileEntry};
+        let base = std::env::temp_dir().join(format!("pf-postcap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let layout = session_layout(&base, "s1");
+        std::fs::create_dir_all(&layout.exchange).unwrap();
+        let entry = |p: &str| FileEntry {
+            path: p.into(),
+            size: 3,
+            sha256: sha256_hex(b"abc"),
+            mtime_secs: 0,
+        };
+        let mut before = Snapshot::new("pre");
+        before.files.push(entry(r"C:\Windows\notepad.exe"));
+        let mut after_install = Snapshot::new("post-install");
+        after_install.files.push(entry(r"C:\Windows\notepad.exe"));
+        after_install
+            .files
+            .push(entry(r"C:\Program Files\Widget\widget.exe"));
+        let mut after_runtime = after_install.clone();
+        after_runtime.label = "post-run".into();
+        after_runtime.files.push(entry(
+            r"C:\Users\WDAGUtilityAccount\AppData\Roaming\Acme\Widget\settings.ini",
+        ));
+        for (name, snap) in [
+            ("before.json", &before),
+            ("after-install.json", &after_install),
+            ("after-runtime.json", &after_runtime),
+        ] {
+            std::fs::write(layout.exchange.join(name), snap.to_json()).unwrap();
+        }
+        let outcome = post_capture(&layout).unwrap();
+        assert!(!outcome.review.items.is_empty(), "review should have cards");
+        assert_eq!(outcome.specimens.len(), 1);
+        assert_eq!(outcome.specimens[0].data_relative, r"Widget\settings.ini");
+        let missing = post_capture(&session_layout(&base, "nope"));
+        assert!(missing.unwrap_err().contains("before.json"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn host_action_follows_agent_state() {
+        assert_eq!(next_host_action(None), HostAction::Wait);
+        let mut s = Session::new("x", Mode::WindowsSandbox);
+        assert_eq!(next_host_action(Some(&s)), HostAction::Wait);
+        s.phase = Phase::Done;
+        assert_eq!(next_host_action(Some(&s)), HostAction::Harvest);
+        s.log.push("FAILED: the setup file would not run".into());
+        assert!(matches!(next_host_action(Some(&s)), HostAction::Failed(_)));
     }
 
     #[test]
