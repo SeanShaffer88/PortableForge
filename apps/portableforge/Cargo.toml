@@ -1,0 +1,28 @@
+[package]
+name = "portableforge"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PortableForge — automate creating PortableApps.com packages in a disposable sandbox: pre-scan, install, run, close, post-scan, classify, generate, build, leak-test."
+
+[[bin]]
+name = "portableforge"
+path = "src/main.rs"
+
+[[bin]]
+name = "portableforge-agent"
+path = "src/bin/portableforge-agent.rs"
+
+[dependencies]
+portableforge-core = { path = "../../crates/portableforge-core" }
+serde_json = "1"
+egui = { version = "0.33", default-features = false, features = ["default_fonts"] }
+# Renderer: glow (OpenGL), deliberately NOT wgpu — a wgpu build with no
+# backend feature panicked on a real Windows machine in a sibling project.
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "accesskit"] }
+
+[target.'cfg(not(windows))'.dependencies]
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "accesskit", "x11"] }
