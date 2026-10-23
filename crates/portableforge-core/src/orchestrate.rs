@@ -1,0 +1,464 @@
+//! Sandbox orchestration (host side): preflight evaluation, the
+//! on-disk session layout, the launch plan, heartbeat reading, and
+//! harvesting results out of the exchange folder.
+//!
+//! Everything here is file-based and platform-neutral so it can be
+//! tested anywhere; the few truly Windows-only fact *collections*
+//! (edition, feature state) live in the host binary and feed
+//! [`PreflightFacts`] into [`evaluate_preflight`].
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+use crate::session::Session;
+use crate::wsb::{SandboxConfig, SandboxMode};
+
+// ---------------------------------------------------------------- preflight
+
+/// Facts about the machine, collected by the host binary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreflightFacts {
+    /// True when running on Windows at all.
+    pub is_windows: bool,
+    /// Windows build number (Sandbox needs 18342+); 0 when unknown.
+    pub os_build: u32,
+    /// Edition supports Windows Sandbox (Pro/Enterprise/Education/IoT).
+    pub edition_supported: bool,
+    /// `WindowsSandbox.exe` is present in System32.
+    pub sandbox_exe_present: bool,
+    /// The optional feature is enabled; `None` = could not be determined.
+    pub feature_enabled: Option<bool>,
+    /// `None` = could not be measured (the check is then skipped, and
+    /// the report says so — never a guessed pass or fail).
+    pub free_disk_mb: Option<u64>,
+    pub free_ram_mb: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightCheck {
+    /// Plain-language check name (wizard wording — no jargon).
+    pub label: String,
+    pub ok: bool,
+    /// Plain-language fix when not ok; empty when ok.
+    pub fix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightReport {
+    pub checks: Vec<PreflightCheck>,
+    /// The best sandbox mode this machine can honestly offer.
+    pub best_mode: SandboxMode,
+}
+
+impl PreflightReport {
+    pub fn sandbox_ready(&self) -> bool {
+        self.best_mode == SandboxMode::WindowsSandbox && self.checks.iter().all(|c| c.ok)
+    }
+}
+
+pub fn evaluate_preflight(f: &PreflightFacts) -> PreflightReport {
+    let mut checks = Vec::new();
+    let mut check = |label: &str, ok: bool, fix: &str| {
+        checks.push(PreflightCheck {
+            label: label.to_string(),
+            ok,
+            fix: if ok { String::new() } else { fix.to_string() },
+        });
+    };
+
+    check(
+        "This is a Windows computer",
+        f.is_windows,
+        "PortableForge makes portable Windows programs, so it needs to run on Windows.",
+    );
+    check(
+        "Windows is new enough",
+        f.os_build >= 18342,
+        "Update Windows: the safe test box needs Windows 10 build 18342 or newer, or Windows 11.",
+    );
+    check(
+        "Your Windows edition includes the safe test box",
+        f.edition_supported,
+        "The test box comes with Windows Pro, Enterprise, or Education. On Windows Home, use Careful mode instead — we will explain it honestly before anything runs.",
+    );
+    check(
+        "The safe test box is installed",
+        f.sandbox_exe_present,
+        "Turn on 'Windows Sandbox' in Windows Features (we can show you exactly where), then restart the computer.",
+    );
+    // Unknown facts are never dressed up as passes: an unmeasured check
+    // does not block, but its label says it was not checked.
+    check(
+        if f.feature_enabled.is_none() {
+            "The safe test box is switched on (could not be checked)"
+        } else {
+            "The safe test box is switched on"
+        },
+        f.feature_enabled != Some(false),
+        "Windows Sandbox is installed but switched off. Turn it on in Windows Features, then restart.",
+    );
+    check(
+        if f.free_disk_mb.is_none() {
+            "Enough free space (could not be measured)"
+        } else {
+            "Enough free space"
+        },
+        f.free_disk_mb.map(|mb| mb >= 2048).unwrap_or(true),
+        "Free up at least 2 GB: the test box and the program being converted both need room.",
+    );
+    check(
+        if f.free_ram_mb.is_none() {
+            "Enough free memory (could not be measured)"
+        } else {
+            "Enough free memory"
+        },
+        f.free_ram_mb.map(|mb| mb >= 2048).unwrap_or(true),
+        "Close some other programs first — the test box needs about 2 GB of memory to itself.",
+    );
+
+    let sandbox_ok = f.is_windows
+        && f.os_build >= 18342
+        && f.edition_supported
+        && f.sandbox_exe_present
+        && f.feature_enabled != Some(false);
+    let best_mode = if sandbox_ok {
+        SandboxMode::WindowsSandbox
+    } else if f.is_windows {
+        // A user VM cannot be detected reliably; Mode B is chosen by the
+        // user, not auto-detected. Fallback offer is the honest Mode C.
+        SandboxMode::HostSnapshot
+    } else {
+        SandboxMode::HostSnapshot
+    };
+    PreflightReport { checks, best_mode }
+}
+
+// ------------------------------------------------------------ session layout
+
+/// On-disk layout of one packaging session:
+/// ```text
+/// <base>\<session-id>\
+///   session.json     the Session record
+///   box.wsb          generated Sandbox configuration (Mode A)
+///   input\           the original installer (mapped read-only)
+///   tools\           portableforge-agent.exe (mapped read-only)
+///   exchange\        snapshots, harvest, state.json heartbeat (read/write)
+///   output\          the finished package tree and .paf.exe
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLayout {
+    pub root: PathBuf,
+    pub input: PathBuf,
+    pub tools: PathBuf,
+    pub exchange: PathBuf,
+    pub output: PathBuf,
+    pub wsb_path: PathBuf,
+    pub session_path: PathBuf,
+}
+
+pub fn session_layout(base: &Path, session_id: &str) -> SessionLayout {
+    let root = base.join(session_id);
+    SessionLayout {
+        input: root.join("input"),
+        tools: root.join("tools"),
+        exchange: root.join("exchange"),
+        output: root.join("output"),
+        wsb_path: root.join("box.wsb"),
+        session_path: root.join("session.json"),
+        root,
+    }
+}
+
+pub fn prepare_session(
+    base: &Path,
+    session: &Session,
+    agent_source: Option<&Path>,
+    networking: bool,
+) -> Result<SessionLayout, String> {
+    let layout = session_layout(base, &session.id);
+    for dir in [
+        &layout.root,
+        &layout.input,
+        &layout.tools,
+        &layout.exchange,
+        &layout.output,
+    ] {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("We could not make the work folder {}: {e}", dir.display()))?;
+    }
+    if let Some(agent) = agent_source {
+        let dest = layout.tools.join("portableforge-agent.exe");
+        std::fs::copy(agent, &dest)
+            .map_err(|e| format!("We could not copy the helper program: {e}"))?;
+    }
+    std::fs::write(&layout.session_path, session.to_json())
+        .map_err(|e| format!("We could not save the run record: {e}"))?;
+    if session.sandbox_mode == SandboxMode::WindowsSandbox {
+        let cfg = SandboxConfig {
+            input_dir: layout.input.to_string_lossy().into_owned(),
+            tools_dir: layout.tools.to_string_lossy().into_owned(),
+            exchange_dir: layout.exchange.to_string_lossy().into_owned(),
+            networking,
+            ..Default::default()
+        };
+        cfg.check()?;
+        std::fs::write(&layout.wsb_path, cfg.to_wsb())
+            .map_err(|e| format!("We could not save the test box settings: {e}"))?;
+    }
+    Ok(layout)
+}
+
+/// The command that starts the test box on Windows. Returned as data
+/// (program + argument) so callers never build a shell string.
+pub fn sandbox_launch_command(layout: &SessionLayout) -> (String, String) {
+    (
+        "WindowsSandbox.exe".to_string(),
+        layout.wsb_path.to_string_lossy().into_owned(),
+    )
+}
+
+/// Read the agent's current state from the exchange folder, if it has
+/// written one yet.
+pub fn read_agent_state(layout: &SessionLayout) -> Option<Session> {
+    let text = std::fs::read_to_string(layout.exchange.join("state.json")).ok()?;
+    Session::from_json(&text).ok()
+}
+
+// ------------------------------------------------------------------ harvest
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HarvestReport {
+    pub files_copied: usize,
+    pub bytes_copied: u64,
+    pub skipped: Vec<String>,
+}
+
+/// Copy a harvested tree (from the exchange folder) into its package
+/// destination, preserving relative structure. Refuses path escapes:
+/// any harvested entry that would land outside the destination is
+/// skipped and reported, never written.
+pub fn harvest_tree(source: &Path, dest: &Path) -> Result<HarvestReport, String> {
+    let mut report = HarvestReport::default();
+    let mut stack = vec![source.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) => {
+                report.skipped.push(format!("{}: {e}", dir.display()));
+                continue;
+            }
+        };
+        for item in entries.flatten() {
+            let path = item.path();
+            let Ok(kind) = item.file_type() else { continue };
+            if kind.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !kind.is_file() {
+                continue;
+            }
+            let rel = path.strip_prefix(source).unwrap_or(&path).to_path_buf();
+            // Safety: no absolute or parent-escaping relative paths.
+            if rel.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            }) {
+                report
+                    .skipped
+                    .push(format!("unsafe path skipped: {}", rel.display()));
+                continue;
+            }
+            let target = dest.join(&rel);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("We could not make {}: {e}", parent.display()))?;
+            }
+            let bytes = std::fs::copy(&path, &target)
+                .map_err(|e| format!("We could not copy {}: {e}", path.display()))?;
+            report.files_copied += 1;
+            report.bytes_copied += bytes;
+        }
+    }
+    Ok(report)
+}
+
+// ------------------------------------------------------- specimen harvesting
+
+/// One first-run specimen: a file the app created in a per-user
+/// location while being tried out. Its contents become the package's
+/// `App\DefaultData` seed (so a fresh portable copy starts with sane
+/// settings), and the *moved* original lives in `Data\` at run time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Specimen {
+    /// Absolute path inside the sandbox where the file was seen.
+    pub sandbox_path: String,
+    /// Where it belongs relative to the package root, e.g.
+    /// `Data\Widget\settings.ini` for the live copy.
+    pub data_relative: String,
+    /// The DefaultData seed location relative to the package root.
+    pub default_data_relative: String,
+}
+
+/// Plan specimens from the runtime diff: every added/modified file
+/// under a recognised per-user location, grouped by the same folder
+/// the classifier chose for its `[DirectoriesMove]` entry.
+pub fn specimen_plan(runtime: &crate::diff::Diff) -> Vec<Specimen> {
+    let mut out = Vec::new();
+    for change in runtime.real_file_changes() {
+        if change.kind == crate::diff::ChangeKind::Removed {
+            continue;
+        }
+        let path = &change.path;
+        let lower = path.to_ascii_lowercase();
+        let mut hit: Option<(String, String)> = None; // (data folder, inner rel)
+        for marker in [r"\appdata\roaming\", r"\appdata\local\", r"\documents\"] {
+            if let Some(idx) = lower.find(marker) {
+                let rest = &path[idx + marker.len()..];
+                let mut parts = rest.splitn(3, '\\');
+                let vendor = parts.next().unwrap_or("");
+                let app = parts.next().unwrap_or("");
+                let inner = parts.next().unwrap_or("");
+                if !app.is_empty() {
+                    let raw_folder = app
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                        .collect::<String>();
+                    // Same PAL rule as the classifier: `settings` is
+                    // reserved in Data (registry storage).
+                    let folder = if raw_folder.eq_ignore_ascii_case("settings") {
+                        format!("{raw_folder}Data")
+                    } else {
+                        raw_folder
+                    };
+                    let rel = if inner.is_empty() {
+                        format!("{folder}\\{}", path.rsplit('\\').next().unwrap_or("file"))
+                    } else {
+                        format!("{folder}\\{inner}")
+                    };
+                    let _ = vendor;
+                    hit = Some((folder, rel));
+                    break;
+                }
+            }
+        }
+        if let Some((_folder, rel)) = hit {
+            out.push(Specimen {
+                sandbox_path: path.clone(),
+                data_relative: rel.clone(),
+                default_data_relative: rel,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.data_relative.cmp(&b.data_relative));
+    out.dedup_by(|a, b| a.data_relative == b.data_relative);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wsb::SandboxMode as Mode;
+
+    fn facts_good() -> PreflightFacts {
+        PreflightFacts {
+            is_windows: true,
+            os_build: 26100,
+            edition_supported: true,
+            sandbox_exe_present: true,
+            feature_enabled: Some(true),
+            free_disk_mb: Some(50_000),
+            free_ram_mb: Some(8_000),
+        }
+    }
+
+    #[test]
+    fn good_machine_gets_sandbox_home_gets_honest_fallback() {
+        let r = evaluate_preflight(&facts_good());
+        assert!(r.sandbox_ready());
+        assert_eq!(r.best_mode, Mode::WindowsSandbox);
+
+        let mut home = facts_good();
+        home.edition_supported = false;
+        let r = evaluate_preflight(&home);
+        assert!(!r.sandbox_ready());
+        assert_eq!(r.best_mode, Mode::HostSnapshot);
+        let failed: Vec<_> = r.checks.iter().filter(|c| !c.ok).collect();
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].fix.contains("Windows Home"));
+    }
+
+    #[test]
+    fn session_layout_and_wsb_are_written() {
+        let base = std::env::temp_dir().join(format!("pf-orch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let s = Session::new("widget-run", Mode::WindowsSandbox);
+        let layout = prepare_session(&base, &s, None, false).unwrap();
+        assert!(layout.input.is_dir() && layout.exchange.is_dir());
+        let wsb = std::fs::read_to_string(&layout.wsb_path).unwrap();
+        assert!(wsb.contains("portableforge-agent.exe run"));
+        assert!(read_agent_state(&layout).is_none());
+        let (prog, _arg) = sandbox_launch_command(&layout);
+        assert_eq!(prog, "WindowsSandbox.exe");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn specimen_plan_maps_appdata_files_into_data() {
+        use crate::diff::{ChangeKind, FileChange};
+        use crate::snapshot::{sha256_hex, FileEntry};
+        let mut d = crate::diff::Diff::default();
+        d.files.push(FileChange {
+            kind: ChangeKind::Added,
+            path: r"C:\Users\WDAGUtilityAccount\AppData\Roaming\Acme\Widget\settings.ini".into(),
+            before: None,
+            after: Some(FileEntry {
+                path: r"C:\Users\WDAGUtilityAccount\AppData\Roaming\Acme\Widget\settings.ini"
+                    .into(),
+                size: 1,
+                sha256: sha256_hex(b"x"),
+                mtime_secs: 0,
+            }),
+            noise: false,
+        });
+        d.files.push(FileChange {
+            kind: ChangeKind::Added,
+            path: r"C:\Windows\System32\acme.dll".into(),
+            before: None,
+            after: Some(FileEntry {
+                path: r"C:\Windows\System32\acme.dll".into(),
+                size: 1,
+                sha256: sha256_hex(b"x"),
+                mtime_secs: 0,
+            }),
+            noise: false,
+        });
+        let plan = specimen_plan(&d);
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].data_relative, r"Widget\settings.ini");
+        assert_eq!(plan[0].default_data_relative, r"Widget\settings.ini");
+    }
+
+    #[test]
+    fn harvest_copies_tree_and_counts() {
+        let base = std::env::temp_dir().join(format!("pf-harvest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("a.exe"), b"MZ1234").unwrap();
+        std::fs::write(src.join("sub").join("b.dat"), b"xy").unwrap();
+        let dest = base.join("dest");
+        let r = harvest_tree(&src, &dest).unwrap();
+        assert_eq!(r.files_copied, 2);
+        assert_eq!(r.bytes_copied, 8);
+        assert_eq!(
+            std::fs::read(dest.join("sub").join("b.dat")).unwrap(),
+            b"xy"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
