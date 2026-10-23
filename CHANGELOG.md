@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Verified
+- The full check suite (formatting, lint, all 45 tests, and a release
+  build) passes on a real Windows runner for every push. This proves
+  the code builds and its tests pass on Windows; the program's
+  behaviour in a real test box is still verified only by the on-machine
+  runbook in `docs/ON_MACHINE_RUNBOOK.md`.
+
 ### Added
 - Safety-check step now judges the real computer (Windows edition, build,
   test-box presence) and shows each check in plain words with its fix, and
