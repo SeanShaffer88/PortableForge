@@ -10,6 +10,21 @@ Pick a program → install it inside the safe box → try it → close it → Po
 
 Anyone. The whole program is one guided path with twelve plain steps, one decision at a time, with sensible choices already made for you. Technical details exist, but they hide behind a "Show details" switch you never need to open. Dark window, large clear text, every button explains itself.
 
+## What you need
+
+- A Windows 10 (build 18342 or newer) or Windows 11 computer. The safe test box needs the Pro, Enterprise, or Education edition — on Home, PortableForge offers Careful mode and says plainly that it is watched-and-reverted, not sealed off.
+- About 2 GB of free disk space and 2 GB of free memory while it works.
+- A program whose installer you have, and — only if you plan to share the finished portable copy — the right to share it. PortableForge asks, and builds differently depending on your answer.
+- Nothing else. No coding, no accounts, no internet needed after the one-time download of the two official builder programs (PortableForge checks their fingerprints before trusting them).
+
+## What it does for you
+
+- Walks you through twelve plain-language steps, start to finish, with a progress bar and a Back button that always works.
+- Tests the program inside a throwaway test box, so a bad installer cannot hurt your real computer.
+- Works out where the program keeps its settings and files, and shows you each finding as a plain card you can accept or question.
+- Builds the portable package to the current PortableApps.com Format (3.9), with the official builder programs doing the final assembly.
+- Tests the finished copy in a fresh box and tells you honestly whether it left anything behind.
+
 ## How it works
 
 1. **Pick your program** — its setup file, a download link, or a program already installed.
