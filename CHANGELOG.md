@@ -10,6 +10,12 @@
   runbook in `docs/ON_MACHINE_RUNBOOK.md`.
 
 ### Added
+- The host half of the live capture is wired: when the helper inside
+  the test box finishes, PortableForge now reads its three notes back,
+  works out both change lists, and has the review and the
+  starting-settings seeds ready for the "What it left behind" step —
+  including a plain error naming any note that is missing and which
+  step makes it. (New `post-capture` command for testing.)
 - Safety-check step now judges the real computer (Windows edition, build,
   test-box presence) and shows each check in plain words with its fix, and
   honestly offers Careful mode when the test box is unavailable.
