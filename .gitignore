@@ -1,0 +1,7 @@
+/target
+*.json.tmp
+sessions/
+# Downloaded official tools are a local cache — pins live in
+# crates/portableforge-core/src/tools.rs and tools-pins/PINS.md.
+tools-pins/*.paf.exe
+tools-pins/*.zip
