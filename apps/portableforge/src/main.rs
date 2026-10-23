@@ -315,6 +315,34 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             println!("{} steps to put things back.", plan.len());
             Ok(())
         }
+        "post-capture" => {
+            let dir = args
+                .get(1)
+                .ok_or("Give the session folder (the one containing exchange\\).")?;
+            let root = std::path::PathBuf::from(dir);
+            let layout = portableforge_core::orchestrate::SessionLayout {
+                wsb_path: root.join("box.wsb"),
+                session_path: root.join("session.json"),
+                input: root.join("input"),
+                tools: root.join("tools"),
+                exchange: root.join("exchange"),
+                output: root.join("output"),
+                root,
+            };
+            let outcome = portableforge_core::orchestrate::post_capture(&layout)?;
+            println!("{}", outcome.review.summary());
+            println!(
+                "Changes: {} from installing, {} from trying it out.",
+                outcome.install_diff.real_file_changes().count()
+                    + outcome.install_diff.real_reg_changes().count(),
+                outcome.runtime_diff.real_file_changes().count()
+                    + outcome.runtime_diff.real_reg_changes().count()
+            );
+            for s in &outcome.specimens {
+                println!("Starting-settings seed: Data\\{}", s.data_relative);
+            }
+            Ok(())
+        }
         "session-new" => {
             let id = need_flag(args, "--id")?;
             let out = need_flag(args, "--out")?;
