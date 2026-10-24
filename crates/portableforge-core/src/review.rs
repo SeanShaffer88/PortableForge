@@ -46,15 +46,34 @@ pub fn default_decision(c: &Classification) -> Decision {
 
 impl Review {
     pub fn from_classifications(list: Vec<Classification>) -> Self {
-        Self {
-            items: list
-                .into_iter()
-                .map(|c| ReviewItem {
-                    decision: default_decision(&c),
-                    classification: c,
-                })
-                .collect(),
+        let mut items: Vec<ReviewItem> = list
+            .into_iter()
+            .map(|c| ReviewItem {
+                decision: default_decision(&c),
+                classification: c,
+            })
+            .collect();
+        // Red flags first — they block the flow until acknowledged —
+        // then the fixes by confidence, information last. The sort is
+        // stable, so equal rows keep the classifier's own order.
+        fn rank(c: &Classification) -> u8 {
+            match c.severity {
+                Severity::RedFlag => 0,
+                Severity::Review => 1,
+                Severity::Info => 2,
+            }
         }
+        items.sort_by(|a, b| {
+            rank(&a.classification)
+                .cmp(&rank(&b.classification))
+                .then_with(|| {
+                    b.classification
+                        .confidence
+                        .partial_cmp(&a.classification.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        Self { items }
     }
 
     /// Classifications whose fixes are switched on — the input to
@@ -130,6 +149,41 @@ mod tests {
     }
 
     #[test]
+    fn red_flags_come_first_then_confidence() {
+        let mut low = item(Finding::RegistryKey { key: "K1".into() }, Severity::Info);
+        low.confidence = 0.5;
+        let mut high_fix = item(
+            Finding::FilesMove {
+                host_pattern: "%USERPROFILE%".into(),
+                data_target: "a.ini".into(),
+            },
+            Severity::Review,
+        );
+        high_fix.confidence = 0.7;
+        let mut flag = item(
+            Finding::RedFlag {
+                kind: "service".into(),
+                detail: "svc".into(),
+            },
+            Severity::RedFlag,
+        );
+        flag.confidence = 0.4; // even an unsure red flag outranks fixes
+        let review = Review::from_classifications(vec![low, high_fix, flag]);
+        assert!(matches!(
+            review.items[0].classification.finding,
+            Finding::RedFlag { .. }
+        ));
+        assert!(matches!(
+            review.items[1].classification.finding,
+            Finding::FilesMove { .. }
+        ));
+        assert!(matches!(
+            review.items[2].classification.finding,
+            Finding::RegistryKey { .. }
+        ));
+    }
+
+    #[test]
     fn defaults_follow_the_rules() {
         let review = Review::from_classifications(vec![
             item(
@@ -159,7 +213,13 @@ mod tests {
         assert!(review.has_red_flags());
         assert!(!review.all_acknowledged());
         let mut review = review;
-        review.items[2].decision = Decision::Acknowledge { seen: true };
+        // Red flags sort first (item 32), so find the warning by kind.
+        let flag = review
+            .items
+            .iter_mut()
+            .find(|i| matches!(i.decision, Decision::Acknowledge { .. }))
+            .unwrap();
+        flag.decision = Decision::Acknowledge { seen: true };
         assert!(review.all_acknowledged());
         assert!(review.summary().contains("1 fixes on"));
         assert!(review.summary().contains("1 off"));
