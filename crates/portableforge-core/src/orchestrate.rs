@@ -391,6 +391,74 @@ pub fn next_host_action(state: Option<&Session>) -> HostAction {
     }
 }
 
+/// One point in the capture sequence. The host asks for a snapshot by
+/// writing the point's command file into the exchange folder; the agent
+/// inside the test box watches for it, takes the snapshot, and writes
+/// the point's note file (the same names [`post_capture`] reads).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapturePoint {
+    Before,
+    AfterInstall,
+    AfterRuntime,
+}
+
+impl CapturePoint {
+    /// The note file the agent writes for this point.
+    pub fn note_name(&self) -> &'static str {
+        match self {
+            CapturePoint::Before => "before.json",
+            CapturePoint::AfterInstall => "after-install.json",
+            CapturePoint::AfterRuntime => "after-runtime.json",
+        }
+    }
+
+    /// The command file the host writes to request this point.
+    pub fn command_name(&self) -> &'static str {
+        match self {
+            CapturePoint::Before => "cmd-before",
+            CapturePoint::AfterInstall => "cmd-after-install",
+            CapturePoint::AfterRuntime => "cmd-after-runtime",
+        }
+    }
+
+    /// Snapshot label recorded inside the note.
+    pub fn label(&self) -> &'static str {
+        match self {
+            CapturePoint::Before => "pre",
+            CapturePoint::AfterInstall => "post-install",
+            CapturePoint::AfterRuntime => "post-run",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "before" => Some(CapturePoint::Before),
+            "after-install" => Some(CapturePoint::AfterInstall),
+            "after-runtime" => Some(CapturePoint::AfterRuntime),
+            _ => None,
+        }
+    }
+
+    pub const ALL: &[CapturePoint] = &[
+        CapturePoint::Before,
+        CapturePoint::AfterInstall,
+        CapturePoint::AfterRuntime,
+    ];
+}
+
+/// Ask the agent in the test box to take one capture snapshot. The
+/// request is a small file in the shared exchange folder — the only
+/// channel the host and the agent share, and one that works the same
+/// for a user-run VM (Mode B): put the command file in the folder the
+/// guest can see.
+pub fn request_snapshot(layout: &SessionLayout, point: CapturePoint) -> Result<(), String> {
+    std::fs::create_dir_all(&layout.exchange)
+        .map_err(|e| format!("We could not open the session folder: {e}"))?;
+    std::fs::write(layout.exchange.join(point.command_name()), b"")
+        .map_err(|e| format!("We could not ask the test box for its note: {e}"))?;
+    Ok(())
+}
+
 /// The result of reading a finished capture back from the exchange
 /// folder: both change lists, the ready-made review for the "What it
 /// left behind" step, and the first-run specimen plan.
@@ -533,6 +601,22 @@ mod tests {
         assert_eq!(outcome.specimens[0].data_relative, r"Widget\settings.ini");
         let missing = post_capture(&session_layout(&base, "nope"));
         assert!(missing.unwrap_err().contains("before.json"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn snapshot_request_writes_the_agents_command_file() {
+        let base = std::env::temp_dir().join(format!("pf-req-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let layout = session_layout(&base, "s1");
+        request_snapshot(&layout, CapturePoint::AfterInstall).unwrap();
+        assert!(layout.exchange.join("cmd-after-install").is_file());
+        assert_eq!(
+            CapturePoint::from_name("after-install"),
+            Some(CapturePoint::AfterInstall)
+        );
+        assert_eq!(CapturePoint::AfterRuntime.note_name(), "after-runtime.json");
+        assert!(CapturePoint::from_name("bogus").is_none());
         let _ = std::fs::remove_dir_all(&base);
     }
 
