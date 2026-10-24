@@ -120,11 +120,143 @@ pub fn rollback_plan(run_diff: &Diff) -> Vec<RollbackAction> {
     actions
 }
 
+/// Translate a recorded old setting value (in `.reg` text form, as the
+/// snapshots keep it) into the `(type, data)` pair a restore needs.
+/// Returns `None` for forms that cannot be restored automatically —
+/// the executor then says so instead of guessing.
+pub fn restore_value(old_data: &str) -> Option<(&'static str, String)> {
+    let data = old_data.trim();
+    if let Some(hex) = data.strip_prefix("dword:") {
+        let value = u32::from_str_radix(hex.trim(), 16).ok()?;
+        return Some(("REG_DWORD", value.to_string()));
+    }
+    if let Some(hex) = data.strip_prefix("hex:") {
+        let cleaned: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
+        if cleaned.is_empty() || !cleaned.split(',').all(|b| b.len() == 2) {
+            return None;
+        }
+        return Some(("REG_BINARY", cleaned.replace(',', "")));
+    }
+    if data.len() >= 2 && data.starts_with('"') && data.ends_with('"') {
+        // .reg string form: backslash and quote are escaped.
+        let inner = data[1..data.len() - 1]
+            .replace("\\\\", "\u{1}")
+            .replace("\\\"", "\"")
+            .replace('\u{1}', "\\");
+        return Some(("REG_SZ", inner));
+    }
+    None
+}
+
+/// Carry out a rollback plan and return a plain log line per action.
+/// With `apply = false` nothing is touched — the log says what *would*
+/// happen (the dry run). File deletions happen here; remembered
+/// settings go through the caller's `registry` hook (the host program
+/// owns the actual `reg.exe` calls), which returns `Err` with a plain
+/// reason when a setting cannot be put back. Changed files and
+/// check-by-hand items are reported, never silently "fixed".
+pub fn execute_rollback(
+    plan: &[RollbackAction],
+    apply: bool,
+    registry: &mut dyn FnMut(&RollbackAction) -> Result<(), String>,
+) -> Vec<String> {
+    let mut log = Vec::new();
+    for action in plan {
+        match action {
+            RollbackAction::DeleteFile { path } => {
+                if !apply {
+                    log.push(format!("Would delete the file it added: {path}"));
+                } else {
+                    match std::fs::remove_file(path) {
+                        Ok(()) => log.push(format!("Deleted the file it added: {path}")),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            log.push(format!("Already gone: {path}"))
+                        }
+                        Err(e) => log.push(format!("Could not delete {path}: {e}")),
+                    }
+                }
+            }
+            RollbackAction::DeleteSetting { .. } | RollbackAction::RestoreSetting { .. } => {
+                if !apply {
+                    log.push(format!("Would put back a setting: {}", action.plain()));
+                } else {
+                    match registry(action) {
+                        Ok(()) => log.push(format!("Done: {}", action.plain())),
+                        Err(why) => log.push(format!("Not done — {} ({why})", action.plain())),
+                    }
+                }
+            }
+            RollbackAction::FileWasChanged { .. } | RollbackAction::CheckByHand { .. } => {
+                log.push(format!("Needs a person: {}", action.plain()));
+            }
+        }
+    }
+    log
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::diff::{FileChange, RegChange};
     use crate::snapshot::{sha256_hex, FileEntry, RegEntry};
+
+    #[test]
+    fn executor_dry_run_touches_nothing_and_apply_deletes_added_files() {
+        let dir = std::env::temp_dir().join(format!("pf-rb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let added_file = dir.join("added.txt");
+        std::fs::write(&added_file, "x").unwrap();
+        let plan = vec![
+            RollbackAction::DeleteFile {
+                path: added_file.to_string_lossy().into_owned(),
+            },
+            RollbackAction::DeleteSetting {
+                key: r"HKEY_CURRENT_USER\Software\X".into(),
+                name: "Mode".into(),
+            },
+            RollbackAction::CheckByHand {
+                what: "helper".into(),
+                why: "never automated".into(),
+            },
+        ];
+        let hook_calls = std::cell::Cell::new(0usize);
+        let mut hook = |_: &RollbackAction| -> Result<(), String> {
+            hook_calls.set(hook_calls.get() + 1);
+            Ok(())
+        };
+        let log = execute_rollback(&plan, false, &mut hook);
+        assert!(added_file.is_file(), "dry run must not delete");
+        assert_eq!(
+            hook_calls.get(),
+            0,
+            "dry run must not call the registry hook"
+        );
+        assert!(log[0].starts_with("Would delete"));
+        let log = execute_rollback(&plan, true, &mut hook);
+        assert!(!added_file.exists(), "apply deletes the added file");
+        assert_eq!(hook_calls.get(), 1);
+        assert!(log[2].starts_with("Needs a person"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_value_translates_reg_forms() {
+        assert_eq!(
+            restore_value("dword:0000002a"),
+            Some(("REG_DWORD", "42".to_string()))
+        );
+        assert_eq!(
+            restore_value("\"plain text\""),
+            Some(("REG_SZ", "plain text".to_string()))
+        );
+        assert_eq!(
+            restore_value("hex:de,ad,be,ef"),
+            Some(("REG_BINARY", "deadbeef".to_string()))
+        );
+        assert_eq!(restore_value("hex(b):00,00"), None);
+        assert_eq!(restore_value("something else"), None);
+    }
 
     fn fe(path: &str) -> FileEntry {
         FileEntry {
