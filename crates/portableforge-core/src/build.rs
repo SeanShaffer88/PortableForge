@@ -628,6 +628,65 @@ mod tests {
     }
 
     #[test]
+    fn generated_tree_scan_diff_round_trips() {
+        // Item 82: generate a tree, scan it back, and diff — every
+        // generated file must show up exactly once as added, and a
+        // second scan of the unchanged tree must diff to nothing.
+        let base = std::env::temp_dir().join(format!("pf-round-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let meta = crate::paf::tests::sample(Distribution::Bundled {
+            redistribution_asserted: true,
+        });
+        let root = base.join("WidgetPortable");
+        let written = crate::validate::generate_tree(&root, &meta, &[dirs_move()]).unwrap();
+        assert!(written.len() > 5);
+        let empty = crate::snapshot::Snapshot::new("empty");
+        let scan1 = {
+            let mut s = crate::snapshot::Snapshot::new("scan");
+            s.files = crate::snapshot::scan_tree(
+                &root,
+                r"C:\Box\WidgetPortable",
+                &mut crate::progress::Progress::new("scan", None),
+            )
+            .unwrap();
+            s
+        };
+        // The generated files on disk: appinfo, launcher ini, help,
+        // licence, installer config, readme — count them directly.
+        let mut on_disk = 0usize;
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                if e.path().is_dir() {
+                    stack.push(e.path());
+                } else {
+                    on_disk += 1;
+                }
+            }
+        }
+        assert_eq!(scan1.files.len(), on_disk);
+        let d = crate::diff::diff_snapshots(&empty, &scan1);
+        assert_eq!(d.files.iter().filter(|f| !f.noise).count(), on_disk);
+        assert!(d
+            .files
+            .iter()
+            .all(|f| f.kind == crate::diff::ChangeKind::Added));
+        let scan2 = {
+            let mut s = crate::snapshot::Snapshot::new("scan");
+            s.files = crate::snapshot::scan_tree(
+                &root,
+                r"C:\Box\WidgetPortable",
+                &mut crate::progress::Progress::new("scan", None),
+            )
+            .unwrap();
+            s
+        };
+        let d2 = crate::diff::diff_snapshots(&scan1, &scan2);
+        assert!(d2.is_empty(), "unchanged tree must diff to nothing");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn build_copies_files_seeds_data_and_keeps_accepted_fixes() {
         let base = std::env::temp_dir().join(format!("pf-build-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
