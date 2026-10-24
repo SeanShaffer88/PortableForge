@@ -147,22 +147,22 @@ impl PafMetadata {
              Icons=1\n\
              Start={app_id}.exe\n\
              ExtractIcon=App\\{base}\\{main_exe}\n",
-            name = self.name,
-            app_id = self.app_id,
-            base = self.base_app_name,
-            publisher = self.publisher,
-            homepage = self.homepage,
-            category = self.category,
-            description = self.description,
-            language = self.language,
+            name = ini_safe(&self.name),
+            app_id = ini_safe(&self.app_id),
+            base = ini_safe(&self.base_app_name),
+            publisher = ini_safe(&self.publisher),
+            homepage = ini_safe(&self.homepage),
+            category = ini_safe(&self.category),
+            description = ini_safe(&self.description),
+            language = ini_safe(&self.language),
             shareable = self.shareable,
             open_source = self.open_source,
             freeware = self.freeware,
             commercial = self.commercial_use,
-            pv = self.package_version,
-            dv = self.display_version,
+            pv = ini_safe(&self.package_version),
+            dv = ini_safe(&self.display_version),
             admin = admin,
-            main_exe = self.main_exe,
+            main_exe = ini_safe(&self.main_exe),
         )
     }
 
@@ -182,7 +182,8 @@ impl PafMetadata {
         out.push_str("[Launch]\n");
         out.push_str(&format!(
             "ProgramExecutable={}\\{}\n",
-            self.base_app_name, self.main_exe
+            ini_safe(&self.base_app_name),
+            ini_safe(&self.main_exe)
         ));
         out.push_str("DirectoryMoveOK=yes\n");
         out.push_str("SupportsUNC=yes\n");
@@ -362,12 +363,15 @@ impl PafMetadata {
         {
             out.push_str(&format!(
                 "\n[DownloadFiles]\n\
-                 DownloadURL={download_url}\n\
+                 DownloadURL={}\n\
                  DownloadName={}\n\
-                 DownloadFilename={download_filename}\n\
-                 DownloadSHA256={download_sha256}\n\
+                 DownloadFilename={}\n\
+                 DownloadSHA256={}\n\
                  DownloadTo=\n",
-                self.name
+                ini_safe(download_url),
+                ini_safe(&self.name),
+                ini_safe(download_filename),
+                ini_safe(download_sha256)
             ));
         }
         out
@@ -381,11 +385,27 @@ impl PafMetadata {
              <p>Packaged with PortableForge as a PortableApps.com Format package. \
              All user data is stored in the <b>Data</b> directory next to the launcher.</p>\n\
              </body></html>\n",
-            name = self.name,
-            desc = self.description,
-            publisher = self.publisher
+            name = html_escape(&self.name),
+            desc = html_escape(&self.description),
+            publisher = html_escape(&self.publisher)
         )
     }
+}
+
+/// Escape user text for HTML. Names and descriptions come from people
+/// (and from program metadata we did not write); without this a `<` in
+/// a description would become markup in the generated help page.
+pub fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Make a value safe for one INI line: CR/LF would let a crafted name
+/// or description inject whole new INI lines into generated files.
+pub fn ini_safe(s: &str) -> String {
+    s.chars().filter(|c| *c != '\r' && *c != '\n').collect()
 }
 
 /// Parse/validate a PackageVersion (`x.x.x.x`, four numeric parts).
@@ -546,6 +566,26 @@ pub(crate) mod tests {
             "{ini}"
         );
         assert!(ini.contains("Find=%PAL:LastDrive%%PAL:LastPackagePartialDir%\\"));
+    }
+
+    #[test]
+    fn help_html_escapes_user_text_and_ini_values_cannot_inject_lines() {
+        let mut m = sample(Distribution::Bundled {
+            redistribution_asserted: true,
+        });
+        m.description = "A <b>widget</b> & \"friends\"".into();
+        let html = m.help_html();
+        assert!(html.contains("A &lt;b&gt;widget&lt;/b&gt; &amp; &quot;friends&quot;"));
+        assert!(!html.contains("<b>widget</b>"));
+        m.name = "Widget\n[Injected]\nEvil=1".into();
+        let ini = m.appinfo_ini();
+        // The injected text survives only as part of the Name value —
+        // never as its own INI line or section header.
+        assert!(ini
+            .lines()
+            .all(|l| !l.starts_with("[Injected]") && !l.starts_with("Evil")));
+        assert!(ini.contains("Name=Widget[Injected]Evil=1"));
+        assert_eq!(ini_safe("a\r\nb"), "ab");
     }
 
     #[test]
