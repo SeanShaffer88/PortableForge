@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added — 100-enhancement programme, Slice 9: proof, not promises (2026-10-24)
+- The plain-language promise is now enforced on the wizard itself,
+  not just the guide text: a test reads the wizard's own buttons and
+  labels and fails if jargon creeps in. The registry reader is
+  tested against a set of hostile, damaged files and must never
+  crash on them; a fuzz-style sweep throws two hundred rounds of
+  random path shapes at the comparing and sorting code; and a
+  generated package tree is scanned back and diffed to prove the
+  round trip loses nothing.
+- A tiny made-up run — the fixture session in `examples/` — lets
+  anyone rehearse the whole pipeline offline in five minutes
+  (`docs/OFFLINE_REHEARSAL.md`), and a test keeps the fixture
+  honest. New docs also record how the window treats eyes and
+  keyboards (`docs/ACCESSIBILITY.md`, including the one place the
+  palette falls short and why it is safe there) and what must be
+  true before anything is called a release
+  (`docs/RELEASE_READINESS.md`).
+
 ### Added — 100-enhancement programme, Slice 8: the safety check learns the computer (2026-10-24)
 - The opening safety check now measures instead of guessing: real
   free space and memory, whether virtualisation is switched on,
