@@ -258,6 +258,18 @@ impl WizardApp {
                 CapturePoint::AfterInstall,
             );
         }
+        // A request the helper has not answered for a long while
+        // usually means the test box was closed mid-run — say so
+        // plainly instead of letting the person wait forever.
+        if let Some((point, age)) = portableforge_core::orchestrate::pending_request(&layout) {
+            if age > portableforge_core::orchestrate::CAPTURE_WAIT_WARN_SECS {
+                self.log.push(format!(
+                    "Still waiting for the {} note after {} minutes — the test box may have been closed. You can start it again from the clean test computer step.",
+                    point.note_name(),
+                    age / 60
+                ));
+            }
+        }
         let state = portableforge_core::orchestrate::read_agent_state(&layout);
         match portableforge_core::orchestrate::next_host_action(state.as_ref()) {
             portableforge_core::orchestrate::HostAction::Wait => {
@@ -311,6 +323,19 @@ impl WizardApp {
                                 self.mark_dirty();
                             }
                             self.hints_applied = true;
+                        }
+                        // Start Menu shortcuts are the honest guess
+                        // for the main file: the shortcut's name is
+                        // usually the program's name.
+                        if !outcome.shortcut_candidates.is_empty() {
+                            self.log.push(format!(
+                                "Shortcut found for: {}. The main file is often the same name with .exe on the end.",
+                                outcome.shortcut_candidates.join(", ")
+                            ));
+                            if self.main_exe.trim().is_empty() {
+                                self.main_exe = format!("{}.exe", outcome.shortcut_candidates[0]);
+                                self.mark_dirty();
+                            }
                         }
                     }
                     Err(e) => self.log.push(e),
