@@ -30,9 +30,55 @@ pub struct LeakReport {
     pub leaks: Vec<Leak>,
 }
 
+impl Leak {
+    /// The one-line fix for this leak: the classifier's suggestion when
+    /// there is one, otherwise the standard fix for its kind.
+    pub fn fix_line(&self) -> String {
+        if let Some(fix) = &self.suggested_fix {
+            return fix.clone();
+        }
+        match self.kind.as_str() {
+            "settings" => {
+                "Have the finished copy carry this setting inside its own Data folder instead."
+                    .to_string()
+            }
+            "helper" => {
+                "A portable copy cannot leave a background helper behind — this program is not fully portable as it stands."
+                    .to_string()
+            }
+            _ => {
+                "Have the finished copy keep this file inside its own folder (its Data folder travels with it)."
+                    .to_string()
+            }
+        }
+    }
+
+    /// The friendly group heading for this leak's kind.
+    pub fn group_label(&self) -> &'static str {
+        match self.kind.as_str() {
+            "settings" => "Remembered settings written outside the copy",
+            "helper" => "Background helpers left running",
+            _ => "Files left outside the copy",
+        }
+    }
+}
+
 impl LeakReport {
     pub fn clean(&self) -> bool {
         self.leaks.is_empty()
+    }
+
+    /// Leaks grouped by kind, in a stable order (files, settings,
+    /// helpers), each group with its leaks in report order.
+    pub fn grouped(&self) -> Vec<(&'static str, Vec<&Leak>)> {
+        let mut out: Vec<(&'static str, Vec<&Leak>)> = Vec::new();
+        for kind in ["file", "settings", "helper"] {
+            let leaks: Vec<&Leak> = self.leaks.iter().filter(|l| l.kind == kind).collect();
+            if !leaks.is_empty() {
+                out.push((leaks[0].group_label(), leaks));
+            }
+        }
+        out
     }
 
     /// One-line verdict for the wizard and the session log.
@@ -176,6 +222,13 @@ mod tests {
         assert!(!report.clean());
         assert_eq!(report.leaks.len(), 2);
         assert!(report.verdict().contains("2 things"));
+        // Grouping: one file group, one settings group, in that order,
+        // and every leak carries a one-line fix.
+        let groups = report.grouped();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "Files left outside the copy");
+        assert_eq!(groups[1].0, "Remembered settings written outside the copy");
+        assert!(report.leaks.iter().all(|l| !l.fix_line().is_empty()));
     }
 
     #[test]
