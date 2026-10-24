@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added — 100-enhancement programme, Slice 4: the review list gets sharper (2026-10-24)
+- The same change can no longer appear twice in the "What it left
+  behind" list when it was seen both while installing and while
+  trying the program out. Warnings now come first in the list, then
+  the fixes surest first — and every card's explanation names the
+  exact file, settings area, or service it was decided from.
+- Four things that used to blur into the crowd now get their own
+  clear warnings: fonts installed into the Windows Fonts folder,
+  helper components registered for other programs to use (COM/
+  ActiveX), scheduled tasks, and firewall rules. A single file an
+  app drops loose in your profile folder is now spotted and carried
+  as a file, not a folder. Two more kinds of Windows housekeeping
+  (update delivery cache, search index stores) are recognised as
+  background noise — still listed, never hidden.
+- The choices made in the review can be saved to a file and loaded
+  back from the window, and a new `portableforge review
+  <work folder>` command prints the whole list as plain cards and
+  saves the choices file without opening the window.
+
 ### Added — 100-enhancement programme, Slice 3: capturing gets deeper and hardier (2026-10-24)
 - One locked or unreadable file can no longer ruin a whole note:
   the scan now leaves it out, counts it, and the note says how many
