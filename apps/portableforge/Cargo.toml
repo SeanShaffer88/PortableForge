@@ -19,6 +19,9 @@ path = "src/bin/portableforge-agent.rs"
 [dependencies]
 portableforge-core = { path = "../../crates/portableforge-core" }
 serde_json = "1"
+# Native file dialogs (the wizard's Browse… buttons) — the same crate
+# RoomForge and ytTrayDL use; no dialog code of our own to maintain.
+rfd = "0.15"
 egui = { version = "0.33", default-features = false, features = ["default_fonts"] }
 # Renderer: glow (OpenGL), deliberately NOT wgpu — a wgpu build with no
 # backend feature panicked on a real Windows machine in a sibling project.
