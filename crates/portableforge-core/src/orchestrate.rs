@@ -34,6 +34,9 @@ pub struct PreflightFacts {
     /// the report says so — never a guessed pass or fail).
     pub free_disk_mb: Option<u64>,
     pub free_ram_mb: Option<u64>,
+    /// Whether at least one restore point exists (careful mode's way
+    /// back). `None` = could not be checked.
+    pub restore_point: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +101,19 @@ pub fn evaluate_preflight(f: &PreflightFacts) -> PreflightReport {
         },
         f.feature_enabled != Some(false),
         "Windows Sandbox is installed but switched off. Turn it on in Windows Features, then restart.",
+    );
+    // Careful mode's honesty anchor: without a restore point there is
+    // no "put it all back" safety net, and the report must say so. The
+    // check never blocks the safe test box (which needs no restore
+    // point); it is listed so careful mode is never chosen blind.
+    check(
+        if f.restore_point.is_none() {
+            "A restore point to go back to (could not be checked)"
+        } else {
+            "A restore point to go back to"
+        },
+        f.restore_point != Some(false),
+        "Careful mode runs on this computer and is put back afterwards — that needs a restore point. Turn on System Protection and make one in Settings > System > About > System protection, or use the safe test box instead.",
     );
     check(
         if f.free_disk_mb.is_none() {
@@ -176,6 +192,8 @@ pub fn prepare_session(
     session: &Session,
     agent_source: Option<&Path>,
     networking: bool,
+    memory_mb: u32,
+    clipboard: bool,
 ) -> Result<SessionLayout, String> {
     let layout = session_layout(base, &session.id);
     for dir in [
@@ -201,6 +219,8 @@ pub fn prepare_session(
             tools_dir: layout.tools.to_string_lossy().into_owned(),
             exchange_dir: layout.exchange.to_string_lossy().into_owned(),
             networking,
+            clipboard,
+            memory_mb,
             ..Default::default()
         };
         cfg.check()?;
@@ -705,6 +725,7 @@ mod tests {
             feature_enabled: Some(true),
             free_disk_mb: Some(50_000),
             free_ram_mb: Some(8_000),
+            restore_point: Some(true),
         }
     }
 
@@ -725,11 +746,43 @@ mod tests {
     }
 
     #[test]
+    fn restore_point_check_is_listed_and_honest() {
+        // Present: the check passes.
+        let r = evaluate_preflight(&facts_good());
+        let rp = r
+            .checks
+            .iter()
+            .find(|c| c.label.starts_with("A restore point"))
+            .expect("restore point check exists");
+        assert!(rp.ok);
+        // Absent: the check fails with the System Protection fix.
+        let mut none = facts_good();
+        none.restore_point = Some(false);
+        let r = evaluate_preflight(&none);
+        let rp = r
+            .checks
+            .iter()
+            .find(|c| c.label == "A restore point to go back to")
+            .unwrap();
+        assert!(!rp.ok && rp.fix.contains("System Protection"));
+        // Unknown: labelled as not checked, never a guessed failure.
+        let mut unknown = facts_good();
+        unknown.restore_point = None;
+        let r = evaluate_preflight(&unknown);
+        let rp = r
+            .checks
+            .iter()
+            .find(|c| c.label.contains("could not be checked"))
+            .unwrap();
+        assert!(rp.ok);
+    }
+
+    #[test]
     fn session_layout_and_wsb_are_written() {
         let base = std::env::temp_dir().join(format!("pf-orch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let s = Session::new("widget-run", Mode::WindowsSandbox);
-        let layout = prepare_session(&base, &s, None, false).unwrap();
+        let layout = prepare_session(&base, &s, None, false, 4096, false).unwrap();
         assert!(layout.input.is_dir() && layout.exchange.is_dir());
         let wsb = std::fs::read_to_string(&layout.wsb_path).unwrap();
         assert!(wsb.contains("portableforge-agent.exe run"));
