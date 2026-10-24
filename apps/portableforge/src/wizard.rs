@@ -440,10 +440,26 @@ impl eframe::App for WizardApp {
                 }
                 "pick" => {
                     ui.label("Where is the program's setup file?");
-                    ui.text_edit_singleline(&mut self.installer_path)
-                        .on_hover_text(
-                            "Type or paste the full path of the setup file you downloaded.",
-                        );
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.installer_path)
+                            .on_hover_text(
+                                "Type or paste the full path of the setup file you downloaded, or use Browse.",
+                            );
+                        if ui
+                            .button("Browse…")
+                            .on_hover_text("Open a file chooser to find the setup file.")
+                            .clicked()
+                        {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_title("Pick the program's setup file")
+                                .add_filter("Setup files", &["exe", "msi", "zip"])
+                                .add_filter("All files", &["*"])
+                                .pick_file()
+                            {
+                                self.installer_path = path.to_string_lossy().into_owned();
+                            }
+                        }
+                    });
                 }
                 "clean" => {
                     if ui
