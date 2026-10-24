@@ -34,6 +34,24 @@ pub fn validate_metadata(meta: &PafMetadata) -> Vec<ValidationIssue> {
     if meta.name.trim().is_empty() {
         issues.push(ValidationIssue::err("Name", "Name must not be empty."));
     }
+    if meta.base_app_name.trim().is_empty() {
+        issues.push(ValidationIssue::err(
+            "BaseAppName",
+            "The program's own folder name must not be empty — the package is built around it.",
+        ));
+    }
+    if meta.publisher.trim().is_empty() {
+        issues.push(ValidationIssue::warn(
+            "Publisher",
+            "Publisher is empty — the finished package shows who made the program.",
+        ));
+    }
+    if meta.homepage.trim().is_empty() {
+        issues.push(ValidationIssue::warn(
+            "Homepage",
+            "Homepage is empty — fine for a private copy, but a shared package should say where the program comes from.",
+        ));
+    }
     if !valid_app_id(&meta.app_id) {
         issues.push(ValidationIssue::err(
             "AppID",
@@ -49,10 +67,18 @@ pub fn validate_metadata(meta: &PafMetadata) -> Vec<ValidationIssue> {
             ),
         ));
     }
-    if meta.description.chars().count() > 512 {
+    let desc_len = meta.description.chars().count();
+    if desc_len > 512 {
         issues.push(ValidationIssue::err(
             "Description",
             "Description must be at most 512 characters (Format 3.9).",
+        ));
+    } else if desc_len >= 480 {
+        issues.push(ValidationIssue::warn(
+            "Description",
+            format!(
+                "Description is {desc_len} of the 512 characters allowed — close to the limit."
+            ),
         ));
     }
     if meta.description.trim().is_empty() {
@@ -75,6 +101,74 @@ pub fn validate_metadata(meta: &PafMetadata) -> Vec<ValidationIssue> {
     }
     if let Err(e) = meta.distribution.check_guardrail() {
         issues.push(ValidationIssue::err("Distribution", e));
+    }
+    issues
+}
+
+/// Sections the official Application Template 3.5.2's Launcher INI uses
+/// (plus the numbered `[FileWriteN]` family PortableForge generates).
+const LAUNCHER_SECTIONS: &[&str] = &[
+    "Launch",
+    "Activate",
+    "LiveMode",
+    "Environment",
+    "DirectoriesMove",
+    "FilesMove",
+    "RegistryKeys",
+];
+
+/// Key allow-list for the two sections whose key sets are closed in the
+/// template: `[Activate]` and `[FileWriteN]`. ([Launch] legitimately
+/// carries many optional keys, so it is not key-checked.)
+fn launcher_key_allowed(section: &str, key: &str) -> Option<bool> {
+    match section {
+        "Activate" => Some(matches!(key, "Registry" | "XML")),
+        _ if section.starts_with("FileWrite") => {
+            Some(matches!(key, "Type" | "File" | "Find" | "Replace"))
+        }
+        _ => None,
+    }
+}
+
+/// Spelling-level check of a Launcher INI against the template's shape:
+/// unknown sections and unknown keys in the closed sections come back
+/// as warnings — they are how a typo'd key silently does nothing.
+pub fn check_launcher_ini(text: &str) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+    let mut section = String::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].to_string();
+            let is_filewrite = section.starts_with("FileWrite")
+                && section[9..].chars().all(|c| c.is_ascii_digit())
+                && section.len() > 9;
+            if !LAUNCHER_SECTIONS.contains(&section.as_str()) && !is_filewrite {
+                issues.push(ValidationIssue::warn(
+                    "Launcher",
+                    format!(
+                        "Section [{section}] is not one the example package uses — check the spelling; a wrong section name is ignored silently."
+                    ),
+                ));
+            }
+            continue;
+        }
+        if let Some((key, _)) = line.split_once('=') {
+            let key = key.trim();
+            if let Some(allowed) = launcher_key_allowed(&section, key) {
+                if !allowed {
+                    issues.push(ValidationIssue::warn(
+                        "Launcher",
+                        format!(
+                            "Key {key} in [{section}] is not one the example package uses — check the spelling; a wrong key is ignored silently."
+                        ),
+                    ));
+                }
+            }
+        }
     }
     issues
 }
@@ -116,6 +210,13 @@ pub fn validate_tree(root: &Path, meta: &PafMetadata) -> Vec<ValidationIssue> {
             "Tree",
             "Data directory missing — the installer creates it, but shipping it empty is clearer.",
         ));
+    }
+    // When the Launcher INI is there, spell-check it against the
+    // template's sections and closed key sets.
+    let launcher_rel = format!(r"App\AppInfo\Launcher\{}.ini", meta.app_id)
+        .replace('\\', std::path::MAIN_SEPARATOR_STR);
+    if let Ok(text) = std::fs::read_to_string(root.join(&launcher_rel)) {
+        issues.extend(check_launcher_ini(&text));
     }
     issues
 }
@@ -219,6 +320,25 @@ mod tests {
         let issues = validate_metadata(&m);
         assert!(has_errors(&issues));
         assert_eq!(issues.iter().filter(|i| i.error).count(), 3);
+    }
+
+    #[test]
+    fn launcher_ini_spelling_check_catches_typos_only() {
+        let m = meta();
+        // Our own generated INI passes clean.
+        let generated = m.launcher_ini(&[]);
+        assert!(check_launcher_ini(&generated).is_empty(), "{generated}");
+        // A typo'd key, a made-up section, and a wrong FileWrite key warn.
+        let corrupt = "[Launch]\nProgramExecutable=Widget\\widget.exe\n\n[Bogus]\nX=1\n\n[Activate]\nRegistery=true\n\n[FileWrite1]\nType=Replace\nFile=a\nFind=b\nReplac=b\n";
+        let issues = check_launcher_ini(corrupt);
+        assert_eq!(issues.len(), 3, "{issues:?}");
+        assert!(issues.iter().all(|i| !i.error));
+        // A long-but-legal description earns the plain near-limit warning.
+        let mut m2 = meta();
+        m2.description = "x".repeat(500);
+        let issues = validate_metadata(&m2);
+        assert!(!has_errors(&issues));
+        assert!(issues.iter().any(|i| i.message.contains("500 of the 512")));
     }
 
     #[test]
