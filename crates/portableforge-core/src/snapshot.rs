@@ -467,6 +467,73 @@ pub fn tree_fingerprint(root: &Path) -> Vec<(String, u64, i64)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fuzz_loop_random_paths_never_panic() {
+        // Item 89: a deterministic fuzz-style sweep — random path
+        // shapes through normalise, diff, and classify. The point is
+        // not coverage of every answer; it is that no shape panics
+        // and normalising is idempotent.
+        let mut state: u64 = 0x853c_49e6_748f_ea9b;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let segments = [
+            "Program Files",
+            "Widget",
+            "AppData",
+            "Roaming",
+            "🎉",
+            "..",
+            ".",
+            "",
+            "a b",
+            "ünïcode",
+            "SettingsData",
+            "verylongsegmentnamethatexceedsnormalexpectationsfortestingpurposes",
+            "C:",
+            "Users",
+            "test",
+            "file.exe",
+            "settings.ini",
+            "x",
+        ];
+        let roots = [r"C:\", "D:/", "/", "\\\\server\\share\\"];
+        for round in 0..200 {
+            let make = |next: &mut dyn FnMut() -> u64| {
+                let mut snap = crate::snapshot::Snapshot::new(format!("r{round}"));
+                let n = (next() % 12) as usize;
+                for _ in 0..n {
+                    let root = roots[(next() as usize) % roots.len()];
+                    let depth = 1 + (next() % 5) as usize;
+                    let mut path = root.to_string();
+                    for _ in 0..depth {
+                        let seg = segments[(next() as usize) % segments.len()];
+                        if !path.ends_with(['\\', '/']) {
+                            path.push('\\');
+                        }
+                        path.push_str(seg);
+                    }
+                    let once = crate::snapshot::normalise_path(&path);
+                    let twice = crate::snapshot::normalise_path(&once);
+                    assert_eq!(once, twice, "normalise must be idempotent: {path}");
+                    snap.files.push(crate::snapshot::FileEntry {
+                        path,
+                        size: next() % 10_000,
+                        sha256: crate::snapshot::sha256_hex(b"x"),
+                        mtime_secs: 0,
+                    });
+                }
+                snap
+            };
+            let a = make(&mut next);
+            let b = make(&mut next);
+            let d = crate::diff::diff_snapshots(&a, &b);
+            let _ = crate::classify::classify(&d, &d, &[]);
+        }
+    }
     use super::*;
 
     #[test]
