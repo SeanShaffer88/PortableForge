@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Added — 100-enhancement programme, Slice 2: the window gets easier to use (2026-10-24)
+- The file chooser now opens in the folder of the path you already
+  typed, and you can drag the setup file straight onto the first
+  step. The first step also says plainly what the path points at —
+  the file's size and name, or that the path is a folder, or that no
+  file is there yet — and offers the setup files you used lately
+  (the last five, remembered between runs).
+- Your progress is saved as you go. Close the window mid-run and
+  reopening offers to pick the run up where you left it; finishing a
+  run clears it.
+- Pressing Enter continues and Escape goes back, everywhere except
+  while you are typing in a box. A Text size choice (Standard /
+  Large / Extra large) in the header is remembered between runs.
+- After a capture, the naming step fills itself in from the
+  program's own name, maker and version tags — only into boxes you
+  left empty, and you can always change them. The naming step also
+  points out problems as you type (a version that isn't four
+  numbers, a main file that looks like a whole path), and the final
+  step gained buttons that open the folder with your portable copy
+  and the work folder.
+
 ### Added — 100-enhancement programme, Slice 1: correctness, capture intelligence, build provenance (2026-10-24)
 The programme plan and tracker live in `docs/PROGRAM-100.md`.
 - Generated `help.html` now escapes the program name, description and
