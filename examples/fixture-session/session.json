@@ -1,0 +1,20 @@
+{
+  "id": "fixture-widget",
+  "phase": "Done",
+  "sandbox_mode": "WindowsSandbox",
+  "installer_path": "widget-setup.exe",
+  "source_url": null,
+  "snapshots_done": [
+    "before",
+    "after-install",
+    "after-runtime"
+  ],
+  "log": [
+    "[2026-10-24T00:00:00Z] Fixture run \u2014 synthetic, for the offline rehearsal."
+  ],
+  "agent_heartbeat_secs": null,
+  "agent_action": null,
+  "agent_version": "0.1.0",
+  "created_utc": "2026-10-24T00:00:00Z",
+  "sharing_answer": null
+}
