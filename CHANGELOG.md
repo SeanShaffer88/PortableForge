@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Added — 100-enhancement programme, Slice 5: building gets deeper and safer (2026-10-24)
+- Before a build writes anything, it now lists *every* problem with
+  the details at once — and it refuses to build into a folder that
+  already holds something else, with a plain reason (a folder from
+  an earlier build is fine; that is a rebuild, and your saved-data
+  folder is always kept exactly as it was, and the summary says so).
+- PortableForge now reads the main program file's own header: the
+  build report names its processor family (x86, x64, or ARM64), an
+  x64 program gets the matching 64-bit line in its starter settings,
+  and a "main file" that isn't really a program file earns a plain
+  warning. A picture file found among the program's files becomes
+  the package picture automatically, the program's license file is
+  copied into the package, and the summary reports the total size
+  and file count with a per-folder breakdown in the build report.
+- `build --zip` also leaves a zip copy of the finished package;
+  `build --session` now plants the captured first-run files into
+  the package's starting settings by itself (and says plainly which
+  ones weren't captured). Two new commands — `tools run-installer`
+  and `tools run-launcher` — run the official PortableApps.com maker
+  programs (fingerprint-checked first) on a finished package, only
+  when you ask. The help page now shows the version and publisher
+  and a "Made with PortableForge" line.
+
 ### Added — 100-enhancement programme, Slice 4: the review list gets sharper (2026-10-24)
 - The same change can no longer appear twice in the "What it left
   behind" list when it was seen both while installing and while
