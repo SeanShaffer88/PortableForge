@@ -179,7 +179,7 @@ impl WizardApp {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "run".to_string());
-            let id: String = stem
+            let stem_clean: String = stem
                 .chars()
                 .map(|c| {
                     if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
@@ -189,15 +189,24 @@ impl WizardApp {
                     }
                 })
                 .collect();
+            // Collision-proof session ids (item 77): the setup file's
+            // name plus the UTC second this run started — starting
+            // the same conversion twice never lands in one folder.
+            let id = format!(
+                "{}-{}",
+                if stem_clean.is_empty() {
+                    "run".to_string()
+                } else {
+                    stem_clean
+                },
+                portableforge_core::timeutil::now_compact()
+            );
             let mode = self
                 .preflight
                 .as_ref()
                 .map(|r| r.best_mode)
                 .unwrap_or(portableforge_core::wsb::SandboxMode::WindowsSandbox);
-            let session = portableforge_core::Session::new(
-                if id.is_empty() { "run".to_string() } else { id },
-                mode,
-            );
+            let session = portableforge_core::Session::new(id, mode);
             let agent = std::env::current_exe().ok().and_then(|exe| {
                 let p = exe.with_file_name("portableforge-agent.exe");
                 if p.is_file() {
@@ -328,6 +337,13 @@ impl WizardApp {
             }
         }
         let state = portableforge_core::orchestrate::read_agent_state(&layout);
+        if let Some(s) = &state {
+            if let Some(w) =
+                portableforge_core::orchestrate::agent_version_warning(s, env!("CARGO_PKG_VERSION"))
+            {
+                self.log.push(w);
+            }
+        }
         match portableforge_core::orchestrate::next_host_action(state.as_ref()) {
             portableforge_core::orchestrate::HostAction::Wait => {
                 self.log.push(
@@ -851,6 +867,17 @@ impl eframe::App for WizardApp {
                                     egui::RichText::new(format!("     {}", check.fix))
                                         .color(color(guide::theme::TEXT_MUTED)),
                                 );
+                            }
+                            if let Some(copy) = &check.copy_text {
+                                if ui
+                                    .small_button("Copy the fix")
+                                    .on_hover_text(format!(
+                                        "Copy this, so you can paste it instead of retyping: {copy}"
+                                    ))
+                                    .clicked()
+                                {
+                                    ui.ctx().copy_text(copy.clone());
+                                }
                             }
                         }
                         ui.add_space(6.0);
