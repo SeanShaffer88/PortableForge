@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added — 100-enhancement programme, Slice 3: capturing gets deeper and hardier (2026-10-24)
+- One locked or unreadable file can no longer ruin a whole note:
+  the scan now leaves it out, counts it, and the note says how many
+  were left out. Notes after the first are much faster — files whose
+  size and time are unchanged aren't read again (their fingerprint
+  is remembered in the work folder).
+- The helper now also records the machine's program services on
+  Windows, so the "installs a service" warning can fire from real
+  captures; a settings area that can't be read is retried once and
+  then named in the note instead of vanishing quietly.
+- While a note is being taken, the helper's heartbeat says what it
+  is looking through and how many files it has checked, and its
+  notes and heartbeat are written in one move so the wizard never
+  reads a half-written file.
+- New helper command `watch`: start it before running a setup
+  program and it takes the after-installing note by itself once
+  things have been quiet for a while. If a requested note hasn't
+  arrived after two minutes, the wizard and the `agent-state`
+  command say the test box may have been closed.
+- Shortcuts the install put on the Start Menu are reported after a
+  capture, and the wizard uses the first one to suggest the
+  program's main file. New `mode-b` command makes a packet — the
+  helper plus plain instructions — for testing inside your own
+  virtual machine.
+
 ### Added — 100-enhancement programme, Slice 2: the window gets easier to use (2026-10-24)
 - The file chooser now opens in the folder of the path you already
   typed, and you can drag the setup file straight onto the first
