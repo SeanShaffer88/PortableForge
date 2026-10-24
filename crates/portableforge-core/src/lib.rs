@@ -25,6 +25,7 @@ pub mod rollback;
 pub mod session;
 pub mod settings;
 pub mod snapshot;
+pub mod timeutil;
 pub mod tools;
 pub mod validate;
 pub mod wsb;
