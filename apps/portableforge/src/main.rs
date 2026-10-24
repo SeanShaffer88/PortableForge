@@ -122,9 +122,15 @@ Commands (the same steps, for scripts and testing):
   diff <before.json> <after.json> --out <file.json>
   classify <install-diff.json> <runtime-diff.json>
   wsb --input <folder> --tools <folder> --exchange <folder> --out <file.wsb> [--online]
-  generate <details.json> --out <folder>
+  generate <details.json> --out <folder> [--review <review.json>]
+  build <details.json> --out <folder> [--session <session-folder>] [--review <review.json>] [--app-files <folder>] [--default-data <folder>]
+                                          Build the finished package: the session's notes (or a saved review) supply the accepted fixes, the harvested program files and starting settings are copied in, and the finished tree is checked
   validate <details.json> [--tree <folder>]
   session-new --id <name> --out <file.json>
+  request-snapshot <session-folder> <before|after-install|after-runtime>
+                                          Ask the helper in the test box to take one note now
+  launch <session-folder>               Start the test box for a prepared session folder
+  post-capture <session-folder>         Read a finished capture's notes into a review
   preflight                               Check whether this computer can run the safe test box
   tools [--cache <folder>]              List the pinned PortableApps.com builder tools and check any found in the cache folder
   specimens <runtime-diff.json>         List first-run files that would seed the package's starting settings
@@ -226,9 +232,92 @@ fn run_cli(args: &[String]) -> Result<(), String> {
         "generate" => {
             let meta = read_metadata(args.get(1))?;
             let out = need_flag(args, "--out")?;
-            let written = generate_tree(Path::new(&out), &meta, &[])?;
+            // A saved review supplies the accepted fixes; without one
+            // the package is generated with no fixes (and says so).
+            let accepted = match flag(args, "--review") {
+                Some(path) => read_review(&path)?.accepted(),
+                None => {
+                    println!("No review given — the starter rules carry no fixes.");
+                    Vec::new()
+                }
+            };
+            let written = generate_tree(Path::new(&out), &meta, &accepted)?;
             println!("Made {} files in {out}.", written.len());
             Ok(())
+        }
+        "build" => {
+            let meta = read_metadata(args.get(1))?;
+            let out = need_flag(args, "--out")?;
+            let mut accepted: Option<Vec<portableforge_core::classify::Classification>> = None;
+            let mut specimens: Vec<portableforge_core::orchestrate::Specimen> = Vec::new();
+            if let Some(path) = flag(args, "--review") {
+                accepted = Some(read_review(&path)?.accepted());
+            }
+            if let Some(dir) = flag(args, "--session") {
+                let root = std::path::PathBuf::from(&dir);
+                let layout = session_layout_for(&root);
+                let outcome = portableforge_core::orchestrate::post_capture(&layout)?;
+                specimens = outcome.specimens;
+                if accepted.is_none() {
+                    accepted = Some(outcome.review.accepted());
+                }
+                println!("{}", outcome.review.summary());
+            }
+            let accepted = accepted.unwrap_or_default();
+            let app_files = flag(args, "--app-files");
+            let default_data = flag(args, "--default-data");
+            let outcome = portableforge_core::build::build_package(
+                Path::new(&out),
+                &meta,
+                &accepted,
+                app_files.as_deref().map(Path::new),
+                default_data.as_deref().map(Path::new),
+            )?;
+            println!("{}", outcome.summary());
+            for s in &specimens {
+                println!("Starting-settings seed noted: Data\\{}", s.data_relative);
+            }
+            for issue in &outcome.issues {
+                println!(
+                    "{} {}: {}",
+                    if issue.error { "Problem" } else { "Note" },
+                    issue.field,
+                    issue.message
+                );
+            }
+            for skipped in &outcome.skipped {
+                println!("Skipped: {skipped}");
+            }
+            if outcome.has_errors() {
+                Err("There are problems to fix first — see above.".into())
+            } else {
+                Ok(())
+            }
+        }
+        "request-snapshot" => {
+            let dir = args
+                .get(1)
+                .ok_or("Give the session folder (the one containing exchange\\).")?;
+            let point_name = args
+                .get(2)
+                .ok_or("Say which note: before, after-install, or after-runtime.")?;
+            let point = portableforge_core::orchestrate::CapturePoint::from_name(point_name)
+                .ok_or("Say which note: before, after-install, or after-runtime.")?;
+            let layout = session_layout_for(&std::path::PathBuf::from(dir));
+            portableforge_core::orchestrate::request_snapshot(&layout, point)?;
+            println!(
+                "Asked the test box for the {} note. It appears as {} in the session's exchange folder.",
+                point.label(),
+                point.note_name()
+            );
+            Ok(())
+        }
+        "launch" => {
+            let dir = args
+                .get(1)
+                .ok_or("Give the session folder (the one containing box.wsb).")?;
+            let layout = session_layout_for(&std::path::PathBuf::from(dir));
+            launch_sandbox(&layout)
         }
         "validate" => {
             let meta = read_metadata(args.get(1))?;
@@ -320,15 +409,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 .get(1)
                 .ok_or("Give the session folder (the one containing exchange\\).")?;
             let root = std::path::PathBuf::from(dir);
-            let layout = portableforge_core::orchestrate::SessionLayout {
-                wsb_path: root.join("box.wsb"),
-                session_path: root.join("session.json"),
-                input: root.join("input"),
-                tools: root.join("tools"),
-                exchange: root.join("exchange"),
-                output: root.join("output"),
-                root,
-            };
+            let layout = session_layout_for(&root);
             let outcome = portableforge_core::orchestrate::post_capture(&layout)?;
             println!("{}", outcome.review.summary());
             println!(
@@ -353,6 +434,56 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         other => Err(format!("We do not know the command '{other}'.\n\n{HELP}")),
+    }
+}
+
+/// The session layout for a session *root* folder (the folder that
+/// contains `exchange\`, `box.wsb`, and the rest).
+pub fn session_layout_for(root: &Path) -> portableforge_core::orchestrate::SessionLayout {
+    portableforge_core::orchestrate::SessionLayout {
+        wsb_path: root.join("box.wsb"),
+        session_path: root.join("session.json"),
+        input: root.join("input"),
+        tools: root.join("tools"),
+        exchange: root.join("exchange"),
+        output: root.join("output"),
+        root: root.to_path_buf(),
+    }
+}
+
+fn read_review(path: &str) -> Result<portableforge_core::review::Review, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("We could not read {path}: {e}"))?;
+    portableforge_core::review::Review::from_json(&text)
+}
+
+/// Start the test box for a prepared session. Windows only — on any
+/// other system the command is printed and the caller told plainly
+/// that nothing was started.
+pub fn launch_sandbox(
+    layout: &portableforge_core::orchestrate::SessionLayout,
+) -> Result<(), String> {
+    let (program, arg) = portableforge_core::orchestrate::sandbox_launch_command(layout);
+    if !layout.wsb_path.is_file() {
+        return Err(format!(
+            "There is no test box settings file at {} — make the session first (the guided window does this on the safety step).",
+            layout.wsb_path.display()
+        ));
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new(&program)
+            .arg(&arg)
+            .spawn()
+            .map_err(|e| format!("The test box could not be started: {e}"))?;
+        println!("The test box is starting. Ask it for each note with request-snapshot: before, after-install, then after-runtime.");
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err(format!(
+            "The test box can only be started on Windows. On Windows this runs: {program} {arg}"
+        ))
     }
 }
 
