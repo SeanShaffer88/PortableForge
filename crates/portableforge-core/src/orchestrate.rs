@@ -459,6 +459,39 @@ pub fn request_snapshot(layout: &SessionLayout, point: CapturePoint) -> Result<(
     Ok(())
 }
 
+/// How long a snapshot request may go unanswered before the host
+/// warns that the test box may have been closed (seconds).
+pub const CAPTURE_WAIT_WARN_SECS: u64 = 120;
+
+/// A snapshot request the agent has not answered yet: which point,
+/// and how many seconds ago it was asked (the command file's mtime).
+/// `None` when nothing is outstanding. The `now` variant exists so
+/// the age can be judged in tests.
+pub fn pending_request_at(layout: &SessionLayout, now_secs: i64) -> Option<(CapturePoint, u64)> {
+    for point in CapturePoint::ALL {
+        let cmd = layout.exchange.join(point.command_name());
+        if let Ok(md) = std::fs::metadata(&cmd) {
+            let asked = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(now_secs);
+            return Some((*point, (now_secs - asked).max(0) as u64));
+        }
+    }
+    None
+}
+
+/// [`pending_request_at`] judged against the current time.
+pub fn pending_request(layout: &SessionLayout) -> Option<(CapturePoint, u64)> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    pending_request_at(layout, now)
+}
+
 /// Program details the install itself recorded (its uninstall
 /// registration): the honest source for pre-filling the naming step,
 /// instead of guessing from file names.
@@ -506,6 +539,38 @@ pub struct CaptureOutcome {
     pub review: crate::review::Review,
     pub specimens: Vec<Specimen>,
     pub hints: MetadataHints,
+    /// Names of Start Menu shortcuts the install added (without the
+    /// `.lnk`) — the program the person actually launches is usually
+    /// one of these, which makes them the honest candidates for the
+    /// main file name.
+    pub shortcut_candidates: Vec<String>,
+}
+
+/// Start Menu shortcut names added between two notes.
+fn shortcut_candidates(before: &Snapshot, after: &Snapshot) -> Vec<String> {
+    let before_paths: std::collections::BTreeSet<String> = before
+        .files
+        .iter()
+        .map(|f| f.path.to_ascii_lowercase())
+        .collect();
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for f in &after.files {
+        let lower = f.path.to_ascii_lowercase();
+        if before_paths.contains(&lower) {
+            continue;
+        }
+        if !lower.contains(r"\start menu\") || !lower.ends_with(".lnk") {
+            continue;
+        }
+        if let Some(file) = f.path.rsplit('\\').next() {
+            // `lower` already proved the name ends in `.lnk` (any case).
+            let stem = &file[..file.len().saturating_sub(4)];
+            if !stem.is_empty() {
+                names.insert(stem.to_string());
+            }
+        }
+    }
+    names.into_iter().collect()
 }
 
 /// Read the three notes the agent leaves in the exchange folder
@@ -622,6 +687,7 @@ pub fn post_capture(layout: &SessionLayout) -> Result<CaptureOutcome, String> {
         review,
         specimens,
         hints,
+        shortcut_candidates: shortcut_candidates(&before, &after_runtime),
     })
 }
 
@@ -698,6 +764,9 @@ mod tests {
         after_runtime.files.push(entry(
             r"C:\Users\WDAGUtilityAccount\AppData\Roaming\Acme\Widget\settings.ini",
         ));
+        after_runtime.files.push(entry(
+            r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Widget.lnk",
+        ));
         for (name, snap) in [
             ("before.json", &before),
             ("after-install.json", &after_install),
@@ -746,6 +815,8 @@ mod tests {
         assert!(layout.root.join("review.json").is_file());
         assert!(layout.root.join("install-diff.json").is_file());
         assert!(layout.root.join("specimens.json").is_file());
+        // The added Start Menu shortcut is a main-file candidate.
+        assert_eq!(outcome.shortcut_candidates, vec!["Widget".to_string()]);
         let missing = post_capture(&session_layout(&base, "nope"));
         assert!(missing.unwrap_err().contains("before.json"));
         let _ = std::fs::remove_dir_all(&base);
@@ -764,6 +835,16 @@ mod tests {
         );
         assert_eq!(CapturePoint::AfterRuntime.note_name(), "after-runtime.json");
         assert!(CapturePoint::from_name("bogus").is_none());
+        // The outstanding request reports its point and age.
+        let asked_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let (point, age) = pending_request_at(&layout, asked_at + 999).unwrap();
+        assert_eq!(point, CapturePoint::AfterInstall);
+        assert!(age >= 999, "age was {age}");
+        // And nothing is pending in a fresh session.
+        assert!(pending_request(&session_layout(&base, "fresh")).is_none());
         let _ = std::fs::remove_dir_all(&base);
     }
 
