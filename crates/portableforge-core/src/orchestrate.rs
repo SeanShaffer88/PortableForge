@@ -37,6 +37,9 @@ pub struct PreflightFacts {
     /// Whether at least one restore point exists (careful mode's way
     /// back). `None` = could not be checked.
     pub restore_point: Option<bool>,
+    /// Whether hardware virtualisation is switched on (the test box
+    /// cannot run without it). `None` = could not be checked.
+    pub virt_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +49,10 @@ pub struct PreflightCheck {
     pub ok: bool,
     /// Plain-language fix when not ok; empty when ok.
     pub fix: String,
+    /// The exact thing to copy for the fix (a Settings page name or a
+    /// command), when the fix has one — the wizard offers it behind a
+    /// "Copy the fix" button instead of making anyone retype it.
+    pub copy_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,13 +68,71 @@ impl PreflightReport {
     }
 }
 
+/// Whether a Windows edition (its `EditionID` value) includes
+/// Windows Sandbox: Pro, Enterprise, Education and their variants —
+/// including the IoT Enterprise family (`IoTEnterprise`,
+/// `IoTEnterpriseS`, `IoTEnterpriseK`), whose name does not start
+/// with the plain edition names.
+pub fn edition_supported(edition: &str) -> bool {
+    matches!(
+        edition,
+        "Professional"
+            | "Enterprise"
+            | "Education"
+            | "ProfessionalWorkstation"
+            | "ProfessionalEducation"
+            | "ServerRdsh"
+            | "EnterpriseS"
+            | "IoTEnterprise"
+            | "IoTEnterpriseS"
+            | "IoTEnterpriseK"
+    ) || edition.contains("Enterprise")
+        || edition.contains("Education")
+}
+
+/// The Sandbox feature's state from `dism /Get-FeatureInfo` output:
+/// `Some(true)` enabled, `Some(false)` disabled, `None` when the
+/// output does not say (the feature name was not found, or DISM
+/// could not answer).
+pub fn parse_dism_feature_state(text: &str) -> Option<bool> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("State") {
+            if line.ends_with("Enabled") {
+                return Some(true);
+            }
+            if line.ends_with("Disabled") {
+                return Some(false);
+            }
+        }
+    }
+    None
+}
+
+/// A plain warning when the helper in the box reports a different
+/// version than the host expects — the fix is to use the helper that
+/// sits beside PortableForge, never a stale copy.
+pub fn agent_version_warning(state: &Session, expected: &str) -> Option<String> {
+    match &state.agent_version {
+        Some(v) if v != expected => Some(format!(
+            "The helper in the test box is version {v}, but PortableForge is version {expected}. Use the helper program that sits beside PortableForge so the two match."
+        )),
+        _ => None,
+    }
+}
+
 pub fn evaluate_preflight(f: &PreflightFacts) -> PreflightReport {
     let mut checks = Vec::new();
-    let mut check = |label: &str, ok: bool, fix: &str| {
+    let mut check = |label: &str, ok: bool, fix: &str, copy: Option<&str>| {
         checks.push(PreflightCheck {
             label: label.to_string(),
             ok,
             fix: if ok { String::new() } else { fix.to_string() },
+            copy_text: if ok {
+                None
+            } else {
+                copy.map(|c| c.to_string())
+            },
         });
     };
 
@@ -75,21 +140,25 @@ pub fn evaluate_preflight(f: &PreflightFacts) -> PreflightReport {
         "This is a Windows computer",
         f.is_windows,
         "PortableForge makes portable Windows programs, so it needs to run on Windows.",
+        None,
     );
     check(
         "Windows is new enough",
         f.os_build >= 18342,
         "Update Windows: the safe test box needs Windows 10 build 18342 or newer, or Windows 11.",
+        Some("ms-settings:windowsupdate"),
     );
     check(
         "Your Windows edition includes the safe test box",
         f.edition_supported,
         "The test box comes with Windows Pro, Enterprise, or Education. On Windows Home, use Careful mode instead — we will explain it honestly before anything runs.",
+        None,
     );
     check(
         "The safe test box is installed",
         f.sandbox_exe_present,
         "Turn on 'Windows Sandbox' in Windows Features (we can show you exactly where), then restart the computer.",
+        Some("optionalfeatures"),
     );
     // Unknown facts are never dressed up as passes: an unmeasured check
     // does not block, but its label says it was not checked.
@@ -101,6 +170,17 @@ pub fn evaluate_preflight(f: &PreflightFacts) -> PreflightReport {
         },
         f.feature_enabled != Some(false),
         "Windows Sandbox is installed but switched off. Turn it on in Windows Features, then restart.",
+        Some("optionalfeatures"),
+    );
+    check(
+        if f.virt_enabled.is_none() {
+            "Virtualisation is switched on (could not be checked)"
+        } else {
+            "Virtualisation is switched on"
+        },
+        f.virt_enabled != Some(false),
+        "The test box needs virtualisation. It is switched on in the computer's start-up settings (look for VT-x, AMD-V, or SVM); Task Manager's Performance tab shows whether it is on.",
+        None,
     );
     // Careful mode's honesty anchor: without a restore point there is
     // no "put it all back" safety net, and the report must say so. The
@@ -114,6 +194,7 @@ pub fn evaluate_preflight(f: &PreflightFacts) -> PreflightReport {
         },
         f.restore_point != Some(false),
         "Careful mode runs on this computer and is put back afterwards — that needs a restore point. Turn on System Protection and make one in Settings > System > About > System protection, or use the safe test box instead.",
+        Some("SystemPropertiesProtection"),
     );
     check(
         if f.free_disk_mb.is_none() {
@@ -123,6 +204,7 @@ pub fn evaluate_preflight(f: &PreflightFacts) -> PreflightReport {
         },
         f.free_disk_mb.map(|mb| mb >= 2048).unwrap_or(true),
         "Free up at least 2 GB: the test box and the program being converted both need room.",
+        Some("ms-settings:storagesense"),
     );
     check(
         if f.free_ram_mb.is_none() {
@@ -132,12 +214,14 @@ pub fn evaluate_preflight(f: &PreflightFacts) -> PreflightReport {
         },
         f.free_ram_mb.map(|mb| mb >= 2048).unwrap_or(true),
         "Close some other programs first — the test box needs about 2 GB of memory to itself.",
+        None,
     );
 
     let sandbox_ok = f.is_windows
         && f.os_build >= 18342
         && f.edition_supported
         && f.sandbox_exe_present
+        && f.virt_enabled != Some(false)
         && f.feature_enabled != Some(false);
     let best_mode = if sandbox_ok {
         SandboxMode::WindowsSandbox
@@ -296,6 +380,16 @@ pub fn harvest_tree(source: &Path, dest: &Path) -> Result<HarvestReport, String>
                 continue;
             }
             let target = dest.join(&rel);
+            // Windows stops at 260 letters in a full path: a longer
+            // landing place cannot be copied to, so report it
+            // plainly instead of failing the whole harvest.
+            if target.to_string_lossy().chars().count() > 260 {
+                report.skipped.push(format!(
+                    "A file with a very long name could not be copied: {} — Windows allows 260 letters in a full path, and its place in the package would be longer. Shorten the name in the original, or build into a shorter folder.",
+                    rel.display()
+                ));
+                continue;
+            }
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("We could not make {}: {e}", parent.display()))?;
@@ -726,6 +820,7 @@ mod tests {
             free_disk_mb: Some(50_000),
             free_ram_mb: Some(8_000),
             restore_point: Some(true),
+            virt_enabled: Some(true),
         }
     }
 
@@ -775,6 +870,73 @@ mod tests {
             .find(|c| c.label.contains("could not be checked"))
             .unwrap();
         assert!(rp.ok);
+    }
+
+    #[test]
+    fn platform_helpers_cover_the_variants() {
+        // Editions: the IoT family and LTSC spellings count; Home does not.
+        assert!(edition_supported("IoTEnterprise"));
+        assert!(edition_supported("IoTEnterpriseS"));
+        assert!(edition_supported("IoTEnterpriseK"));
+        assert!(edition_supported("EnterpriseS"));
+        assert!(edition_supported("ProfessionalEducation"));
+        assert!(!edition_supported("Core"));
+        assert!(!edition_supported("CoreSingleLanguage"));
+        // DISM output parsing.
+        assert_eq!(
+            parse_dism_feature_state("Feature Name : X\nState : Enabled\n"),
+            Some(true)
+        );
+        assert_eq!(parse_dism_feature_state("State : Disabled"), Some(false));
+        assert_eq!(parse_dism_feature_state("Error: 0x800f080c"), None);
+        // Version handshake.
+        let mut s = Session::new("x", Mode::WindowsSandbox);
+        assert!(agent_version_warning(&s, "0.1.0").is_none());
+        s.agent_version = Some("0.0.9".into());
+        let w = agent_version_warning(&s, "0.1.0").unwrap();
+        assert!(w.contains("0.0.9") && w.contains("0.1.0"));
+        s.agent_version = Some("0.1.0".into());
+        assert!(agent_version_warning(&s, "0.1.0").is_none());
+        // Virtualisation off blocks the sandbox honestly.
+        let mut f = facts_good();
+        f.virt_enabled = Some(false);
+        let r = evaluate_preflight(&f);
+        assert!(!r.sandbox_ready());
+        assert!(r
+            .checks
+            .iter()
+            .any(|c| c.label == "Virtualisation is switched on" && !c.ok));
+        // A failed check with a copyable fix carries the text only then.
+        assert!(r
+            .checks
+            .iter()
+            .filter(|c| !c.ok)
+            .all(|c| c.copy_text.is_none() || !c.fix.is_empty()));
+    }
+
+    #[test]
+    fn harvest_reports_very_long_paths_instead_of_failing() {
+        let base = std::env::temp_dir().join(format!("pf-long-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("ok.txt"), b"a").unwrap();
+        std::fs::write(src.join("long.txt"), b"b").unwrap();
+        // A destination deep enough that long.txt's landing path
+        // passes 260 letters while ok.txt's stays under.
+        let shallow = base.join("d");
+        let deep = (0..8).fold(base.clone(), |p, _| {
+            p.join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        });
+        let r1 = harvest_tree(&src, &shallow).unwrap();
+        assert_eq!(r1.files_copied, 2);
+        let r2 = harvest_tree(&src, &deep).unwrap();
+        assert!(r2.files_copied < 2);
+        assert!(r2
+            .skipped
+            .iter()
+            .any(|s| s.contains("very long name") && s.contains("260")));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
