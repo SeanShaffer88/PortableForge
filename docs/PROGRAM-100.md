@@ -67,17 +67,31 @@ windows-msvc; **65/65 tests**; off-Windows smoke green (note sequence
 with cache, pending-request warning, Mode B packet, `watch` settling
 at change+quiet with both files in the note).
 
-## Slice 4 — Classification & review depth (items 31–40)
-- [ ] 31. Findings de-duplicated across install + runtime passes for every finding type
-- [ ] 32. Review shows red flags first, then fixes by confidence
-- [ ] 33. Single files at the profile root classify as FilesMove candidates
-- [ ] 34. Installed fonts classify as a distinct red flag
-- [ ] 35. COM/ActiveX registrations (HKCR\CLSID) classify distinctly from file associations
-- [ ] 36. Scheduled-task and firewall-rule style service names classify as red flags
-- [ ] 37. Review decisions export/import as a file from the wizard
-- [ ] 38. `review` CLI command: session folder → review.json, printable plain cards
-- [ ] 39. Noise list grows: Delivery Optimization cache, Windows Search index stores (flagged, never dropped)
-- [ ] 40. Every classification's `why` carries its evidence path, audited by test
+## Slice 4 — Classification & review depth (items 31–40) — DONE 2026-10-24
+- [x] 31. Findings de-duplicated across install + runtime passes for every finding type
+- [x] 32. Review shows red flags first, then fixes by confidence
+- [x] 33. Single files at the profile root classify as FilesMove candidates
+- [x] 34. Installed fonts classify as a distinct red flag
+- [x] 35. COM/ActiveX registrations (HKCR\CLSID) classify distinctly from file associations
+- [x] 36. Scheduled-task and firewall-rule registrations classify as distinct red flags
+- [x] 37. Review decisions export/import as a file from the wizard
+- [x] 38. `review` CLI command: session folder → review.json, printable plain cards
+- [x] 39. Noise list grows: Delivery Optimization cache, Windows Search index stores (flagged, never dropped)
+- [x] 40. Every classification's `why` carries its evidence path, audited by test
+
+Slice 4 notes: the de-duplication is one final pass over the
+classifier output (plus an up-front service merge), so a finding seen
+by both passes — or a service listed twice — reaches the review
+exactly once. Ordering lives in `Review::from_classifications`, so
+the wizard and the new `review` CLI agree. Item 36 landed as
+registry-registration detection (the Task Scheduler store and the
+firewall policy store), which is where those commitments actually
+appear in a capture. COM registrations under HKLM\SOFTWARE\Classes
+are checked before the generic HKLM branch so they keep their own
+kind. The evidence audit (item 40) builds one finding of every kind
+and asserts each `why` names the path, key, or service it was decided
+from. Gate: fmt clean; clippy clean host + windows-msvc; **70/70
+tests**; `review` CLI smoke green on a real capture session.
 
 ## Slice 5 — Build & package depth (items 41–50)
 - [ ] 41. PE architecture detection (x86/x64/ARM64) for the main executable, shown in the build report
