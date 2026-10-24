@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added — 100-enhancement programme, Slice 8: the safety check learns the computer (2026-10-24)
+- The opening safety check now measures instead of guessing: real
+  free space and memory, whether virtualisation is switched on,
+  whether the safe test box feature is actually on (asked from
+  Windows itself), and the IoT Enterprise editions are recognised by
+  name. Anything that still cannot be checked says so, as before.
+- Fixes you can copy: when a check fails and the fix is an exact
+  place or command, the wizard offers a "Copy the fix" button and
+  the command line prints it, so nobody has to retype
+  `SystemPropertiesProtection` by hand.
+- The helper program now introduces itself: if the helper in the
+  test box is a different version than PortableForge, both the
+  wizard and `agent-state` say so plainly. Run folders are named
+  with the time they started, so starting the same conversion twice
+  never collides. Files whose names are too long for Windows to copy
+  (over the 260-letter path limit) are reported by name instead of
+  failing the whole gathering. And every stamp PortableForge writes
+  — run records, run logs, build reports — is now in UTC, so a log
+  read later never needs timezone guesswork.
+
 ### Added — 100-enhancement programme, Slice 7: the leak test becomes a loop (2026-10-24)
 - The leak test is now a proper round trip. `leak-packet` packs the
   finished copy, the helper, and plain instructions into one folder;
