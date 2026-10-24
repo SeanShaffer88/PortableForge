@@ -826,6 +826,58 @@ impl eframe::App for WizardApp {
                             ui.add_space(4.0);
                         }
                         self.review.items = items;
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button("Save these choices to a file")
+                                .on_hover_text("Keep the choices you made here in a file, so they can be used again or sent with a problem report.")
+                                .clicked()
+                            {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .set_title("Save these choices")
+                                    .set_file_name("review.json")
+                                    .add_filter("Choices file", &["json"])
+                                    .save_file()
+                                {
+                                    match std::fs::write(&path, self.review.to_json()) {
+                                        Ok(()) => self.log.push(format!(
+                                            "Choices saved to {}",
+                                            path.display()
+                                        )),
+                                        Err(e) => self
+                                            .log
+                                            .push(format!("Saving the choices failed: {e}")),
+                                    }
+                                }
+                            }
+                            if ui
+                                .button("Load choices from a file")
+                                .on_hover_text("Bring back choices saved earlier and apply them to this list.")
+                                .clicked()
+                            {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .set_title("Load choices")
+                                    .add_filter("Choices file", &["json"])
+                                    .pick_file()
+                                {
+                                    match std::fs::read_to_string(&path)
+                                        .map_err(|e| e.to_string())
+                                        .and_then(|text| Review::from_json(&text))
+                                    {
+                                        Ok(review) => {
+                                            self.review = review;
+                                            self.log.push(
+                                                "Choices loaded — the list above now uses them."
+                                                    .to_string(),
+                                            );
+                                        }
+                                        Err(e) => self.log.push(format!(
+                                            "That file could not be read as a choices file: {e}"
+                                        )),
+                                    }
+                                }
+                            }
+                        });
                     }
                 }
                 "pick" => {
