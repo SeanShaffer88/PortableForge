@@ -69,6 +69,11 @@ pub struct Session {
     pub log: Vec<String>,
     /// Heartbeat from the in-sandbox agent (unix seconds), if running.
     pub agent_heartbeat_secs: Option<i64>,
+    /// What the agent is doing right now, in its own plain words
+    /// (e.g. "Looking through C:\Program Files — 1,250 files checked
+    /// so far"), so a long scan never looks like a hang.
+    #[serde(default)]
+    pub agent_action: Option<String>,
     /// The sharing answer id once chosen (`mine` / `free` / `unsure`).
     pub sharing_answer: Option<String>,
 }
@@ -84,6 +89,7 @@ impl Session {
             snapshots_done: Vec::new(),
             log: Vec::new(),
             agent_heartbeat_secs: None,
+            agent_action: None,
             sharing_answer: None,
         }
     }
@@ -113,6 +119,15 @@ impl Session {
     }
 }
 
+/// Write a file in one move — write to a neighbour, then rename over
+/// the target — so a reader (the host watching `state.json`, or
+/// reading a finished note) never sees a half-written file.
+pub fn write_file_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +138,33 @@ mod tests {
         assert_eq!(Phase::Done.step().id, "done");
         assert_eq!(Phase::Pick.flow_percent(), 0.0);
         assert!(Phase::Done.flow_percent() > 90.0);
+    }
+
+    #[test]
+    fn atomic_write_lands_whole_and_action_round_trips() {
+        let dir = std::env::temp_dir().join(format!("pf-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        write_file_atomic(&path, "{\"a\":1}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+        assert!(!dir.join("state.tmp").exists());
+        let mut s = Session::new("x", SandboxMode::WindowsSandbox);
+        s.agent_action = Some("Looking through folders".into());
+        let back = Session::from_json(&s.to_json()).unwrap();
+        assert_eq!(
+            back.agent_action.as_deref(),
+            Some("Looking through folders")
+        );
+        // Older state files without the field still read.
+        let old = s
+            .to_json()
+            .lines()
+            .filter(|l| !l.contains("agent_action"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(Session::from_json(&old).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
