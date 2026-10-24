@@ -23,17 +23,25 @@ Status key: `[ ]` pending · `[~]` in progress · `[x]` done (gated + published)
 
 Slice 1 gate: fmt clean; clippy clean on host and `x86_64-pc-windows-msvc`; **53/53 tests**; off-Windows smoke re-run green (post-capture artefacts, `build --json`, provenance files, `agent-state`).
 
-## Slice 2 — Wizard usability (items 11–20)
-- [ ] 11. File picker opens in the folder of the path already typed
-- [ ] 12. Drag-and-drop a setup file onto the pick step
-- [ ] 13. Pick step shows the chosen file's size and a plain summary
-- [ ] 14. Recent setup files (last 5) persisted and offered on the pick step
-- [ ] 15. Wizard progress autosaved; reopening offers to resume the run
-- [ ] 16. Enter = Continue, Escape = Back, on every step
-- [ ] 17. Text-size option for the wizard (persisted), for readability
-- [ ] 18. Name step pre-fills from capture metadata hints (item 4)
-- [ ] 19. Name step shows inline validation (version shape, main-file name) as you type
-- [ ] 20. Buttons to open the session and output folders on the Done step
+## Slice 2 — Wizard usability (items 11–20) — DONE 2026-10-24
+- [x] 11. File picker opens in the folder of the path already typed
+- [x] 12. Drag-and-drop a setup file onto the pick step
+- [x] 13. Pick step shows the chosen file's size and a plain summary
+- [x] 14. Recent setup files (last 5) persisted and offered on the pick step
+- [x] 15. Wizard progress autosaved; reopening offers to resume the run
+- [x] 16. Enter = Continue, Escape = Back, on every step
+- [x] 17. Text-size option for the wizard (persisted), for readability
+- [x] 18. Name step pre-fills from capture metadata hints (item 4)
+- [x] 19. Name step shows inline validation (version shape, main-file name) as you type
+- [x] 20. Buttons to open the session and output folders on the Done step
+
+Slice 2 notes: the wizard's memory lives in one settings file
+(`<home>\PortableForge\wizard-settings.json`, new core `settings`
+module — recents, text size, run draft; written atomically). Keyboard
+shortcuts never fire while typing in a box. Name-step pre-fill happens
+once per capture and only into fields the person left empty. Gate:
+fmt clean; clippy clean host + windows-msvc; **60/60 tests** (58 core
++ 2 wizard). Windows GUI runtime stays Unverified until SEAN's pass.
 
 ## Slice 3 — Capture & agent depth (items 21–30)
 - [ ] 21. Snapshot scan skips unreadable files and reports the skip count instead of failing the whole note
