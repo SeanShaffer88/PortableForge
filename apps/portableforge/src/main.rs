@@ -82,13 +82,40 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
         let edition = reg_value("EditionID").unwrap_or_default();
-        let edition_supported = matches!(
-            edition.as_str(),
-            "Professional" | "Enterprise" | "Education" | "ProfessionalWorkstation" | "ServerRdsh"
-        ) || edition.contains("Enterprise")
-            || edition.contains("Education");
+        // The edition logic lives in the core (it knows the IoT
+        // Enterprise spellings); when EditionID is missing, the
+        // product name is the fallback witness.
+        let edition_supported = portableforge_core::orchestrate::edition_supported(&edition)
+            || reg_value("ProductName")
+                .map(|p| {
+                    p.contains("IoT Enterprise")
+                        || p.contains("Professional")
+                        || p.contains("Enterprise")
+                        || p.contains("Education")
+                })
+                .unwrap_or(false);
         let sandbox_exe_present =
             std::path::Path::new(r"C:\Windows\System32\WindowsSandbox.exe").exists();
+        // The Sandbox feature's real state, asked from DISM itself
+        // (needs elevation; a refused run stays "could not be checked").
+        let feature_enabled = std::process::Command::new("dism.exe")
+            .args([
+                "/online",
+                "/Get-FeatureInfo",
+                "/FeatureName:Containers-DisposableClientVM",
+                "/quiet",
+            ])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| {
+                portableforge_core::orchestrate::parse_dism_feature_state(&String::from_utf8_lossy(
+                    &out.stdout,
+                ))
+            });
+        // Virtualisation + real free disk/memory, asked from the
+        // operating system directly (no new dependencies).
+        let (virt_enabled, free_disk_mb, free_ram_mb) = windows_system_facts();
         // Restore-point presence for careful mode's honesty check:
         // vssadmin lists shadow copies; no listing at all means none
         // exist, and a failed run (needs elevation) stays "unknown".
@@ -108,10 +135,11 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
             os_build: build,
             edition_supported,
             sandbox_exe_present,
-            feature_enabled: None,
-            free_disk_mb: None,
-            free_ram_mb: None,
+            feature_enabled,
+            free_disk_mb,
+            free_ram_mb,
             restore_point,
+            virt_enabled,
         }
     }
     #[cfg(not(windows))]
@@ -125,8 +153,83 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
             free_disk_mb: None,
             free_ram_mb: None,
             restore_point: None,
+            virt_enabled: None,
         }
     }
+}
+
+/// Virtualisation state, free disk and free memory, straight from
+/// the operating system (kernel32, no new dependencies). Any figure
+/// that cannot be read stays `None` — never a guess.
+#[cfg(windows)]
+fn windows_system_facts() -> (Option<bool>, Option<u64>, Option<u64>) {
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+    extern "system" {
+        fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> i32;
+        fn GetDiskFreeSpaceExW(
+            dir: *const u16,
+            free_available: *mut u64,
+            total: *mut u64,
+            total_free: *mut u64,
+        ) -> i32;
+        fn IsProcessorFeaturePresent(feature: i32) -> i32;
+    }
+    // PF_VIRT_FIRMWARE_ENABLED = 21 (documented Win32 constant).
+    let virt = unsafe { IsProcessorFeaturePresent(21) };
+    let virt_enabled = Some(virt != 0);
+    let free_ram_mb = unsafe {
+        let mut status = MemoryStatusEx {
+            length: 64,
+            memory_load: 0,
+            total_phys: 0,
+            avail_phys: 0,
+            total_page_file: 0,
+            avail_page_file: 0,
+            total_virtual: 0,
+            avail_virtual: 0,
+            avail_extended_virtual: 0,
+        };
+        if GlobalMemoryStatusEx(&mut status) != 0 {
+            Some(status.avail_phys / (1024 * 1024))
+        } else {
+            None
+        }
+    };
+    let free_disk_mb = unsafe {
+        // The volume the user's profile lives on.
+        let profile = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
+        let root: Vec<u16> = profile
+            .chars()
+            .take(3)
+            .collect::<String>()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let (mut free_available, mut total, mut total_free) = (0u64, 0u64, 0u64);
+        if GetDiskFreeSpaceExW(
+            root.as_ptr(),
+            &mut free_available,
+            &mut total,
+            &mut total_free,
+        ) != 0
+        {
+            Some(free_available / (1024 * 1024))
+        } else {
+            None
+        }
+    };
+    (virt_enabled, free_disk_mb, free_ram_mb)
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {
@@ -594,6 +697,12 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 None => println!("The helper in the test box has not reported in yet."),
                 Some(s) => {
                     println!("Step: {:?}", s.phase);
+                    if let Some(w) = portableforge_core::orchestrate::agent_version_warning(
+                        s,
+                        env!("CARGO_PKG_VERSION"),
+                    ) {
+                        println!("{w}");
+                    }
                     if let Some(action) = &s.agent_action {
                         println!("Doing now: {action}");
                     }
@@ -768,7 +877,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             if args.iter().any(|a| a == "--json") {
                 let value = serde_json::json!({
                     "checks": report.checks.iter().map(|c| serde_json::json!({
-                        "label": c.label, "ok": c.ok, "fix": c.fix
+                        "label": c.label, "ok": c.ok, "fix": c.fix, "copy_text": c.copy_text
                     })).collect::<Vec<_>>(),
                     "best_mode": { "name": name, "honesty": honesty },
                 });
@@ -782,6 +891,9 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 println!("{} {}", if c.ok { "OK  " } else { "MISS" }, c.label);
                 if !c.fix.is_empty() {
                     println!("     Fix: {}", c.fix);
+                }
+                if let Some(copy) = &c.copy_text {
+                    println!("     Copy this: {copy}");
                 }
             }
             println!("Best available way: {name} — {honesty}");
@@ -1328,7 +1440,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             if args.iter().any(|a| a == "--json") {
                 let value = serde_json::json!({
                     "checks": report.checks.iter().map(|c| serde_json::json!({
-                        "label": c.label, "ok": c.ok, "fix": c.fix
+                        "label": c.label, "ok": c.ok, "fix": c.fix, "copy_text": c.copy_text
                     })).collect::<Vec<_>>(),
                     "best_mode": { "name": mode_name, "honesty": honesty },
                     "tools": tools_json,
