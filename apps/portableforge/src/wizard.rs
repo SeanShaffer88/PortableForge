@@ -30,6 +30,7 @@ pub struct WizardApp {
     layout: Option<SessionLayout>,
     build_summary: Option<String>,
     built_dir: Option<std::path::PathBuf>,
+    icon_path: String,
     log: Vec<String>,
     // The wizard's own memory (recent files, text size, the
     // unfinished-run draft) and the bookkeeping for saving it.
@@ -67,6 +68,7 @@ impl Default for WizardApp {
             layout: None,
             build_summary: None,
             built_dir: None,
+            icon_path: String::new(),
             log: vec!["Welcome to PortableForge.".to_string()],
             settings,
             settings_path,
@@ -421,6 +423,7 @@ impl WizardApp {
             display_version: self.package_version.trim().to_string(),
             requires_admin: self.review.has_red_flags(),
             main_exe: self.main_exe.trim().to_string(),
+            main_exe_64bit: None,
             distribution,
         };
         let out_root = match &self.layout {
@@ -432,12 +435,19 @@ impl WizardApp {
             .as_ref()
             .map(|l| l.exchange.join("harvest"))
             .filter(|p| p.is_dir());
+        let icon = if self.icon_path.trim().is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(self.icon_path.trim()))
+        };
         let outcome = portableforge_core::build::build_package(
             &out_root,
             &meta,
             &self.review.accepted(),
             harvest.as_deref(),
             None,
+            icon.as_deref(),
+            false,
         );
         match outcome {
             Ok(outcome) => {
@@ -1098,6 +1108,34 @@ impl eframe::App for WizardApp {
                     ui.label("A short description");
                     if ui.text_edit_multiline(&mut self.description).changed() {
                         self.mark_dirty();
+                    }
+                    ui.label("Program picture (not required — a picture file ending in .ico)");
+                    ui.horizontal(|ui| {
+                        if ui.text_edit_singleline(&mut self.icon_path).changed() {
+                            self.mark_dirty();
+                        }
+                        if ui.button("Browse…").clicked() {
+                            let mut dialog = rfd::FileDialog::new()
+                                .set_title("Pick the program's picture file")
+                                .add_filter("Picture files", &["ico"]);
+                            if let Some(dir) = picker_start_dir(&self.icon_path) {
+                                dialog = dialog.set_directory(dir);
+                            }
+                            if let Some(path) = dialog.pick_file() {
+                                self.icon_path = path.display().to_string();
+                                self.mark_dirty();
+                            }
+                        }
+                    });
+                    if !self.icon_path.trim().is_empty()
+                        && !std::path::Path::new(self.icon_path.trim()).is_file()
+                    {
+                        ui.label(
+                            egui::RichText::new(
+                                "That picture file can't be found — check the name, or leave it blank.",
+                            )
+                            .color(color(guide::theme::ACCENT_RED)),
+                        );
                     }
                 }
                 "sharing" => {
