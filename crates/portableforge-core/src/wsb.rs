@@ -183,6 +183,24 @@ mod tests {
     }
 
     #[test]
+    fn unicode_and_space_paths_round_trip() {
+        // Item 79 fixture: accented names and spaces survive the .wsb.
+        let mut c = cfg();
+        c.input_dir = "C:\\Users\\José Núñez\\Mis Apps\\Setups & Más".into();
+        c.clipboard = true;
+        c.memory_mb = 8192;
+        let wsb = c.to_wsb();
+        assert!(wsb.contains("José Núñez"));
+        assert!(wsb.contains("Setups &amp; Más"));
+        assert!(wsb.contains("<ClipboardRedirection>Enable</ClipboardRedirection>"));
+        assert!(wsb.contains("<MemoryInMB>8192</MemoryInMB>"));
+        // And the defaults stay safe: clipboard off unless asked.
+        assert!(cfg()
+            .to_wsb()
+            .contains("<ClipboardRedirection>Disable</ClipboardRedirection>"));
+    }
+
+    #[test]
     fn host_snapshot_mode_never_claims_isolation() {
         assert!(!SandboxMode::HostSnapshot.is_truly_isolated());
         let (_, label) = SandboxMode::HostSnapshot.describe();
