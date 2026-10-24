@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+### Added — the flow is now wired end to end (2026-10-24)
+- **Build pipeline (new core `build` module):** one call turns the
+  package details, the review's accepted fixes, the harvested program
+  files, and the first-run seed files into a finished, validated
+  package tree. Before this, generation was called with an empty fix
+  list, so fixes accepted in review never reached the package.
+- **The helper in the test box now takes the notes itself:** the host
+  asks (a small file in the shared folder) and the helper answers with
+  a full note — before, after installing, after trying out — scanning
+  the places programs and settings actually land and, on Windows,
+  capturing the remembered settings too. After the last note it copies
+  the program's own folder out for the build step and signals that the
+  capture is finished. New helper command `capture` takes one note on
+  demand (finishing test, or a test computer you run yourself).
+- **The guided window drives the whole flow:** "Start the test box"
+  makes the work folder, copies in the setup file and the helper, asks
+  for the clean note, and starts the box; "Check on the test box"
+  follows the helper and fills in the "What it left behind" list by
+  itself; the naming step now collects who makes the program, its main
+  file name, and its version; "I am not sure" asks for the maker's
+  download address and fingerprint; and the build step has a
+  "Build my portable copy now" button that makes and checks the
+  package in the session's output folder.
+- **New commands for scripts:** `build` (session notes or a saved
+  review + details → finished, checked package), `launch`,
+  `request-snapshot`; `generate` now accepts `--review` so its
+  starter rules carry the accepted fixes.
+
 ### Verified
 - The full check suite (formatting, lint, all 45 tests, and a release
   build) passes on a real Windows runner for every push. This proves
