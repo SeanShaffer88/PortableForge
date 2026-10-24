@@ -123,12 +123,13 @@ Commands (the same steps, for scripts and testing):
   classify <install-diff.json> <runtime-diff.json>
   wsb --input <folder> --tools <folder> --exchange <folder> --out <file.wsb> [--online]
   generate <details.json> --out <folder> [--review <review.json>]
-  build <details.json> --out <folder> [--session <session-folder>] [--review <review.json>] [--app-files <folder>] [--default-data <folder>]
+  build <details.json> --out <folder> [--session <session-folder>] [--review <review.json>] [--app-files <folder>] [--default-data <folder>] [--json]
                                           Build the finished package: the session's notes (or a saved review) supply the accepted fixes, the harvested program files and starting settings are copied in, and the finished tree is checked
   validate <details.json> [--tree <folder>]
   session-new --id <name> --out <file.json>
   request-snapshot <session-folder> <before|after-install|after-runtime>
                                           Ask the helper in the test box to take one note now
+  agent-state <session-folder>          Show what the helper in the test box is doing and what should happen next
   launch <session-folder>               Start the test box for a prepared session folder
   post-capture <session-folder>         Read a finished capture's notes into a review
   preflight                               Check whether this computer can run the safe test box
@@ -246,6 +247,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "build" => {
+            let json = args.iter().any(|a| a == "--json");
             let meta = read_metadata(args.get(1))?;
             let out = need_flag(args, "--out")?;
             let mut accepted: Option<Vec<portableforge_core::classify::Classification>> = None;
@@ -261,7 +263,9 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 if accepted.is_none() {
                     accepted = Some(outcome.review.accepted());
                 }
-                println!("{}", outcome.review.summary());
+                if !json {
+                    println!("{}", outcome.review.summary());
+                }
             }
             let accepted = accepted.unwrap_or_default();
             let app_files = flag(args, "--app-files");
@@ -273,6 +277,30 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 app_files.as_deref().map(Path::new),
                 default_data.as_deref().map(Path::new),
             )?;
+            if json {
+                let value = serde_json::json!({
+                    "summary": outcome.summary(),
+                    "written": outcome.written,
+                    "app_files_copied": outcome.app_files_copied,
+                    "app_bytes_copied": outcome.app_bytes_copied,
+                    "default_data_files_copied": outcome.default_data_files_copied,
+                    "skipped": outcome.skipped,
+                    "specimens": specimens.iter().map(|s| s.data_relative.clone()).collect::<Vec<_>>(),
+                    "issues": outcome.issues.iter().map(|i| serde_json::json!({
+                        "error": i.error, "field": i.field, "message": i.message
+                    })).collect::<Vec<_>>(),
+                    "valid": !outcome.has_errors(),
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value).unwrap_or_default()
+                );
+                return if outcome.has_errors() {
+                    Err("There are problems to fix first — see above.".into())
+                } else {
+                    Ok(())
+                };
+            }
             println!("{}", outcome.summary());
             for s in &specimens {
                 println!("Starting-settings seed noted: Data\\{}", s.data_relative);
@@ -310,6 +338,48 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 point.label(),
                 point.note_name()
             );
+            Ok(())
+        }
+        "agent-state" => {
+            let dir = args
+                .get(1)
+                .ok_or("Give the session folder (the one containing exchange\\).")?;
+            let layout = session_layout_for(&std::path::PathBuf::from(dir));
+            let state = portableforge_core::orchestrate::read_agent_state(&layout);
+            match &state {
+                None => println!("The helper in the test box has not reported in yet."),
+                Some(s) => {
+                    println!("Step: {:?}", s.phase);
+                    if let Some(hb) = s.agent_heartbeat_secs {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(hb);
+                        let age = now - hb;
+                        println!("Last sign of life: {age} seconds ago.");
+                        if age > 60
+                            && portableforge_core::orchestrate::next_host_action(Some(s))
+                                == portableforge_core::orchestrate::HostAction::Wait
+                        {
+                            println!("That is a long silence — the test box may have been closed.");
+                        }
+                    }
+                    for line in &s.log {
+                        println!("  {line}");
+                    }
+                }
+            }
+            match portableforge_core::orchestrate::next_host_action(state.as_ref()) {
+                portableforge_core::orchestrate::HostAction::Wait => {
+                    println!("Next: wait for the helper to finish.")
+                }
+                portableforge_core::orchestrate::HostAction::Harvest => {
+                    println!("Next: the capture is finished — run post-capture or build.")
+                }
+                portableforge_core::orchestrate::HostAction::Failed(line) => {
+                    println!("Next: the helper reported a problem: {line}")
+                }
+            }
             Ok(())
         }
         "launch" => {
@@ -421,6 +491,15 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             );
             for s in &outcome.specimens {
                 println!("Starting-settings seed: Data\\{}", s.data_relative);
+            }
+            if let Some(name) = &outcome.hints.display_name {
+                println!("Program's own name tag: {name}");
+            }
+            if let Some(pub_) = &outcome.hints.publisher {
+                println!("Program's own maker tag: {pub_}");
+            }
+            if let Some(ver) = &outcome.hints.display_version {
+                println!("Program's own version tag: {ver}");
             }
             Ok(())
         }
