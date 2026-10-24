@@ -10,6 +10,7 @@
 //! The GUI and the agent binaries render state and collect intent only;
 //! no business rules live in them.
 
+pub mod build;
 pub mod classify;
 pub mod diff;
 pub mod guide;
