@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added — 100-enhancement programme, Slice 7: the leak test becomes a loop (2026-10-24)
+- The leak test is now a proper round trip. `leak-packet` packs the
+  finished copy, the helper, and plain instructions into one folder;
+  the two notes it produces — leak-before and leak-after — are judged
+  by the new `verify` command (build, then verdict) and by a new
+  button on the wizard's test step. Leak reports group what was left
+  behind — files, remembered settings, background helpers — each
+  with a count and a one-line fix.
+- Careful mode can now actually put things back: `rollback` rehearses
+  the undo plan by default and only touches the computer with
+  `--apply`, and even then it restores only what can be restored
+  safely and names the rest as needing a person. The safety check
+  also looks for a restore point and says so honestly when there is
+  none or it cannot be checked.
+- The test box is yours to size: memory (2, 4, or 8 GB), internet,
+  and clipboard sharing are chosen on the wizard's clean-computer
+  step and written into the box settings — internet and clipboard
+  still default to off. Old run folders can be listed and cleared
+  with `sessions-cleanup`.
+
 ### Added — 100-enhancement programme, Slice 6: the command line grows up (2026-10-24)
 - For scripts and careful checking: `preflight`, `post-capture`, and
   `leaks` can all answer in JSON (`--json`), and `leaks --out` saves
