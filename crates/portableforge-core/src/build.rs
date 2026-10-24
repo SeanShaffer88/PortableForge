@@ -421,6 +421,7 @@ pub fn build_package(
     }
     let report = serde_json::json!({
         "app_id": meta.app_id,
+        "built_at_utc": crate::timeutil::now_iso(),
         "name": meta.name,
         "package_version": meta.package_version,
         "written": outcome.written,
@@ -593,6 +594,37 @@ mod tests {
             confidence: 0.9,
             why: String::new(),
         }
+    }
+
+    #[test]
+    fn build_works_in_a_folder_with_spaces_and_unicode() {
+        // Item 79 fixture: the whole build round-trips through a
+        // package folder whose name has spaces and accented letters.
+        let base = std::env::temp_dir().join(format!("pf-uni-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let app_src = base.join("harvest ü");
+        std::fs::create_dir_all(&app_src).unwrap();
+        std::fs::write(app_src.join("widget.exe"), b"MZfake").unwrap();
+        let meta = crate::paf::tests::sample(Distribution::Bundled {
+            redistribution_asserted: true,
+        });
+        let root = base.join("Mi App Portátil");
+        let outcome = build_package(&root, &meta, &[], Some(&app_src), None, None, false).unwrap();
+        assert!(!outcome.has_errors());
+        assert!(root
+            .join("App")
+            .join("AppInfo")
+            .join("appinfo.ini")
+            .is_file());
+        let report: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("Other").join("Source").join("build-report.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        // The build report carries a UTC stamp (item 80).
+        let built_at = report["built_at_utc"].as_str().unwrap();
+        assert!(built_at.ends_with('Z') && built_at.contains('T'));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
