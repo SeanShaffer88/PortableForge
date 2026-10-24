@@ -30,6 +30,13 @@
   `request-snapshot`; `generate` now accepts `--review` so its
   starter rules carry the accepted fixes.
 
+### Fixed
+- **The setup-file box now has a Browse… button** (field report from
+  the first on-machine run: the window opens and runs, but the first
+  step asked for a typed path with no way to pick the file). It opens
+  the computer's own file chooser, filtered to setup files
+  (.exe/.msi/.zip); typing or pasting the path still works too.
+
 ### Verified
 - The full check suite (formatting, lint, all 45 tests, and a release
   build) passes on a real Windows runner for every push. This proves
