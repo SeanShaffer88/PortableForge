@@ -1370,6 +1370,98 @@ mod tests {
         assert_eq!(format_size(1_300_000_000), "1.3 GB");
     }
 
+    /// Item 83: the jargon guard covers the wizard's own strings.
+    /// Extract every string literal that looks like a sentence (it
+    /// contains a space) from this file — outside comments and
+    /// outside this test — and check it against the same banned list
+    /// as the guide's primary wording. A tiny allowlist names the
+    /// literals that are data, not wording (file paths, format
+    /// internals).
+    #[test]
+    fn wizard_strings_stay_plain() {
+        let src = include_str!("wizard.rs");
+        // Cut this test itself out (it names the banned list logic).
+        let src = src.split("fn wizard_strings_stay_plain").next().unwrap();
+        // Strip // line comments.
+        let mut cleaned = String::new();
+        for line in src.lines() {
+            let cut = line.find("//").map(|i| &line[..i]).unwrap_or(line);
+            cleaned.push_str(cut);
+            cleaned.push('\n');
+        }
+        // Extract string literals (plain and raw).
+        let bytes = cleaned.as_bytes();
+        let mut literals: Vec<String> = Vec::new();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'r' && i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                // Raw string r"..."
+                if let Some(end) = cleaned[i + 2..].find('"') {
+                    literals.push(cleaned[i + 2..i + 2 + end].to_string());
+                    i += 2 + end + 1;
+                    continue;
+                }
+            }
+            if bytes[i] == b'"' {
+                let mut j = i + 1;
+                let mut lit = String::new();
+                while j < bytes.len() {
+                    match bytes[j] {
+                        b'\\' if j + 1 < bytes.len() => {
+                            lit.push(bytes[j + 1] as char);
+                            j += 2;
+                        }
+                        b'"' => break,
+                        c => {
+                            lit.push(c as char);
+                            j += 1;
+                        }
+                    }
+                }
+                literals.push(lit);
+                i = j + 1;
+                continue;
+            }
+            i += 1;
+        }
+        // Literals that are data rather than wording: file names and
+        // paths, format pieces, and clipboard payloads the user
+        // asked us to copy verbatim.
+        let allow = [
+            "wizard-settings.json",
+            "portableforge-agent.exe",
+            "state.json",
+            "session.json",
+            "leak-before.json",
+            "leak-after.json",
+            "before.json",
+            "after-install.json",
+            "after-runtime.json",
+            "build-report.json",
+            "SystemPropertiesProtection",
+        ];
+        let mut failures = Vec::new();
+        for lit in &literals {
+            if !lit.contains(' ') {
+                continue;
+            }
+            if allow.iter().any(|a| lit.contains(a)) {
+                continue;
+            }
+            let lower = lit.to_ascii_lowercase();
+            for banned in portableforge_core::guide::BANNED_IN_PRIMARY {
+                if lower.contains(banned) {
+                    failures.push(format!("'{banned}' in: {lit}"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "wizard wording must stay plain:\n{}",
+            failures.join("\n")
+        );
+    }
+
     #[test]
     fn picker_opens_where_the_person_already_is() {
         assert_eq!(picker_start_dir(""), None);
