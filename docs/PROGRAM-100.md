@@ -155,17 +155,36 @@ clean host + windows-msvc; **79/79 tests**; CLI smokes green for
 every item (help, JSON shapes parse, exit codes 0/1/2 observed,
 multi-root note contents, sessions listing, doctor report).
 
-## Slice 7 — Leak test & sandbox modes (items 61–70)
-- [ ] 61. `verify` command: build, then judge the leak notes when a leak session exists
-- [ ] 62. Leak report groups findings by kind with counts and one-line fixes
-- [ ] 63. Wizard Test step runs the leak judge on notes dropped in the session folder
-- [ ] 64. Careful-mode rollback executor (dry-run by default; applies the plan only with an explicit flag)
-- [ ] 65. Preflight checks for a usable restore point (Mode C honesty) on Windows
-- [ ] 66. Wizard Sandbox memory choice (2 / 4 / 8 GB) written into the .wsb
-- [ ] 67. Wizard per-session networking toggle surfaced (default off)
-- [ ] 68. `.wsb` generator supports the clipboard toggle in details view (default off)
-- [ ] 69. Session cleanup command lists and removes old session folders on request
-- [ ] 70. Leak-test box packet: `capture` notes named for the leak flow in one command
+## Slice 7 — Leak test & sandbox modes (items 61–70) — DONE 2026-10-24
+- [x] 61. `verify` command: build, then judge the leak notes when a leak session exists
+- [x] 62. Leak report groups findings by kind with counts and one-line fixes
+- [x] 63. Wizard Test step runs the leak judge on notes dropped in the session folder
+- [x] 64. Careful-mode rollback executor (dry-run by default; applies the plan only with an explicit flag)
+- [x] 65. Preflight checks for a usable restore point (Mode C honesty) on Windows
+- [x] 66. Wizard Sandbox memory choice (2 / 4 / 8 GB) written into the .wsb
+- [x] 67. Wizard per-session networking toggle surfaced (default off)
+- [x] 68. `.wsb` generator supports the clipboard toggle in details view (default off)
+- [x] 69. Session cleanup command lists and removes old session folders on request
+- [x] 70. Leak-test box packet: `capture` notes named for the leak flow in one command
+
+Slice 7 notes: the leak flow now has one set of note names everywhere
+(`leak-before.json` / `leak-after.json` in the session's exchange
+folder) — the packet makes them, `verify` judges them after a build,
+and the wizard's test step judges the same notes in place. The
+rollback executor deletes only files the run added (in the plan's
+already-guarded places), restores settings whose old values are in
+restorable forms (text, dword, binary — other forms are reported,
+never guessed), and always reports changed files and helpers as
+needing a person. The restore-point check never blocks the safe test
+box; it exists so careful mode is never chosen blind, and on Windows
+it reads `vssadmin list shadows` (no answer — e.g. no elevation —
+stays "could not be checked"). The wizard's box choices (memory,
+internet, clipboard) are per-run and start from the safe defaults
+every launch. Gate: fmt clean; clippy clean host + windows-msvc;
+**82/82 tests**; smokes green for every item (.wsb clipboard/memory
+rendering, grouped leak output, verify end-to-end with exit 2,
+packet contents, rollback rehearsal, cleanup list + remove,
+restore-point line).
 
 ## Slice 8 — Platform & preflight depth (items 71–80)
 - [ ] 71. Real free disk + memory figures on Windows (no new dependencies; OS queries from Rust)
