@@ -408,6 +408,28 @@ pub fn ini_safe(s: &str) -> String {
     s.chars().filter(|c| *c != '\r' && *c != '\n').collect()
 }
 
+/// Pad a program's own version tag (`1.2`, `1.2.3`) out to the four
+/// numbers a PackageVersion needs. `None` when the tag is not plain
+/// numbers and dots — never guess at letters or suffixes.
+pub fn pad_package_version(v: &str) -> Option<String> {
+    let parts: Vec<&str> = v.trim().split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut nums: Vec<String> = Vec::new();
+    for p in parts {
+        if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        // Normalise leading zeros away ("01" -> "1").
+        nums.push(p.parse::<u64>().ok()?.to_string());
+    }
+    while nums.len() < 4 {
+        nums.push("0".to_string());
+    }
+    Some(nums.join("."))
+}
+
 /// Parse/validate a PackageVersion (`x.x.x.x`, four numeric parts).
 pub fn valid_package_version(v: &str) -> bool {
     let parts: Vec<&str> = v.split('.').collect();
@@ -586,6 +608,19 @@ pub(crate) mod tests {
             .all(|l| !l.starts_with("[Injected]") && !l.starts_with("Evil")));
         assert!(ini.contains("Name=Widget[Injected]Evil=1"));
         assert_eq!(ini_safe("a\r\nb"), "ab");
+    }
+
+    #[test]
+    fn version_tags_pad_to_four_numbers_or_refuse() {
+        assert_eq!(pad_package_version("1.2").as_deref(), Some("1.2.0.0"));
+        assert_eq!(pad_package_version("1.2.3").as_deref(), Some("1.2.3.0"));
+        assert_eq!(pad_package_version("1.2.3.4").as_deref(), Some("1.2.3.4"));
+        assert_eq!(pad_package_version("01.02").as_deref(), Some("1.2.0.0"));
+        assert_eq!(pad_package_version(" 2.0 ").as_deref(), Some("2.0.0.0"));
+        assert_eq!(pad_package_version("1.2-beta"), None);
+        assert_eq!(pad_package_version("1.2.3.4.5"), None);
+        assert_eq!(pad_package_version(""), None);
+        assert_eq!(pad_package_version("1..2"), None);
     }
 
     #[test]
