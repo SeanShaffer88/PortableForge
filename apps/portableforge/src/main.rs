@@ -131,6 +131,7 @@ Commands (the same steps, for scripts and testing):
                                           Ask the helper in the test box to take one note now
   agent-state <session-folder>          Show what the helper in the test box is doing and what should happen next
   mode-b --out <folder>                 Make a packet (helper program + plain instructions) for testing in your own virtual machine, with no test box
+  review <session-folder>               Show the review list for a finished capture as plain cards, and save the choices file
   launch <session-folder>               Start the test box for a prepared session folder
   post-capture <session-folder>         Read a finished capture's notes into a review
   preflight                               Check whether this computer can run the safe test box
@@ -393,6 +394,30 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                     println!("Next: the helper reported a problem: {line}")
                 }
             }
+            Ok(())
+        }
+        "review" => {
+            let dir = args
+                .get(1)
+                .ok_or("Give the session folder (the one containing exchange\\).")?;
+            let layout = session_layout_for(&std::path::PathBuf::from(dir));
+            let outcome = portableforge_core::orchestrate::post_capture(&layout)?;
+            println!("{}", outcome.review.summary());
+            for item in &outcome.review.items {
+                let (title, body) =
+                    portableforge_core::guide::plain_card(&item.classification.finding);
+                let state = match item.decision {
+                    portableforge_core::review::Decision::Fix { on: true } => "fix on",
+                    portableforge_core::review::Decision::Fix { on: false } => "fix off",
+                    portableforge_core::review::Decision::Acknowledge { .. } => "warning",
+                    portableforge_core::review::Decision::Info => "information",
+                };
+                println!("[{state}] {title}\n  {body}");
+            }
+            println!(
+                "The choices file is saved at {}",
+                layout.root.join("review.json").display()
+            );
             Ok(())
         }
         "mode-b" => {
