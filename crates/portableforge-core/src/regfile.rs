@@ -167,6 +167,47 @@ fn normalise_hive(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hostile_inputs_never_panic_the_parser() {
+        // Item 81: the parser eats whatever a damaged or hostile
+        // export contains. Every input must return — entries or
+        // not — without panicking.
+        let big = "a".repeat(1_000_000);
+        let inputs: Vec<String> = vec![
+            String::new(),
+            "\u{0}\u{1}\u{2}".into(),
+            "Windows Registry Editor Version 5.00\n[".into(),
+            "[unclosed".into(),
+            "\"unterminated".into(),
+            "[HKEY_CURRENT_USER\\Software]\n\"x\"=".into(),
+            "[HKEY_CURRENT_USER\\Software]\n\"x\"=\"y".into(),
+            "a=b\r\n[b]\n\"x\"=\"y\"".into(),
+            "[".repeat(10_000),
+            "[HKEY_CURRENT_USER\\Software]\n\"d\"=dword:zzzz".into(),
+            "[HKEY_CURRENT_USER\\Software]\n\"d\"=dword:99999999999999999999".into(),
+            "[HKEY_CURRENT_USER\\Software]\n\"h\"=hex:0,1,zz,\\".into(),
+            "[HKEY_CURRENT_USER\\Software]\n\"h\"=hex:\\\n  zz".into(),
+            "[-HKEY_CURRENT_USER\\Software]".into(),
+            "[..\\..\\..]".into(),
+            "[HKEY_CURRENT_USER\\🎉 Emoji]\n\"🎉\"=\"🎉\"".into(),
+            format!("[HKEY_CURRENT_USER\\Software]\n\"big\"=\"{big}\""),
+            "REGEDIT4\n[HKEY_CURRENT_USER\\Software]\n\"a\"=\"1\"".into(),
+            "\n\n\n   \n\t\n".into(),
+            "[HKEY_CURRENT_USER\\Software]extra\n\"a\"=\"1\"".into(),
+            "\"orphan\"=\"value with no key\"".into(),
+            "[HKEY_CURRENT_USER\\Software]\n@=\"default\" extra junk".into(),
+            "[HKEY_CURRENT_USER\\Software]\n\"esc\"=\"a\\\\\"".into(),
+        ];
+        for input in &inputs {
+            let entries = super::parse_reg(input);
+            let (entries2, skipped) = super::parse_reg_with_report(input);
+            assert_eq!(entries.len(), entries2.len());
+            let _ = skipped;
+        }
+        // A sane export in the middle of the junk still parses.
+        let good = "Windows Registry Editor Version 5.00\n\n[HKEY_CURRENT_USER\\Software\\Acme]\n\"Mode\"=\"dark\"\n";
+        assert_eq!(super::parse_reg(good).len(), 1);
+    }
     use super::*;
 
     const SAMPLE: &str = "Windows Registry Editor Version 5.00\r\n\r\n\
