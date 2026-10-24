@@ -89,6 +89,20 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
             || edition.contains("Education");
         let sandbox_exe_present =
             std::path::Path::new(r"C:\Windows\System32\WindowsSandbox.exe").exists();
+        // Restore-point presence for careful mode's honesty check:
+        // vssadmin lists shadow copies; no listing at all means none
+        // exist, and a failed run (needs elevation) stays "unknown".
+        let restore_point = std::process::Command::new("vssadmin.exe")
+            .args(["list", "shadows"])
+            .output()
+            .ok()
+            .and_then(|out| {
+                if !out.status.success() {
+                    return None;
+                }
+                let text = String::from_utf8_lossy(&out.stdout).to_string();
+                Some(text.contains("Shadow Copy Volume:"))
+            });
         portableforge_core::orchestrate::PreflightFacts {
             is_windows: true,
             os_build: build,
@@ -97,6 +111,7 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
             feature_enabled: None,
             free_disk_mb: None,
             free_ram_mb: None,
+            restore_point,
         }
     }
     #[cfg(not(windows))]
@@ -109,6 +124,7 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
             feature_enabled: None,
             free_disk_mb: None,
             free_ram_mb: None,
+            restore_point: None,
         }
     }
 }
@@ -153,6 +169,10 @@ Commands (the same steps, for scripts and testing):
   leaks <package-folder-in-box> <before.json> <after.json> [--json] [--out <file>]   Judge a finished-copy test run
   rollback-plan <diff.json>             List how a Careful-mode run would be put back
   sessions [--base <folder>]            List earlier runs with their step, age, and what should happen next
+  verify <details.json> --out <folder> --session <run> [--app-files <folder>] [--box-root <path>]   Build, then judge the run's leak-test notes when they are there
+  rollback <diff.json> [--apply]        Put back what a careful-mode run changed (a rehearsal unless --apply is given)
+  sessions-cleanup [--older-than-days 30] [--yes]   List old run folders, and remove them with --yes
+  leak-packet --package <folder> --out <folder>   Make the leak-test packet: package copy, helper, instructions, and the note names
   doctor [--cache <folder>] [--json]    One health report: this computer, the maker programs, and the helper program
 
 Every command also answers to --help (for example: portableforge build --help).
@@ -330,6 +350,10 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 ..Default::default()
             };
             cfg.networking = args.iter().any(|a| a == "--online");
+            cfg.clipboard = args.iter().any(|a| a == "--clipboard");
+            if let Some(mb) = flag(args, "--memory").and_then(|s| s.parse::<u32>().ok()) {
+                cfg.memory_mb = mb;
+            }
             cfg.check()?;
             let out = need_flag(args, "--out")?;
             std::fs::write(&out, cfg.to_wsb())
@@ -888,7 +912,13 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             let value = serde_json::json!({
                 "verdict": report.verdict(),
                 "leaks": report.leaks.iter().map(|l| serde_json::json!({
-                    "kind": l.kind, "plain": l.plain
+                    "kind": l.kind, "plain": l.plain, "fix": l.fix_line()
+                })).collect::<Vec<_>>(),
+                "groups": report.grouped().iter().map(|(label, leaks)| serde_json::json!({
+                    "group": label, "count": leaks.len(),
+                    "leaks": leaks.iter().map(|l| serde_json::json!({
+                        "kind": l.kind, "plain": l.plain, "fix": l.fix_line()
+                    })).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>(),
             });
             if let Some(out_file) = flag(args, "--out") {
@@ -906,8 +936,12 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 );
             } else {
                 println!("{}", report.verdict());
-                for leak in &report.leaks {
-                    println!("- {}", leak.plain);
+                for (label, leaks) in report.grouped() {
+                    println!("{label} ({})", leaks.len());
+                    for leak in leaks {
+                        println!("- {}", leak.plain);
+                        println!("  Fix: {}", leak.fix_line());
+                    }
                 }
             }
             if !report.leaks.is_empty() {
@@ -923,6 +957,199 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 println!("- {}", a.plain());
             }
             println!("{} steps to put things back.", plan.len());
+            Ok(())
+        }
+        "rollback" => {
+            let d = read_diff(args.get(1))?;
+            let plan = portableforge_core::rollback::rollback_plan(&d);
+            let apply = args.iter().any(|a| a == "--apply");
+            if !apply {
+                println!(
+                    "This is a rehearsal — nothing on this computer will change. Add --apply to really put things back."
+                );
+            }
+            let log =
+                portableforge_core::rollback::execute_rollback(&plan, apply, &mut registry_undo);
+            for line in &log {
+                println!("{line}");
+            }
+            println!(
+                "{} steps listed. Careful mode is watched and put back — it is NOT sealed off.",
+                plan.len()
+            );
+            Ok(())
+        }
+        "verify" => {
+            let details = args
+                .get(1)
+                .filter(|a| !a.starts_with("--"))
+                .ok_or("Give a details file.")?;
+            let out = need_flag(args, "--out")?;
+            let session_dir = need_flag(args, "--session")?;
+            let meta = read_metadata(Some(details))?;
+            let app_files = flag(args, "--app-files").map(std::path::PathBuf::from);
+            let outcome = portableforge_core::build::build_package(
+                Path::new(&out),
+                &meta,
+                &[],
+                app_files.as_deref(),
+                None,
+                None,
+                false,
+            )?;
+            println!("{}", outcome.summary());
+            let mut problems = outcome.has_errors();
+            // Judge the leak notes when the run left them: the packet
+            // names them leak-before.json / leak-after.json in the
+            // session's exchange folder.
+            let layout = session_layout_for(Path::new(&session_dir));
+            let before_path = layout.exchange.join("leak-before.json");
+            let after_path = layout.exchange.join("leak-after.json");
+            if before_path.is_file() && after_path.is_file() {
+                let before = read_snapshot(Some(&before_path.to_string_lossy().into_owned()))?;
+                let after = read_snapshot(Some(&after_path.to_string_lossy().into_owned()))?;
+                let d = diff_snapshots(&before, &after);
+                let app_id = Path::new(&out)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let box_root = flag(args, "--box-root")
+                    .unwrap_or_else(|| format!(r"C:\Users\WDAGUtilityAccount\Desktop\{app_id}"));
+                let report =
+                    portableforge_core::leaktest::analyse_leaks(&box_root, &before, &after, &d);
+                println!("{}", report.verdict());
+                for (label, leaks) in report.grouped() {
+                    println!("{label} ({})", leaks.len());
+                    for leak in leaks {
+                        println!("- {}", leak.plain);
+                        println!("  Fix: {}", leak.fix_line());
+                    }
+                }
+                if !report.clean() {
+                    problems = true;
+                }
+            } else {
+                println!(
+                    "No leak-test notes in this run yet (leak-before.json and leak-after.json in its exchange folder) — the package is built; the leak test still needs its own box run."
+                );
+            }
+            if problems {
+                // Exit code 2: verify ran; it found problems or leaks.
+                set_exit_code(2);
+            }
+            Ok(())
+        }
+        "sessions-cleanup" => {
+            let home = std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .unwrap_or_else(|_| ".".to_string());
+            let base = flag(args, "--base")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(&home).join("PortableForge Sessions"));
+            let days: u64 = flag(args, "--older-than-days")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30);
+            let yes = args.iter().any(|a| a == "--yes");
+            let cutoff =
+                std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+            let mut listed = 0usize;
+            if let Ok(entries) = std::fs::read_dir(&base) {
+                for entry in entries.flatten() {
+                    let dir = entry.path();
+                    if !dir.is_dir() {
+                        continue;
+                    }
+                    let layout = session_layout_for(&dir);
+                    if !layout.exchange.is_dir() && !layout.session_path.is_file() {
+                        continue;
+                    }
+                    let newest = [
+                        layout.session_path.clone(),
+                        layout.exchange.join("state.json"),
+                        dir.clone(),
+                    ]
+                    .iter()
+                    .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+                    .max();
+                    let Some(newest) = newest else { continue };
+                    if newest >= cutoff {
+                        continue;
+                    }
+                    listed += 1;
+                    let name = dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    if yes {
+                        match std::fs::remove_dir_all(&dir) {
+                            Ok(()) => println!("Removed the old run folder: {name}"),
+                            Err(e) => println!("Could not remove {name}: {e}"),
+                        }
+                    } else {
+                        println!("Old run folder (untouched for over {days} days): {name}");
+                    }
+                }
+            }
+            if listed == 0 {
+                println!(
+                    "No run folders older than {days} days in {}.",
+                    base.display()
+                );
+            } else if !yes {
+                println!(
+                    "Nothing was removed. Add --yes to remove the {listed} folder{} listed.",
+                    if listed == 1 { "" } else { "s" }
+                );
+            }
+            Ok(())
+        }
+        "leak-packet" => {
+            let package = need_flag(args, "--package")?;
+            let out = need_flag(args, "--out")?;
+            let out_dir = Path::new(&out);
+            let pkg_src = Path::new(&package);
+            if !pkg_src.is_dir() {
+                return Err(format!(
+                    "The finished package folder {package} could not be found."
+                ));
+            }
+            let exchange = out_dir.join("exchange");
+            std::fs::create_dir_all(&exchange)
+                .map_err(|e| format!("We could not make the packet folder: {e}"))?;
+            let pkg_name = pkg_src
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Package".to_string());
+            let pkg_dest = out_dir.join(&pkg_name);
+            copy_tree(pkg_src, &pkg_dest)?;
+            let agent = place_agent(out_dir);
+            std::fs::write(
+                out_dir.join("READ-ME-FIRST.txt"),
+                format!(
+                    "Leak test for {pkg_name}\n\
+                     ======================\n\n\
+                     1. Start a fresh, empty test box (Windows Sandbox) or a clean virtual machine.\n\
+                     2. Copy this whole packet folder into it.\n\
+                     3. Move the {pkg_name} folder onto the Desktop inside the box.\n\
+                     4. Before opening it, take the first note (from this folder, inside the box):\n\
+                     \x20    portableforge-agent.exe capture --exchange exchange --name leak-before.json\n\
+                     5. Open {pkg_name}, use it the way its owner would, then close it.\n\
+                     6. Take the second note the same way, with --name leak-after.json\n\
+                     7. Copy the exchange folder back out and put it in the run's own exchange folder.\n\
+                     8. Back in PortableForge: portableforge verify <details.json> --out <package> --session <run folder>\n\
+                     \x20    — or just re-open the run in the wizard and read the result on the test step.\n\n\
+                     A clean portable copy changes nothing outside its own folder. Anything else is a leak.\n"
+                ),
+            )
+            .map_err(|e| format!("We could not write the packet instructions: {e}"))?;
+            println!(
+                "Leak-test packet ready at {out}: the package copy, the instructions{}, and an exchange folder for the two notes (leak-before.json, leak-after.json).",
+                if agent {
+                    ", the helper program"
+                } else {
+                    " (the helper program was not beside PortableForge, so copy portableforge-agent.exe in by hand)"
+                }
+            );
             Ok(())
         }
         "post-capture" => {
@@ -1156,6 +1383,81 @@ fn run_cli(args: &[String]) -> Result<(), String> {
 
 /// The session layout for a session *root* folder (the folder that
 /// contains `exchange\`, `box.wsb`, and the rest).
+/// Copy the helper program from beside this one into `out`.
+/// Returns true when it was there to copy.
+pub fn place_agent(out: &Path) -> bool {
+    if let Ok(exe) = std::env::current_exe() {
+        for name in ["portableforge-agent.exe", "portableforge-agent"] {
+            let src = exe.with_file_name(name);
+            if src.is_file() && std::fs::copy(&src, out.join(name)).is_ok() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Recursively copy a folder tree (packet building).
+fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst)
+        .map_err(|e| format!("We could not make {}: {e}", dst.display()))?;
+    let entries =
+        std::fs::read_dir(src).map_err(|e| format!("We could not read {}: {e}", src.display()))?;
+    for entry in entries.flatten() {
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)
+                .map_err(|e| format!("We could not copy {}: {e}", from.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// The registry half of a rollback: put one setting back via the
+/// operating system's own `reg.exe`. Only runs on Windows; anywhere
+/// else it refuses plainly so the executor can log it.
+fn registry_undo(action: &portableforge_core::rollback::RollbackAction) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use portableforge_core::rollback::RollbackAction;
+        let run = |args: &[&str]| -> Result<(), String> {
+            let out = std::process::Command::new("reg.exe")
+                .args(args)
+                .output()
+                .map_err(|e| format!("the settings tool could not start: {e}"))?;
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err("the settings tool refused".to_string())
+            }
+        };
+        match action {
+            RollbackAction::DeleteSetting { key, name } => run(&["delete", key, "/v", name, "/f"]),
+            RollbackAction::RestoreSetting {
+                key,
+                name,
+                old_data,
+            } => {
+                let (ty, data) =
+                    portableforge_core::rollback::restore_value(old_data).ok_or_else(|| {
+                        "the old value is in a form that cannot be put back automatically"
+                            .to_string()
+                    })?;
+                run(&["add", key, "/v", name, "/t", ty, "/d", &data, "/f"])
+            }
+            _ => Err("not a setting".to_string()),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = action;
+        Err("settings can only be put back on Windows".to_string())
+    }
+}
+
 pub fn session_layout_for(root: &Path) -> portableforge_core::orchestrate::SessionLayout {
     portableforge_core::orchestrate::SessionLayout {
         wsb_path: root.join("box.wsb"),
