@@ -23,6 +23,7 @@ pub mod regfile;
 pub mod review;
 pub mod rollback;
 pub mod session;
+pub mod settings;
 pub mod snapshot;
 pub mod tools;
 pub mod validate;
