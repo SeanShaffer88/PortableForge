@@ -10,13 +10,24 @@ mod wizard;
 use portableforge_core::classify::classify;
 use portableforge_core::diff::diff_snapshots;
 use portableforge_core::paf::PafMetadata;
-use portableforge_core::progress::Progress;
-use portableforge_core::snapshot::{scan_tree, Snapshot};
+use portableforge_core::snapshot::Snapshot;
 use portableforge_core::validate::{generate_tree, has_errors, validate_metadata, validate_tree};
 use portableforge_core::wsb::{SandboxConfig, SandboxMode};
 use portableforge_core::Session;
 use std::path::Path;
 use std::process::ExitCode;
+
+/// The documented exit codes (also in the help text):
+/// 0 — fine; 1 — something went wrong; 2 — the run worked but a check
+/// found problems (build problems, validation problems, leaks, or a
+/// doctor report with missing pieces). Commands that judge an
+/// artifact set this instead of failing, so scripts can tell "the
+/// tool broke" apart from "the answer is no".
+static EXIT_CODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn set_exit_code(code: u8) {
+    EXIT_CODE.store(code, std::sync::atomic::Ordering::Relaxed);
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -30,7 +41,7 @@ fn main() -> ExitCode {
         };
     }
     match run_cli(&args) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => ExitCode::from(EXIT_CODE.load(std::sync::atomic::Ordering::Relaxed)),
         Err(e) => {
             eprintln!("{e}");
             ExitCode::FAILURE
@@ -117,15 +128,15 @@ Just run `portableforge` with no commands to open the guided wizard.
 
 Commands (the same steps, for scripts and testing):
   guide                                   Print the guided steps in plain words
-  snapshot <folder> --prefix <path> --out <file.json> [--label <name>]
+  snapshot <folder> --prefix <path> --out <file.json> [--label <name>] [--quiet]  (or several --root <folder>)
   parse-reg <file.reg> --out <file.json> [--label <name>]
   diff <before.json> <after.json> --out <file.json>
-  classify <install-diff.json> <runtime-diff.json>
+  classify <install-diff.json> <runtime-diff.json> [--details]
   wsb --input <folder> --tools <folder> --exchange <folder> --out <file.wsb> [--online]
   generate <details.json> --out <folder> [--review <review.json>]
   build <details.json> --out <folder> [--session <session-folder>] [--review <review.json>] [--app-files <folder>] [--default-data <folder>] [--icon <file.ico>] [--zip] [--force] [--json]
                                           Build the finished package: the session's notes (or a saved review) supply the accepted fixes, the harvested program files and starting settings are copied in, and the finished tree is checked
-  validate <details.json> [--tree <folder>]
+  validate [<details.json>] [--tree <folder>]   (with no details file, --tree reads the package's own appinfo.ini)
   session-new --id <name> --out <file.json>
   request-snapshot <session-folder> <before|after-install|after-runtime>
                                           Ask the helper in the test box to take one note now
@@ -133,21 +144,77 @@ Commands (the same steps, for scripts and testing):
   mode-b --out <folder>                 Make a packet (helper program + plain instructions) for testing in your own virtual machine, with no test box
   review <session-folder>               Show the review list for a finished capture as plain cards, and save the choices file
   launch <session-folder>               Start the test box for a prepared session folder
-  post-capture <session-folder>         Read a finished capture's notes into a review
-  preflight                               Check whether this computer can run the safe test box
+  post-capture <session-folder> [--json]   Read a finished capture's notes into a review
+  preflight [--json]                      Check whether this computer can run the safe test box
   tools [--cache <folder>]              List the pinned PortableApps.com builder tools and check any found in the cache folder
   tools run-installer <package> --cache <folder> [--generator <program>]   Run the checked PortableApps.com setup maker on a finished package folder
   tools run-launcher <package> --cache <folder> [--generator <program>]   Run the checked PortableApps.com starter maker on a finished package folder
   specimens <runtime-diff.json>         List first-run files that would seed the package's starting settings
-  leaks <package-folder-in-box> <before.json> <after.json>   Judge a finished-copy test run
+  leaks <package-folder-in-box> <before.json> <after.json> [--json] [--out <file>]   Judge a finished-copy test run
   rollback-plan <diff.json>             List how a Careful-mode run would be put back
+  sessions [--base <folder>]            List earlier runs with their step, age, and what should happen next
+  doctor [--cache <folder>] [--json]    One health report: this computer, the maker programs, and the helper program
 
+Every command also answers to --help (for example: portableforge build --help).
+Exit codes: 0 means fine, 1 means something went wrong, 2 means the run worked but a check found problems (build problems, validation problems, leaks, or missing pieces in doctor).
 Everywhere: paths are ordinary file paths; nothing is uploaded anywhere.";
 
+/// Short usage for one command (`portableforge build --help`, or
+/// `portableforge help build`). Plain words first; the flags after.
+fn command_help(cmd: &str) -> Option<String> {
+    let text = match cmd {
+        "build" => "build <details.json> --out <folder> [--session <session-folder>] [--review <review.json>] [--app-files <folder>] [--default-data <folder>] [--icon <file.ico>] [--zip] [--force] [--json] [--quiet]\n  Make the finished package folder from the details file. --session takes the accepted fixes, name tags, and first-run files from a finished capture. --zip also leaves a zip copy beside the folder. --force allows building into a non-empty folder that is not an earlier package. Ends with exit code 2 when the package has problems to fix.",
+        "generate" => "generate <details.json> --out <folder> [--review <review.json>]\n  Write only the text files of a package (no program files copied). Without --review the starter rules carry no fixes, and it says so.",
+        "validate" => "validate [<details.json>] [--tree <package-folder>]\n  Check package details, and with --tree also a built package folder. With no details file, --tree reads the package's own appinfo.ini. Exit code 2 when there are problems.",
+        "preflight" => "preflight [--json]\n  Check this computer: Windows edition, the test box feature, memory, disk, and which testing way is available.",
+        "doctor" => "doctor [--cache <tools-folder>] [--json]\n  One health report: the preflight checks, the official maker programs (checked in --cache when given), and whether the helper program is beside PortableForge. Exit code 2 when something is missing.",
+        "sessions" => "sessions [--base <folder>]\n  List the runs in the sessions folder (default: the PortableForge Sessions folder in your home folder) with their step, how long since they were last touched, and what should happen next.",
+        "snapshot" => "snapshot (<folder> --prefix <path-prefix> | --root <folder> [--root <folder> ...]) --out <note.json> [--label <name>] [--quiet]\n  Take a note of a folder's files. Several --root folders are read into one note.",
+        "parse-reg" => "parse-reg <file.reg> --out <note.json> [--label <name>]\n  Read a settings export (.reg, UTF-8 text) into a note.",
+        "diff" => "diff <before.json> <after.json> --out <diff.json>\n  Compare two notes and save the changes between them.",
+        "classify" => "classify <install-diff.json> <runtime-diff.json> [--details]\n  Show the plain review cards for two diffs. --details also prints the technical row behind each card.",
+        "specimens" => "specimens <diff.json>\n  List the first-run files a diff suggests, and where each goes in Data\\.",
+        "leaks" => "leaks <package-folder> <before.json> <after.json> [--json] [--out <file.json>]\n  Judge a leak test: what the package left behind outside itself. Exit code 2 when leaks are found. --out also saves the report as a file.",
+        "post-capture" => "post-capture <session-folder> [--json]\n  Turn a finished capture into the review list, the name tags, and the first-run files. Also saves the working files into the session folder.",
+        "review" => "review <session-folder>\n  Show the review list for a finished capture as plain cards, and save the choices file.",
+        "agent-state" => "agent-state <session-folder>\n  Show what the helper in the test box is doing, when it last reported in, and what should happen next.",
+        "request-snapshot" => "request-snapshot <session-folder> <before|after-install|after-runtime>\n  Ask the helper in the test box to take one of the three notes.",
+        "mode-b" => "mode-b --out <folder>\n  Make a packet (helper program + plain instructions) for testing in your own virtual machine, with no test box.",
+        "launch" => "launch <session-folder>\n  Open the session's test box (Windows only).",
+        "tools" => "tools [--cache <folder>]\n  List the official maker programs PortableForge works with, pinned and fingerprinted; with --cache, check what is already downloaded.\ntools run-installer <package> --cache <folder> [--generator <program>]\ntools run-launcher <package> --cache <folder> [--generator <program>]\n  Run one of the makers (fingerprint-checked first) on a finished package folder.",
+        "wsb" => "wsb --input <folder> --tools <folder> --exchange <folder> --out <file.wsb> [--online]\n  Write the test box settings file for a session.",
+        "session-new" => "session-new --id <name> --out <session.json>\n  Start a fresh run record.",
+        "rollback-plan" => "rollback-plan <diff.json>\n  List the steps that would put back everything a diff changed (careful way, watched on the real computer).",
+        "guide" => "guide\n  Print the twelve guided steps with what happens and what you do at each.",
+        _ => return None,
+    };
+    Some(format!("portableforge {text}"))
+}
+
 fn run_cli(args: &[String]) -> Result<(), String> {
+    // Per-command help: `portableforge build --help`.
+    if args.len() > 1 && (args[1] == "--help" || args[1] == "-h") {
+        return match command_help(&args[0]) {
+            Some(text) => {
+                println!("{text}");
+                Ok(())
+            }
+            None => Err(format!(
+                "We do not know the command '{}'.\n\n{HELP}",
+                args[0]
+            )),
+        };
+    }
     match args[0].as_str() {
         "help" | "--help" | "-h" => {
-            println!("{HELP}");
+            if let Some(topic) = args.get(1) {
+                match command_help(topic) {
+                    Some(text) => println!("{text}"),
+                    None => println!("{HELP}"),
+                }
+            } else {
+                println!("{HELP}");
+            }
             Ok(())
         }
         "guide" => {
@@ -159,18 +226,46 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "snapshot" => {
-            let root = args.get(1).ok_or("Give the folder to look through.")?;
-            let prefix = need_flag(args, "--prefix")?;
             let out = need_flag(args, "--out")?;
             let label = flag(args, "--label").unwrap_or_else(|| "snapshot".into());
-            let mut progress = Progress::new("Looking through the folder", None);
-            let files = scan_tree(Path::new(root), &prefix, &mut progress)
-                .map_err(|e| format!("We could not look through that folder: {e}"))?;
-            let mut snap = Snapshot::new(label);
-            snap.files = files;
+            let quiet = args.iter().any(|a| a == "--quiet" || a == "-q");
+            // Several folders at once: each --root is scanned with its
+            // own path as the prefix (the way the helper scans the
+            // standard places). The single-folder form stays as it was.
+            let roots: Vec<(std::path::PathBuf, String)> = if args.iter().any(|a| a == "--root") {
+                let mut v = Vec::new();
+                let mut it = args.iter().peekable();
+                while let Some(a) = it.next() {
+                    if a == "--root" {
+                        let r = it.next().ok_or("--root needs a folder after it.")?;
+                        v.push((std::path::PathBuf::from(r), r.replace('/', "\\")));
+                    }
+                }
+                v
+            } else {
+                let root = args.get(1).ok_or("Give the folder to look through.")?;
+                let prefix = need_flag(args, "--prefix")?;
+                vec![(std::path::PathBuf::from(root), prefix)]
+            };
+            let mut no_progress = |_: &str, _: u64| {};
+            let (snap, _cache) = portableforge_core::snapshot::scan_roots_full(
+                &roots,
+                &label,
+                None,
+                &mut no_progress,
+            )
+            .map_err(|e| format!("We could not look through those folders: {e}"))?;
             std::fs::write(&out, snap.to_json())
                 .map_err(|e| format!("We could not save {out}: {e}"))?;
-            println!("Saved {} files to {out}.", snap.files.len());
+            if !quiet {
+                println!("Saved {} files to {out}.", snap.files.len());
+                if snap.skipped_files > 0 {
+                    println!(
+                        "{} files could not be read and were left out of the note.",
+                        snap.skipped_files
+                    );
+                }
+            }
             Ok(())
         }
         "parse-reg" => {
@@ -212,9 +307,17 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             let install = read_diff(args.get(1))?;
             let runtime = read_diff(args.get(2))?;
             let findings = classify(&install, &runtime, &[]);
+            let details = args.iter().any(|a| a == "--details");
             for c in &findings {
                 let (title, body) = portableforge_core::guide::plain_card(&c.finding);
                 println!("- {title}: {body}");
+                if details {
+                    println!(
+                        "  [{:?}, confidence {:.2}] {:?}",
+                        c.severity, c.confidence, c.finding
+                    );
+                    println!("  why: {}", c.why);
+                }
             }
             println!("{} things found.", findings.len());
             Ok(())
@@ -252,6 +355,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
         }
         "build" => {
             let json = args.iter().any(|a| a == "--json");
+            let quiet = args.iter().any(|a| a == "--quiet" || a == "-q");
             let meta = read_metadata(args.get(1))?;
             let out = need_flag(args, "--out")?;
             let mut accepted: Option<Vec<portableforge_core::classify::Classification>> = None;
@@ -267,7 +371,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 if accepted.is_none() {
                     accepted = Some(outcome.review.accepted());
                 }
-                if !json {
+                if !json && !quiet {
                     println!("{}", outcome.review.summary());
                 }
             }
@@ -368,7 +472,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 let zp = format!("{out}.zip");
                 let n =
                     portableforge_core::build::write_package_zip(Path::new(&out), Path::new(&zp))?;
-                if !json {
+                if !json && !quiet {
                     println!("Zip copy: {zp} ({n} files)");
                 }
                 Some(zp)
@@ -405,37 +509,38 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                     "{}",
                     serde_json::to_string_pretty(&value).unwrap_or_default()
                 );
-                return if outcome.has_errors() {
-                    Err("There are problems to fix first — see above.".into())
-                } else {
-                    Ok(())
-                };
+                if outcome.has_errors() {
+                    set_exit_code(2);
+                }
+                return Ok(());
             }
-            println!("{}", outcome.summary());
-            for s in &seeded {
-                println!("Starting-settings seed planted: Data\\{s}");
-            }
-            for s in &unseeded {
-                println!(
-                    "Starting-settings seed noted (its contents were not captured): Data\\{s}"
-                );
-            }
-            for issue in &outcome.issues {
-                println!(
-                    "{} {}: {}",
-                    if issue.error { "Problem" } else { "Note" },
-                    issue.field,
-                    issue.message
-                );
-            }
-            for skipped in &outcome.skipped {
-                println!("Skipped: {skipped}");
+            if !quiet {
+                println!("{}", outcome.summary());
+                for s in &seeded {
+                    println!("Starting-settings seed planted: Data\\{s}");
+                }
+                for s in &unseeded {
+                    println!(
+                        "Starting-settings seed noted (its contents were not captured): Data\\{s}"
+                    );
+                }
+                for issue in &outcome.issues {
+                    println!(
+                        "{} {}: {}",
+                        if issue.error { "Problem" } else { "Note" },
+                        issue.field,
+                        issue.message
+                    );
+                }
+                for skipped in &outcome.skipped {
+                    println!("Skipped: {skipped}");
+                }
             }
             if outcome.has_errors() {
-                Err("There are problems to fix first — see above.".into())
-            } else {
-                Ok(())
+                // Exit code 2: the build ran; the package has problems.
+                set_exit_code(2);
             }
+            Ok(())
         }
         "request-snapshot" => {
             let dir = args
@@ -580,10 +685,41 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             launch_sandbox(&layout)
         }
         "validate" => {
-            let meta = read_metadata(args.get(1))?;
-            let mut issues = validate_metadata(&meta);
-            if let Some(tree) = flag(args, "--tree") {
-                issues.extend(validate_tree(Path::new(&tree), &meta));
+            // With a details file: check the details, plus a tree when
+            // --tree is given. With --tree alone: read the package's
+            // own appinfo.ini and check the tree against it.
+            let details_arg = args.get(1).filter(|a| !a.starts_with("--"));
+            let mut issues = Vec::new();
+            match (details_arg, flag(args, "--tree")) {
+                (Some(path), tree) => {
+                    let meta = read_metadata(Some(path))?;
+                    issues.extend(validate_metadata(&meta));
+                    if let Some(tree) = tree {
+                        issues.extend(validate_tree(Path::new(&tree), &meta));
+                    }
+                }
+                (None, Some(tree)) => {
+                    let root = Path::new(&tree);
+                    let appinfo_path = root
+                        .join("App")
+                        .join("AppInfo")
+                        .join("appinfo.ini")
+                        .to_string_lossy()
+                        .replace('/', std::path::MAIN_SEPARATOR_STR);
+                    let text = std::fs::read_to_string(&appinfo_path).map_err(|e| {
+                        format!(
+                            "We could not read the package's own appinfo.ini ({appinfo_path}): {e}"
+                        )
+                    })?;
+                    let meta = meta_from_appinfo(&text);
+                    issues.extend(validate_tree(root, &meta));
+                }
+                (None, None) => {
+                    return Err(
+                        "Give a details file, or --tree <package-folder> to check a built package."
+                            .into(),
+                    )
+                }
             }
             for i in &issues {
                 println!(
@@ -594,22 +730,36 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 );
             }
             if has_errors(&issues) {
-                Err("There are problems to fix first — see above.".into())
+                // Exit code 2: the check ran; it found problems.
+                set_exit_code(2);
             } else {
                 println!("Everything checks out.");
-                Ok(())
             }
+            Ok(())
         }
         "preflight" => {
             let report =
                 portableforge_core::orchestrate::evaluate_preflight(&collect_preflight_facts());
+            let (name, honesty) = report.best_mode.describe();
+            if args.iter().any(|a| a == "--json") {
+                let value = serde_json::json!({
+                    "checks": report.checks.iter().map(|c| serde_json::json!({
+                        "label": c.label, "ok": c.ok, "fix": c.fix
+                    })).collect::<Vec<_>>(),
+                    "best_mode": { "name": name, "honesty": honesty },
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value).unwrap_or_default()
+                );
+                return Ok(());
+            }
             for c in &report.checks {
                 println!("{} {}", if c.ok { "OK  " } else { "MISS" }, c.label);
                 if !c.fix.is_empty() {
                     println!("     Fix: {}", c.fix);
                 }
             }
-            let (name, honesty) = report.best_mode.describe();
             println!("Best available way: {name} — {honesty}");
             Ok(())
         }
@@ -735,9 +885,34 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             let after = read_snapshot(args.get(3))?;
             let d = diff_snapshots(&before, &after);
             let report = portableforge_core::leaktest::analyse_leaks(root, &before, &after, &d);
-            println!("{}", report.verdict());
-            for leak in &report.leaks {
-                println!("- {}", leak.plain);
+            let value = serde_json::json!({
+                "verdict": report.verdict(),
+                "leaks": report.leaks.iter().map(|l| serde_json::json!({
+                    "kind": l.kind, "plain": l.plain
+                })).collect::<Vec<_>>(),
+            });
+            if let Some(out_file) = flag(args, "--out") {
+                std::fs::write(
+                    &out_file,
+                    serde_json::to_string_pretty(&value).unwrap_or_default(),
+                )
+                .map_err(|e| format!("We could not save {out_file}: {e}"))?;
+                println!("Saved the leak report to {out_file}.");
+            }
+            if args.iter().any(|a| a == "--json") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value).unwrap_or_default()
+                );
+            } else {
+                println!("{}", report.verdict());
+                for leak in &report.leaks {
+                    println!("- {}", leak.plain);
+                }
+            }
+            if !report.leaks.is_empty() {
+                // Exit code 2: the test ran; it found leaks.
+                set_exit_code(2);
             }
             Ok(())
         }
@@ -757,6 +932,30 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             let root = std::path::PathBuf::from(dir);
             let layout = session_layout_for(&root);
             let outcome = portableforge_core::orchestrate::post_capture(&layout)?;
+            if args.iter().any(|a| a == "--json") {
+                let value = serde_json::json!({
+                    "review_summary": outcome.review.summary(),
+                    "review": outcome.review,
+                    "install_changes": outcome.install_diff.real_file_changes().count()
+                        + outcome.install_diff.real_reg_changes().count(),
+                    "runtime_changes": outcome.runtime_diff.real_file_changes().count()
+                        + outcome.runtime_diff.real_reg_changes().count(),
+                    "specimens": outcome.specimens.iter().map(|s| serde_json::json!({
+                        "sandbox_path": s.sandbox_path, "data_relative": s.data_relative
+                    })).collect::<Vec<_>>(),
+                    "shortcut_candidates": outcome.shortcut_candidates,
+                    "hints": {
+                        "display_name": outcome.hints.display_name,
+                        "publisher": outcome.hints.publisher,
+                        "display_version": outcome.hints.display_version,
+                    },
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value).unwrap_or_default()
+                );
+                return Ok(());
+            }
             println!("{}", outcome.review.summary());
             println!(
                 "Changes: {} from installing, {} from trying it out.",
@@ -782,6 +981,163 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             }
             if let Some(ver) = &outcome.hints.display_version {
                 println!("Program's own version tag: {ver}");
+            }
+            Ok(())
+        }
+        "sessions" => {
+            let home = std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .unwrap_or_else(|_| ".".to_string());
+            let base = flag(args, "--base")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(&home).join("PortableForge Sessions"));
+            let mut rows: Vec<(std::time::SystemTime, String)> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&base) {
+                for entry in entries.flatten() {
+                    let dir = entry.path();
+                    if !dir.is_dir() {
+                        continue;
+                    }
+                    let layout = session_layout_for(&dir);
+                    if !layout.exchange.is_dir() && !layout.session_path.is_file() {
+                        continue;
+                    }
+                    // Age from the newest thing the run left behind.
+                    let mut newest = std::time::SystemTime::UNIX_EPOCH;
+                    for p in [
+                        layout.session_path.clone(),
+                        layout.exchange.join("state.json"),
+                        dir.clone(),
+                    ] {
+                        if let Ok(m) = std::fs::metadata(&p) {
+                            if let Ok(t) = m.modified() {
+                                if t > newest {
+                                    newest = t;
+                                }
+                            }
+                        }
+                    }
+                    let age = std::time::SystemTime::now()
+                        .duration_since(newest)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let age_text = if age < 120 {
+                        "just now".to_string()
+                    } else if age < 3600 {
+                        format!("{} min ago", age / 60)
+                    } else if age < 86_400 {
+                        format!("{} h ago", age / 3600)
+                    } else {
+                        format!("{} d ago", age / 86_400)
+                    };
+                    let state = portableforge_core::orchestrate::read_agent_state(&layout);
+                    let phase = state
+                        .as_ref()
+                        .map(|s| format!("{:?}", s.phase))
+                        .unwrap_or_else(|| "not started".to_string());
+                    let next =
+                        match portableforge_core::orchestrate::next_host_action(state.as_ref()) {
+                            portableforge_core::orchestrate::HostAction::Wait => {
+                                "wait for the helper".to_string()
+                            }
+                            portableforge_core::orchestrate::HostAction::Harvest => {
+                                "ready to gather the results".to_string()
+                            }
+                            portableforge_core::orchestrate::HostAction::Failed(msg) => {
+                                format!("the helper reported a problem: {msg}")
+                            }
+                        };
+                    rows.push((
+                        newest,
+                        format!(
+                            "{} — step: {phase}, last touched {age_text}, next: {next}",
+                            dir.file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| dir.display().to_string())
+                        ),
+                    ));
+                }
+            }
+            rows.sort_by_key(|row| std::cmp::Reverse(row.0));
+            if rows.is_empty() {
+                println!("No runs found in {}.", base.display());
+            } else {
+                for (_, line) in &rows {
+                    println!("{line}");
+                }
+            }
+            Ok(())
+        }
+        "doctor" => {
+            let report =
+                portableforge_core::orchestrate::evaluate_preflight(&collect_preflight_facts());
+            let (mode_name, honesty) = report.best_mode.describe();
+            let missed = report.checks.iter().filter(|c| !c.ok).count();
+            // The helper program lives beside this one.
+            let helper = std::env::current_exe().ok().and_then(|exe| {
+                ["portableforge-agent.exe", "portableforge-agent"]
+                    .iter()
+                    .map(|n| exe.with_file_name(n))
+                    .find(|p| p.is_file())
+            });
+            // The maker programs, when a cache folder is given.
+            let cache = flag(args, "--cache").map(std::path::PathBuf::from);
+            let mut tools_json = Vec::new();
+            let mut tools_missing = 0usize;
+            for pin in portableforge_core::tools::TOOL_PINS {
+                let ready = cache
+                    .as_ref()
+                    .and_then(|dir| portableforge_core::tools::find_verified_tool(dir, pin));
+                if cache.is_some() && ready.is_none() {
+                    tools_missing += 1;
+                }
+                tools_json.push(serde_json::json!({
+                    "name": pin.plain_name, "version": pin.version,
+                    "ready": ready.is_some(),
+                    "checked": cache.is_some(),
+                }));
+            }
+            let problems = missed + tools_missing + usize::from(helper.is_none());
+            if args.iter().any(|a| a == "--json") {
+                let value = serde_json::json!({
+                    "checks": report.checks.iter().map(|c| serde_json::json!({
+                        "label": c.label, "ok": c.ok, "fix": c.fix
+                    })).collect::<Vec<_>>(),
+                    "best_mode": { "name": mode_name, "honesty": honesty },
+                    "tools": tools_json,
+                    "helper_present": helper.is_some(),
+                    "helper_path": helper.as_ref().map(|p| p.display().to_string()),
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value).unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "Testing way: {mode_name} — {honesty} ({} check{} missed)",
+                    missed,
+                    if missed == 1 { "" } else { "s" }
+                );
+                for (i, pin) in portableforge_core::tools::TOOL_PINS.iter().enumerate() {
+                    let state = if cache.is_none() {
+                        "not checked (no --cache given)".to_string()
+                    } else if tools_json[i]["ready"].as_bool() == Some(true) {
+                        "ready and checked".to_string()
+                    } else {
+                        "missing or changed — see tools --cache".to_string()
+                    };
+                    println!("{} {}: {state}", pin.plain_name, pin.version);
+                }
+                match &helper {
+                    Some(p) => println!("Helper program: ready at {}", p.display()),
+                    None => println!(
+                        "Helper program: NOT beside PortableForge — the test box cannot be run without it."
+                    ),
+                }
+            }
+            if problems > 0 {
+                // Exit code 2: the report ran; something is missing.
+                set_exit_code(2);
             }
             Ok(())
         }
@@ -905,4 +1261,49 @@ fn read_metadata(path: Option<&String>) -> Result<PafMetadata, String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("We could not read {path}: {e}"))?;
     serde_json::from_str(&text).map_err(|e| format!("Those details could not be read: {e}"))
+}
+
+/// Rebuild just enough package details from a built package's own
+/// `appinfo.ini` to check its tree (used by `validate --tree` when no
+/// details file is at hand). The main program's name comes from the
+/// icon-extraction path, which names it exactly.
+fn meta_from_appinfo(text: &str) -> PafMetadata {
+    let get = |key: &str| -> String {
+        for line in text.lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                if k.trim().eq_ignore_ascii_case(key) {
+                    return v.trim().to_string();
+                }
+            }
+        }
+        String::new()
+    };
+    let extract_icon = get("ExtractIcon");
+    let main_exe = extract_icon
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or("")
+        .to_string();
+    PafMetadata {
+        name: get("Name"),
+        app_id: get("AppID"),
+        base_app_name: get("BaseAppName"),
+        publisher: get("Publisher"),
+        homepage: get("Homepage"),
+        category: get("Category"),
+        description: get("Description"),
+        language: get("Language"),
+        shareable: true,
+        open_source: false,
+        freeware: false,
+        commercial_use: false,
+        package_version: get("PackageVersion"),
+        display_version: get("DisplayVersion"),
+        requires_admin: false,
+        main_exe,
+        main_exe_64bit: None,
+        distribution: portableforge_core::paf::Distribution::Bundled {
+            redistribution_asserted: true,
+        },
+    }
 }
