@@ -109,6 +109,11 @@ pub struct PafMetadata {
     pub requires_admin: bool,
     /// Main executable inside `App\<BaseAppName>\`, e.g. `widget.exe`.
     pub main_exe: String,
+    /// Set when the main file is known to be a 64-bit build (the build
+    /// detects it from the file's own header): the Launcher settings
+    /// then carry the matching 64-bit program line.
+    #[serde(default)]
+    pub main_exe_64bit: Option<bool>,
     pub distribution: Distribution,
 }
 
@@ -185,6 +190,13 @@ impl PafMetadata {
             ini_safe(&self.base_app_name),
             ini_safe(&self.main_exe)
         ));
+        if self.main_exe_64bit == Some(true) {
+            out.push_str(&format!(
+                "ProgramExecutable64={}\\{}\n",
+                ini_safe(&self.base_app_name),
+                ini_safe(&self.main_exe)
+            ));
+        }
         out.push_str("DirectoryMoveOK=yes\n");
         out.push_str("SupportsUNC=yes\n");
 
@@ -381,12 +393,16 @@ impl PafMetadata {
         format!(
             "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
              <title>{name}</title></head><body>\n<h1>{name}</h1>\n\
-             <p>{desc}</p>\n<p>Publisher: {publisher}</p>\n\
-             <p>Packaged with PortableForge as a PortableApps.com Format package. \
-             All user data is stored in the <b>Data</b> directory next to the launcher.</p>\n\
+             <p>{desc}</p>\n\
+             <p>Version: {version} (package {package_version})<br>Publisher: {publisher}</p>\n\
+             <p>Made with PortableForge as a PortableApps.com Format package. \
+             All user data is stored in the <b>Data</b> directory next to the launcher, \
+             so the whole folder can be copied or backed up as one piece.</p>\n\
              </body></html>\n",
             name = html_escape(&self.name),
             desc = html_escape(&self.description),
+            version = html_escape(&self.display_version),
+            package_version = html_escape(&self.package_version),
             publisher = html_escape(&self.publisher)
         )
     }
@@ -469,6 +485,7 @@ pub(crate) mod tests {
             display_version: "1.2 Release 1".into(),
             requires_admin: false,
             main_exe: "widget.exe".into(),
+            main_exe_64bit: None,
             distribution,
         }
     }
@@ -608,6 +625,19 @@ pub(crate) mod tests {
             .all(|l| !l.starts_with("[Injected]") && !l.starts_with("Evil")));
         assert!(ini.contains("Name=Widget[Injected]Evil=1"));
         assert_eq!(ini_safe("a\r\nb"), "ab");
+    }
+
+    #[test]
+    fn help_html_names_version_publisher_and_maker() {
+        let m = sample(Distribution::Bundled {
+            redistribution_asserted: true,
+        });
+        let html = m.help_html();
+        assert!(html.contains("Widget Portable"));
+        assert!(html.contains("1.2 Release 1"));
+        assert!(html.contains("1.2.0.1"));
+        assert!(html.contains("Acme &amp; PortableApps.com"));
+        assert!(html.contains("Made with PortableForge"));
     }
 
     #[test]
