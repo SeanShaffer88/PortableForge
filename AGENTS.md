@@ -51,15 +51,25 @@ build, and leak-test — so the host machine is untouched.
 
 ## The gate (run in full before publishing)
 
+One copy-paste block — the full gate, exactly as CI runs it. Full
+suite, never a filtered subset; both clippy targets or it did not
+happen.
+
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
+cd ~/workspace/portableforge
 cargo fmt --all
+cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --target x86_64-pc-windows-msvc --locked --all-targets -- -D warnings
 cargo test --locked
-cargo check --target x86_64-pc-windows-msvc --all-targets   # when the target is installed
+cargo build --locked
 ```
 
-Full suite, never a filtered subset. CI mirrors this on windows-latest.
+On Windows (PowerShell) the same six cargo lines run unchanged —
+only the `export` line is replaced by
+`$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"`. CI mirrors
+this on windows-latest.
 
 ## Documentation
 
