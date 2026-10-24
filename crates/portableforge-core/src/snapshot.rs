@@ -174,9 +174,57 @@ pub fn scan_tree(
     Ok(entries)
 }
 
+/// Scan several roots into one snapshot (the in-sandbox agent's system
+/// capture: Program Files, ProgramData, the user profile, …). Each root
+/// is `(folder to walk, display prefix to record)`. A root that does
+/// not exist is skipped, not an error — a capture runs on machines
+/// where some of these folders are absent. When two roots record the
+/// same path, the later root wins.
+pub fn scan_roots(
+    roots: &[(PathBuf, String)],
+    label: impl Into<String>,
+) -> std::io::Result<Snapshot> {
+    let mut snap = Snapshot::new(label);
+    let mut by_path: std::collections::BTreeMap<String, FileEntry> =
+        std::collections::BTreeMap::new();
+    for (root, prefix) in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        let mut progress = Progress::new("scan", None);
+        for entry in scan_tree(root, prefix, &mut progress)? {
+            by_path.insert(entry.path.to_ascii_lowercase(), entry);
+        }
+    }
+    snap.files = by_path.into_values().collect();
+    Ok(snap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_roots_merges_existing_and_skips_missing() {
+        let dir = std::env::temp_dir().join(format!("pf-roots-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        std::fs::write(dir.join("a").join("one.txt"), b"1").unwrap();
+        std::fs::write(dir.join("b").join("two.txt"), b"2").unwrap();
+        let snap = scan_roots(
+            &[
+                (dir.join("a"), r"C:\Program Files".into()),
+                (dir.join("missing"), r"C:\Nope".into()),
+                (dir.join("b"), r"C:\Users".into()),
+            ],
+            "pre",
+        )
+        .unwrap();
+        assert_eq!(snap.files.len(), 2);
+        assert_eq!(snap.label, "pre");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn normalise_path_unifies_separators_and_drive_case() {
