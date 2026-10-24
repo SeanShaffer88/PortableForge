@@ -49,19 +49,35 @@ Pick a small, free program whose installer you are allowed to share
 2. **Pick:** type the setup file's full path. Continue must refuse an
    empty or wrong path with a plain message.
 3. **Safety check:** the step shows the real checks. All should pass.
-4. **Clean test box / Install / Try it out / Close:** run the program's
-   installer inside the test box (the session folder holds the
-   ready-made box settings), open the installed program, use it
-   briefly, close it, then close the box.
-5. **What it left behind:** the review cards appear. Fixes start on;
-   any big warning needs its tick before Continue works.
-6. **Name / Sharing:** fill the details; for a first test, "It is free
-   for anyone to share" is the honest answer only if it is true of
-   your test program — otherwise "I am not sure" exercises the safer
-   path.
-7. **Build:** generate the package folder, then run the two official
-   builders against it (each takes the package folder as its only
-   argument — the pins step already verified the right files).
+4. **Clean test box:** press **Start the test box**. The window makes
+   the session folder (under `PortableForge Sessions` in your home
+   folder), copies in the setup file and the helper, asks the helper
+   for the clean note, and starts the box. In the box, run the
+   program's installer. Back in the window, press **Check on the
+   test box** on the Install step (this asks the helper for the
+   after-install note), open the installed program in the box, use it
+   briefly, close it, then press **Check on the test box** again on
+   the Close step (after-runtime note + the program's folder is copied
+   out to `exchange\harvest\`). One more check after that reads the
+   notes in. (The same asks exist as commands:
+   `portableforge request-snapshot <session-folder> before|after-install|after-runtime`.)
+5. **What it left behind:** the review cards appear, filled in from
+   the notes. Fixes start on; any big warning needs its tick before
+   Continue works. Send back the session folder if the cards are
+   empty or wrong — the notes in `exchange\` show exactly why.
+6. **Name / Sharing:** fill the details (name, maker, main file name
+   ending in .exe, version as four numbers); for a first test, "It is
+   free for anyone to share" is the honest answer only if it is true
+   of your test program — otherwise "I am not sure" exercises the
+   safer path and asks for the maker's download address and its
+   fingerprint.
+7. **Build:** press **Build my portable copy now** — the package
+   folder is made in the session's `output\` folder with the accepted
+   fixes and the copied-out program files, and checked. Then run the
+   two official builders against that folder (each takes the package
+   folder as its only argument — the pins step already verified the
+   right files). The same build from a terminal:
+   `portableforge build <details.json> --session <session-folder> --out <folder>`.
 
 ## 3. The finishing test (10 minutes)
 
