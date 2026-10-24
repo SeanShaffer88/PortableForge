@@ -186,17 +186,38 @@ rendering, grouped leak output, verify end-to-end with exit 2,
 packet contents, rollback rehearsal, cleanup list + remove,
 restore-point line).
 
-## Slice 8 — Platform & preflight depth (items 71–80)
-- [ ] 71. Real free disk + memory figures on Windows (no new dependencies; OS queries from Rust)
-- [ ] 72. Virtualisation-enabled check in preflight facts
-- [ ] 73. Sandbox feature state read directly (DISM feature info) instead of "could not be checked"
-- [ ] 74. Windows edition read covers IoT Enterprise naming variants
-- [ ] 75. Preflight fix buttons copy the exact Settings path/command as text
-- [ ] 76. `portableforge-agent` version handshake in state.json; host warns on mismatch
-- [ ] 77. Session IDs are collision-proof (timestamp + app stem)
-- [ ] 78. Long-path (>260) harvest entries reported plainly instead of failing copies
-- [ ] 79. Unicode/space paths round-trip through .wsb, sessions, and the build (fixture tests)
-- [ ] 80. Timezone-safe timestamps in session logs and build reports (UTC ISO-8601)
+## Slice 8 — Platform & preflight depth (items 71–80) — DONE 2026-10-24
+- [x] 71. Real free disk + memory figures on Windows (no new dependencies; OS queries from Rust)
+- [x] 72. Virtualisation-enabled check in preflight facts
+- [x] 73. Sandbox feature state read directly (DISM feature info) instead of "could not be checked"
+- [x] 74. Windows edition read covers IoT Enterprise naming variants
+- [x] 75. Preflight fix buttons copy the exact Settings path/command as text
+- [x] 76. `portableforge-agent` version handshake in state.json; host warns on mismatch
+- [x] 77. Session IDs are collision-proof (timestamp + app stem)
+- [x] 78. Long-path (>260) harvest entries reported plainly instead of failing copies
+- [x] 79. Unicode/space paths round-trip through .wsb, sessions, and the build (fixture tests)
+- [x] 80. Timezone-safe timestamps in session logs and build reports (UTC ISO-8601)
+
+Slice 8 notes: the Windows fact collection now asks the operating
+system directly — free disk/memory and the virtualisation flag come
+from kernel32 (`GetDiskFreeSpaceExW`, `GlobalMemoryStatusEx`,
+`IsProcessorFeaturePresent(21)`), the Sandbox feature state from
+DISM's own feature info, and restore points from vssadmin (slice 7).
+Each fact still degrades to "could not be checked" rather than a
+guess. The edition logic moved into the core as one tested function
+covering the IoT Enterprise spellings (`IoTEnterprise`,
+`IoTEnterpriseS`, `IoTEnterpriseK`), LTSC (`EnterpriseS`), and
+Professional Education, with the registry ProductName as a fallback
+witness. Every failed preflight check that has an exact fix now
+carries it as copyable text — the wizard shows a "Copy the fix"
+button, the CLI prints "Copy this: …". Session stamps: the record
+carries `created_utc`, session log lines are prefixed with a UTC
+stamp in `Session::say`, and the build report carries
+`built_at_utc`, all from the new dependency-free `timeutil` module.
+Runtime note: the Windows-only collectors compile under the
+windows-msvc gate and CI, but their on-machine readings join the
+runbook's verification list — they are Unverified until SEAN's pass.
+Gate: fmt clean; clippy clean host + windows-msvc; **87/87 tests**.
 
 ## Slice 9 — Quality, tests, accessibility (items 81–90)
 - [ ] 81. Malformed .reg inputs never panic the parser (hostile-input test set)
