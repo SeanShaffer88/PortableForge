@@ -334,6 +334,33 @@ mod tests {
     }
 
     #[test]
+    fn theme_contrast_meets_wcag_thresholds() {
+        fn lum(hex: &str) -> f64 {
+            let h = hex.trim_start_matches('#');
+            let chan = |i: usize| {
+                let c = u8::from_str_radix(&h[i..i + 2], 16).unwrap() as f64 / 255.0;
+                if c <= 0.03928 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * chan(0) + 0.7152 * chan(2) + 0.0722 * chan(4)
+        }
+        fn ratio(a: &str, b: &str) -> f64 {
+            let (la, lb) = (lum(a), lum(b));
+            let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+            (hi + 0.05) / (lo + 0.05)
+        }
+        // Measured 2026-10-24: TEXT/PANEL 17.45, MUTED/PANEL 8.0,
+        // ACCENT/BG 5.37, FAINT/PANEL 3.73 (faint is detail/large text).
+        assert!(ratio(theme::TEXT, theme::PANEL) >= 7.0);
+        assert!(ratio(theme::TEXT_MUTED, theme::PANEL) >= 4.5);
+        assert!(ratio(theme::ACCENT_RED, theme::BG) >= 4.5);
+        assert!(ratio(theme::TEXT_FAINT, theme::PANEL) >= 3.0);
+    }
+
+    #[test]
     fn theme_tokens_are_the_family_dark_palette() {
         assert_eq!(theme::BG, "#000000");
         assert_eq!(theme::PRIMARY_RED, "#6B0700");
