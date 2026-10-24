@@ -58,6 +58,9 @@ pub struct SandboxConfig {
     pub sandbox_tools: String,
     pub sandbox_exchange: String,
     pub networking: bool,
+    /// Clipboard sharing between the real computer and the box.
+    /// Default off: nothing should move between them unnoticed.
+    pub clipboard: bool,
     pub memory_mb: u32,
 }
 
@@ -71,6 +74,7 @@ impl Default for SandboxConfig {
             sandbox_tools: r"C:\PortableForge\Tools".into(),
             sandbox_exchange: r"C:\PortableForge\Exchange".into(),
             networking: false,
+            clipboard: false,
             memory_mb: 4096,
         }
     }
@@ -88,10 +92,11 @@ impl SandboxConfig {
     /// logon command — a direct executable launch, no shell script.
     pub fn to_wsb(&self) -> String {
         let networking = if self.networking { "Enable" } else { "Disable" };
+        let clipboard = if self.clipboard { "Enable" } else { "Disable" };
         format!(
             "<Configuration>\n\
              \x20 <Networking>{networking}</Networking>\n\
-             \x20 <ClipboardRedirection>Disable</ClipboardRedirection>\n\
+             \x20 <ClipboardRedirection>{clipboard}</ClipboardRedirection>\n\
              \x20 <PrinterRedirection>Disable</PrinterRedirection>\n\
              \x20 <AudioInput>Disable</AudioInput>\n\
              \x20 <VideoInput>Disable</VideoInput>\n\
