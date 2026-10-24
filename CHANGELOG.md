@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added — 100-enhancement programme, Slice 6: the command line grows up (2026-10-24)
+- For scripts and careful checking: `preflight`, `post-capture`, and
+  `leaks` can all answer in JSON (`--json`), and `leaks --out` saves
+  its report to a file. Commands now end with documented exit codes —
+  0 fine, 1 something went wrong, 2 the run worked but a check found
+  problems — so a script can tell "the tool broke" from "the answer
+  is no". `--quiet` silences the progress chatter on `snapshot` and
+  `build`, and every command has its own help (`portableforge build
+  --help`).
+- Two new commands: `sessions` lists your earlier runs with their
+  step, how long since they were touched, and what should happen
+  next; `doctor` gives one health report — this computer, the maker
+  programs, and whether the helper program is in place. The host
+  `snapshot` command can read several folders into one note, and
+  `validate --tree` can check a built package from its own paperwork
+  alone, with no details file needed. `classify --details` shows the
+  technical row behind each plain card.
+
 ### Added — 100-enhancement programme, Slice 5: building gets deeper and safer (2026-10-24)
 - Before a build writes anything, it now lists *every* problem with
   the details at once — and it refuses to build into a folder that
