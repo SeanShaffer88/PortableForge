@@ -130,6 +130,7 @@ Commands (the same steps, for scripts and testing):
   request-snapshot <session-folder> <before|after-install|after-runtime>
                                           Ask the helper in the test box to take one note now
   agent-state <session-folder>          Show what the helper in the test box is doing and what should happen next
+  mode-b --out <folder>                 Make a packet (helper program + plain instructions) for testing in your own virtual machine, with no test box
   launch <session-folder>               Start the test box for a prepared session folder
   post-capture <session-folder>         Read a finished capture's notes into a review
   preflight                               Check whether this computer can run the safe test box
@@ -350,6 +351,9 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 None => println!("The helper in the test box has not reported in yet."),
                 Some(s) => {
                     println!("Step: {:?}", s.phase);
+                    if let Some(action) = &s.agent_action {
+                        println!("Doing now: {action}");
+                    }
                     if let Some(hb) = s.agent_heartbeat_secs {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -369,6 +373,15 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                     }
                 }
             }
+            if let Some((point, age)) = portableforge_core::orchestrate::pending_request(&layout) {
+                println!(
+                    "Waiting for the {} note — asked {age} seconds ago.",
+                    point.note_name()
+                );
+                if age > portableforge_core::orchestrate::CAPTURE_WAIT_WARN_SECS {
+                    println!("That wait is longer than usual — the test box may have been closed.");
+                }
+            }
             match portableforge_core::orchestrate::next_host_action(state.as_ref()) {
                 portableforge_core::orchestrate::HostAction::Wait => {
                     println!("Next: wait for the helper to finish.")
@@ -379,6 +392,45 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 portableforge_core::orchestrate::HostAction::Failed(line) => {
                     println!("Next: the helper reported a problem: {line}")
                 }
+            }
+            Ok(())
+        }
+        "mode-b" => {
+            let out = std::path::PathBuf::from(need_flag(args, "--out")?);
+            let exchange = out.join("exchange");
+            std::fs::create_dir_all(&exchange).map_err(|e| e.to_string())?;
+            // The helper program, copied from beside this program
+            // when it is there; a plain note stands in when it is not.
+            let agent_names = ["portableforge-agent.exe", "portableforge-agent"];
+            let mut copied = false;
+            if let Ok(exe) = std::env::current_exe() {
+                for name in agent_names {
+                    let src = exe.with_file_name(name);
+                    if src.is_file() {
+                        std::fs::copy(&src, out.join(name)).map_err(|e| e.to_string())?;
+                        copied = true;
+                        break;
+                    }
+                }
+            }
+            if !copied {
+                std::fs::write(
+                    out.join("AGENT-MISSING.txt"),
+                    "The helper program (portableforge-agent) was not next to \
+                     PortableForge, so it could not be copied into this packet.\n\
+                     Copy portableforge-agent.exe into this folder yourself, \
+                     next to READ-ME-FIRST.txt, before using the packet.\n",
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            std::fs::write(out.join("READ-ME-FIRST.txt"), MODE_B_INSTRUCTIONS)
+                .map_err(|e| e.to_string())?;
+            println!(
+                "Mode B packet made in {} — read READ-ME-FIRST.txt inside it.",
+                out.display()
+            );
+            if !copied {
+                println!("Note: the helper program was not beside PortableForge, so read AGENT-MISSING.txt too.");
             }
             Ok(())
         }
@@ -492,6 +544,12 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             for s in &outcome.specimens {
                 println!("Starting-settings seed: Data\\{}", s.data_relative);
             }
+            if !outcome.shortcut_candidates.is_empty() {
+                println!(
+                    "Start Menu shortcut found for: {} — the main file is often the same name with .exe on the end.",
+                    outcome.shortcut_candidates.join(", ")
+                );
+            }
             if let Some(name) = &outcome.hints.display_name {
                 println!("Program's own name tag: {name}");
             }
@@ -539,6 +597,44 @@ fn read_review(path: &str) -> Result<portableforge_core::review::Review, String>
 /// Start the test box for a prepared session. Windows only — on any
 /// other system the command is printed and the caller told plainly
 /// that nothing was started.
+/// The plain instructions inside a Mode B packet. Mode B means: your
+/// own virtual machine, its own snapshot feature, and these steps by
+/// hand — PortableForge still does the thinking afterwards.
+const MODE_B_INSTRUCTIONS: &str = "\
+Testing with your own virtual machine (Mode B)\n\
+==============================================\n\
+\n\
+This way uses a virtual machine you run yourself, instead of the\n\
+built-in test box. Your real computer is never touched: everything\n\
+happens inside the virtual machine, and its own snapshot feature is\n\
+what keeps it safe — take a snapshot of the clean machine first.\n\
+\n\
+You need: this folder (with the helper program in it), the setup\n\
+file of the program you want to make portable, and a Windows\n\
+virtual machine that can see this folder (a shared folder is fine).\n\
+\n\
+1. Take a snapshot of the clean virtual machine, so you can go back.\n\
+2. Copy this folder into the virtual machine.\n\
+3. In the virtual machine, open a command window in this folder and\n\
+   take the clean note:\n\
+     portableforge-agent capture --exchange exchange --name before.json\n\
+4. Run the setup file and install the program, then take the\n\
+   after-installing note. EITHER run it by hand:\n\
+     portableforge-agent capture --exchange exchange --name after-install.json\n\
+   OR let the helper take it when things settle — start this BEFORE\n\
+   running the setup file:\n\
+     portableforge-agent watch --exchange exchange\n\
+5. Start the installed program once, use it a little, close it, then:\n\
+     portableforge-agent capture --exchange exchange --name after-runtime.json\n\
+6. Copy the whole exchange folder back to your real computer, into\n\
+   the session's exchange folder (or a fresh folder), and on the\n\
+   real computer run:\n\
+     portableforge post-capture <that folder's session>\n\
+     portableforge build <details.json> --session <session> --app-files <the program's folder>\n\
+\n\
+Tip: the three notes are just files in the exchange folder. If one\n\
+is missing, PortableForge will tell you exactly which one.\n";
+
 pub fn launch_sandbox(
     layout: &portableforge_core::orchestrate::SessionLayout,
 ) -> Result<(), String> {
