@@ -74,6 +74,15 @@ pub struct Session {
     /// so far"), so a long scan never looks like a hang.
     #[serde(default)]
     pub agent_action: Option<String>,
+    /// The helper program's own version, written by the helper into
+    /// its state file so the host can warn when the two do not match
+    /// (a stale helper beside a newer PortableForge).
+    #[serde(default)]
+    pub agent_version: Option<String>,
+    /// When this run was created, as a UTC ISO-8601 stamp — never a
+    /// local time whose zone a reader would have to guess.
+    #[serde(default)]
+    pub created_utc: String,
     /// The sharing answer id once chosen (`mine` / `free` / `unsure`).
     pub sharing_answer: Option<String>,
 }
@@ -90,12 +99,17 @@ impl Session {
             log: Vec::new(),
             agent_heartbeat_secs: None,
             agent_action: None,
+            agent_version: None,
+            created_utc: crate::timeutil::now_iso(),
             sharing_answer: None,
         }
     }
 
+    /// Add a log line, stamped with the current UTC time so a session
+    /// log read later (or on another machine) is never ambiguous.
     pub fn say(&mut self, line: impl Into<String>) {
-        self.log.push(line.into());
+        self.log
+            .push(format!("[{}] {}", crate::timeutil::now_iso(), line.into()));
     }
 
     pub fn advance_to(&mut self, phase: Phase) {
