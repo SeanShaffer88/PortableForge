@@ -1,0 +1,17 @@
+{
+  "label": "pre",
+  "files": [
+    {
+      "path": "C:\\Windows\\System32\\kernel32.dll",
+      "size": 8,
+      "sha256": "8ba8496a2525ae171ffd104d632dede6ef418d9b95962a9d88e2fcdbc8d48d24",
+      "mtime_secs": 0
+    }
+  ],
+  "registry": [],
+  "services": [
+    "SomeExistingService"
+  ],
+  "skipped_files": 0,
+  "capture_warnings": []
+}
