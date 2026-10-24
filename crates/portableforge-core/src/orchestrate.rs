@@ -295,7 +295,7 @@ pub fn harvest_tree(source: &Path, dest: &Path) -> Result<HarvestReport, String>
 /// location while being tried out. Its contents become the package's
 /// `App\DefaultData` seed (so a fresh portable copy starts with sane
 /// settings), and the *moved* original lives in `Data\` at run time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Specimen {
     /// Absolute path inside the sandbox where the file was seen.
     pub sandbox_path: String,
@@ -459,6 +459,43 @@ pub fn request_snapshot(layout: &SessionLayout, point: CapturePoint) -> Result<(
     Ok(())
 }
 
+/// Program details the install itself recorded (its uninstall
+/// registration): the honest source for pre-filling the naming step,
+/// instead of guessing from file names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataHints {
+    pub display_name: Option<String>,
+    pub publisher: Option<String>,
+    pub display_version: Option<String>,
+}
+
+impl MetadataHints {
+    fn from_snapshot(snap: &Snapshot) -> Self {
+        let mut hints = Self::default();
+        for e in &snap.registry {
+            if !e
+                .key
+                .to_ascii_lowercase()
+                .contains(r"\microsoft\windows\currentversion\uninstall\")
+            {
+                continue;
+            }
+            // .reg data is the quoted textual form: `"Widget"`.
+            let value = e.data.trim().trim_matches('"').to_string();
+            if value.is_empty() {
+                continue;
+            }
+            match e.name.as_str() {
+                "DisplayName" => hints.display_name = Some(value),
+                "Publisher" => hints.publisher = Some(value),
+                "DisplayVersion" => hints.display_version = Some(value),
+                _ => {}
+            }
+        }
+        hints
+    }
+}
+
 /// The result of reading a finished capture back from the exchange
 /// folder: both change lists, the ready-made review for the "What it
 /// left behind" step, and the first-run specimen plan.
@@ -468,6 +505,7 @@ pub struct CaptureOutcome {
     pub runtime_diff: crate::diff::Diff,
     pub review: crate::review::Review,
     pub specimens: Vec<Specimen>,
+    pub hints: MetadataHints,
 }
 
 /// Read the three notes the agent leaves in the exchange folder
@@ -504,14 +542,86 @@ pub fn post_capture(layout: &SessionLayout) -> Result<CaptureOutcome, String> {
         }
     }
 
-    let classifications = crate::classify::classify(&install_diff, &runtime_diff, &install_dirs);
+    let mut classifications =
+        crate::classify::classify(&install_diff, &runtime_diff, &install_dirs);
+
+    // Canary scan: text files the agent harvested may embed absolute
+    // paths from inside the test box (its user name is the giveaway).
+    // Those become FileWriteRewrite findings in the review.
+    let harvest_dir = layout.exchange.join("harvest");
+    if harvest_dir.is_dir() {
+        let mut stack = vec![harvest_dir.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for item in entries.flatten() {
+                let path = item.path();
+                let Ok(kind) = item.file_type() else { continue };
+                if kind.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !kind.is_file() {
+                    continue;
+                }
+                let ext = path
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default();
+                if !matches!(
+                    ext.as_str(),
+                    "ini" | "xml" | "json" | "txt" | "cfg" | "conf"
+                ) {
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                if bytes.len() > 262_144 {
+                    continue;
+                }
+                let Ok(text) = String::from_utf8(bytes) else {
+                    continue;
+                };
+                let rel = path
+                    .strip_prefix(&harvest_dir)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned();
+                if let Some(c) = crate::classify::classify_file_content(&rel, &text) {
+                    let already = classifications.iter().any(|x| x.finding == c.finding);
+                    if !already {
+                        classifications.push(c);
+                    }
+                }
+            }
+        }
+    }
+
     let review = crate::review::Review::from_classifications(classifications);
     let specimens = specimen_plan(&runtime_diff);
+    let hints = MetadataHints::from_snapshot(&after_install);
+
+    // Save the artefacts next to the session record, so a run can be
+    // inspected, resumed, or sent back without re-reading the notes.
+    let _ = std::fs::write(layout.root.join("review.json"), review.to_json());
+    if let Ok(json) = serde_json::to_string_pretty(&install_diff) {
+        let _ = std::fs::write(layout.root.join("install-diff.json"), json);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&runtime_diff) {
+        let _ = std::fs::write(layout.root.join("runtime-diff.json"), json);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&specimens) {
+        let _ = std::fs::write(layout.root.join("specimens.json"), json);
+    }
+
     Ok(CaptureOutcome {
         install_diff,
         runtime_diff,
         review,
         specimens,
+        hints,
     })
 }
 
@@ -595,10 +705,47 @@ mod tests {
         ] {
             std::fs::write(layout.exchange.join(name), snap.to_json()).unwrap();
         }
+        // Uninstall registration in the install note -> naming hints.
+        after_install.registry.push(crate::snapshot::RegEntry {
+            key: r"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\Widget"
+                .into(),
+            name: "DisplayName".into(),
+            data: "\"Widget\"".into(),
+        });
+        after_install.registry.push(crate::snapshot::RegEntry {
+            key: r"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\Widget"
+                .into(),
+            name: "DisplayVersion".into(),
+            data: "\"1.2\"".into(),
+        });
+        std::fs::write(
+            layout.exchange.join("after-install.json"),
+            after_install.to_json(),
+        )
+        .unwrap();
+        // A harvested settings file embedding the sandbox user name ->
+        // a FileWriteRewrite finding from the canary scan.
+        let harvest = layout.exchange.join("harvest");
+        std::fs::create_dir_all(&harvest).unwrap();
+        std::fs::write(
+            harvest.join("settings.ini"),
+            "home=C:\\Users\\WDAGUtilityAccount\\Widget\n",
+        )
+        .unwrap();
         let outcome = post_capture(&layout).unwrap();
         assert!(!outcome.review.items.is_empty(), "review should have cards");
         assert_eq!(outcome.specimens.len(), 1);
         assert_eq!(outcome.specimens[0].data_relative, r"Widget\settings.ini");
+        assert_eq!(outcome.hints.display_name.as_deref(), Some("Widget"));
+        assert_eq!(outcome.hints.display_version.as_deref(), Some("1.2"));
+        assert!(outcome.review.items.iter().any(|i| matches!(
+            i.classification.finding,
+            crate::classify::Finding::FileWriteRewrite { .. }
+        )));
+        // Artefacts are saved into the session folder.
+        assert!(layout.root.join("review.json").is_file());
+        assert!(layout.root.join("install-diff.json").is_file());
+        assert!(layout.root.join("specimens.json").is_file());
         let missing = post_capture(&session_layout(&base, "nope"));
         assert!(missing.unwrap_err().contains("before.json"));
         let _ = std::fs::remove_dir_all(&base);
