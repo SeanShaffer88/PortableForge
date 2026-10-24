@@ -65,7 +65,7 @@ Your answer is written into the package's notes, so anyone can see which kind of
 
 ## Command line (optional)
 
-You never need this — the window does everything. For scripts and testing, every step is also a command: `portableforge guide`, `snapshot`, `diff`, `wsb`, `generate`, `validate`, and more. Run `portableforge help` for the list.
+You never need this — the window does everything. For scripts and testing, every step is also a command: `portableforge guide`, `snapshot`, `diff`, `wsb`, `generate`, `validate`, plus the end-to-end ones — `launch`, `request-snapshot`, `post-capture`, and `build` (session notes + package details → a finished, checked package folder). Run `portableforge help` for the list.
 
 ## Screenshots
 
@@ -82,7 +82,7 @@ Two programs come out: `portableforge` (the window + commands) and `portableforg
 
 ## Status
 
-Early development. The thinking parts — noting changes, spotting what a program left behind, building and checking the package files, and the test-box settings — are built and tested. The full window path on a real Windows machine is still being finished and is labelled honestly in the changelog: nothing here claims to be verified on Windows until it has actually been run on one.
+The full flow is wired end to end and tested off-Windows: the helper in the test box takes the before / after-install / after-trying-out notes itself (the window or the `request-snapshot` command asks, it answers and copies the program files out), the review feeds a build pipeline that generates the package with the accepted fixes, copies in the harvested program and first-run settings, and validates the finished tree — from the window's build button or the `build` command. What remains unverified is the live run on a real Windows machine (starting the test box, the helper's in-box capture, and the two official builder programs making the final single file) — see `docs/ON_MACHINE_RUNBOOK.md`. Nothing here claims to be verified on Windows until it has actually been run on one.
 
 ## License
 
