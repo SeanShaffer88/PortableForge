@@ -93,17 +93,42 @@ and asserts each `why` names the path, key, or service it was decided
 from. Gate: fmt clean; clippy clean host + windows-msvc; **70/70
 tests**; `review` CLI smoke green on a real capture session.
 
-## Slice 5 — Build & package depth (items 41–50)
-- [ ] 41. PE architecture detection (x86/x64/ARM64) for the main executable, shown in the build report
-- [ ] 42. Build warns when the main file is not a real Windows program file (no MZ/PE header)
-- [ ] 43. Harvested `.ico` becomes `App\AppInfo\appicon.ico` automatically
-- [ ] 44. Build refuses a non-empty output folder unless explicitly overridden, with a plain reason
-- [ ] 45. Package size and file count in the build summary
-- [ ] 46. Optional portable `.zip` of the finished tree alongside the package folder
-- [ ] 47. Generator runner: verified PAL/Installer generator programs run when their installed paths are supplied
-- [ ] 48. `[Launch]` gains the 64-bit program path line when the main file is x64-only
-- [ ] 49. Specimen auto-seeding: build from a session maps harvested specimen files into DefaultData by the specimen plan
-- [ ] 50. Deterministic manifest: SHA256SUMS sorted, stable across rebuilds of the same inputs
+## Slice 5 — Build & package depth (items 41–50) — DONE 2026-10-24
+- [x] 41. PE architecture detection (x86/x64/ARM64) for the main executable, shown in the build report
+- [x] 42. Build warns when the main file is not a real Windows program file (no MZ/PE header)
+- [x] 43. Harvested `.ico` becomes `App\AppInfo\appicon.ico` automatically
+- [x] 44. Build refuses a non-empty output folder unless explicitly overridden, with a plain reason
+- [x] 45. Package size and file count in the build summary
+- [x] 46. Optional portable `.zip` of the finished tree alongside the package folder
+- [x] 47. Generator runner: verified PAL/Installer generator programs run when their installed paths are supplied
+- [x] 48. `[Launch]` gains the 64-bit program path line when the main file is x64-only
+- [x] 49. Specimen auto-seeding: build from a session maps harvested specimen files into DefaultData by the specimen plan
+- [x] 50. Deterministic manifest: SHA256SUMS sorted, stable across rebuilds of the same inputs
+
+Slice 5 notes: the PE reader lives in `snapshot.rs` (`pe_arch`,
+header-only, unit-tested on crafted headers for all three families).
+The build reads the main file's header before generating, so an x64
+program gets `ProgramExecutable64=` in its Launcher settings from the
+same build. The zip writer is a small stored-entries writer in
+`build.rs` (fixed 1980 date + sorted entries, so the same tree zips
+to the same bytes; validated against Python's zipfile incl. CRC).
+Item 47 landed as `tools run-installer` / `tools run-launcher`: the
+pinned download is fingerprint-verified first, the maker program is
+taken from `--generator` when supplied (else found in the tools
+folder), and it runs only on Windows — elsewhere the exact command
+is printed. Item 49 seeds from `exchange\specimens\` first, then the
+harvest by file name; specimens whose contents were never captured
+are reported as noted-but-unseeded, never silently dropped. Also
+landed in this slice, beyond the ten: pre-flight metadata check
+listing *every* problem before anything is written (with new
+empty-publisher/homepage warnings and a near-limit description
+warning at 480 of 512), license-file detection into `App\AppInfo\`,
+a supplied `--icon`, per-folder size breakdown in the build report,
+`Data\` preservation counting on rebuilds, richer `help.html`
+(version, publisher, "Made with PortableForge"), and a Launcher INI
+spelling check against the Template 3.5.2 sections/closed key sets.
+Gate: fmt clean; clippy clean host + windows-msvc; **79/79 tests**;
+CLI smokes green (x64 build + zip + guard + seeding).
 
 ## Slice 6 — CLI & scripting (items 51–60)
 - [ ] 51. `--json` for preflight, post-capture, and leaks outputs
