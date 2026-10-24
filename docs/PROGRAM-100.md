@@ -219,17 +219,36 @@ windows-msvc gate and CI, but their on-machine readings join the
 runbook's verification list — they are Unverified until SEAN's pass.
 Gate: fmt clean; clippy clean host + windows-msvc; **87/87 tests**.
 
-## Slice 9 — Quality, tests, accessibility (items 81–90)
-- [ ] 81. Malformed .reg inputs never panic the parser (hostile-input test set)
-- [ ] 82. Generated-tree snapshot/diff round-trip property test on synthetic trees
-- [ ] 83. Jargon guard extended to the wizard's own button and label strings
-- [ ] 84. Accessibility notes doc: palette contrast table, focus order, text scaling behaviour
-- [ ] 85. Full-workspace gate script equivalent documented in AGENTS.md (already policy; make it one copy-paste block)
-- [ ] 86. Test count and coverage of core modules reported in the tracker per slice
-- [ ] 87. Example fixture session (tiny, synthetic) checked in for the runbook's offline rehearsal
-- [ ] 88. Offline rehearsal doc: run the whole pipeline from the fixture without Windows Sandbox
-- [ ] 89. Fuzz-style loop in tests: random path shapes through normalise/diff/classify never panic
-- [ ] 90. Release-readiness checklist doc (gates, runbook, screenshots, changelog)
+## Slice 9 — Quality, tests, accessibility (items 81–90) — DONE 2026-10-24
+- [x] 81. Malformed .reg inputs never panic the parser (hostile-input test set)
+- [x] 82. Generated-tree snapshot/diff round-trip property test on synthetic trees
+- [x] 83. Jargon guard extended to the wizard's own button and label strings
+- [x] 84. Accessibility notes doc: palette contrast table, focus order, text scaling behaviour
+- [x] 85. Full-workspace gate script equivalent documented in AGENTS.md (already policy; make it one copy-paste block)
+- [x] 86. Test count and coverage of core modules reported in the tracker per slice
+- [x] 87. Example fixture session (tiny, synthetic) checked in for the runbook's offline rehearsal
+- [x] 88. Offline rehearsal doc: run the whole pipeline from the fixture without Windows Sandbox
+- [x] 89. Fuzz-style loop in tests: random path shapes through normalise/diff/classify never panic
+- [x] 90. Release-readiness checklist doc (gates, runbook, screenshots, changelog)
+
+Slice 9 notes: the wizard-string guard extracts sentence-like
+literals from the wizard's own source and checks them against the
+guide's banned list — it passed on first run, which says the plain
+language held; now it is enforced. The fixture session is guarded by
+a core test that runs `post_capture` on it, so it cannot rot. The
+accessibility doc's one honest shortfall: faint text (4.12:1 on
+black) is below AA for small text and is therefore used only for
+secondary hints, never for anything a person must read to proceed.
+
+**Test counts per slice** (full suite, `cargo test --locked`):
+baseline 47 → Slice 1: 53 → Slice 2: 60 → Slice 3: 65 → Slice 4:
+70 → Slice 5: 79 → Slice 6: 79 → Slice 7: 82 → Slice 8: 87 →
+Slice 9: **92** (89 core + 3 wizard). Core tests by module at
+Slice 9 (counted from `#[test]` in each file): snapshot 11,
+orchestrate 11, build 10, paf 8, classify 7, guide 6, validate 4,
+settings 4, wsb 3, tools 3, session 3, rollback 3, regfile 3,
+noise 3, diff 3, review 2, progress 2, leaktest 2, timeutil 1.
+Every core module carries tests.
 
 ## Slice 10 — Release & finish (items 91–100)
 - [ ] 91. Version 1.0.0 once the on-machine runbook passes; crates + docs aligned
