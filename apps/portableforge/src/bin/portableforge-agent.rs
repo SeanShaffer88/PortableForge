@@ -360,6 +360,9 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     let once = args.iter().any(|a| a == "--once");
     let state_path = exchange.join("state.json");
     let mut session = Session::new("in-box", SandboxMode::WindowsSandbox);
+    // Version handshake: the host compares this against its own
+    // version and warns when a stale helper is in the box.
+    session.agent_version = Some(env!("CARGO_PKG_VERSION").to_string());
     loop {
         // Serve any capture the host has asked for, in sequence order.
         for point in CapturePoint::ALL {
