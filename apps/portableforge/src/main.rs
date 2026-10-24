@@ -123,7 +123,7 @@ Commands (the same steps, for scripts and testing):
   classify <install-diff.json> <runtime-diff.json>
   wsb --input <folder> --tools <folder> --exchange <folder> --out <file.wsb> [--online]
   generate <details.json> --out <folder> [--review <review.json>]
-  build <details.json> --out <folder> [--session <session-folder>] [--review <review.json>] [--app-files <folder>] [--default-data <folder>] [--json]
+  build <details.json> --out <folder> [--session <session-folder>] [--review <review.json>] [--app-files <folder>] [--default-data <folder>] [--icon <file.ico>] [--zip] [--force] [--json]
                                           Build the finished package: the session's notes (or a saved review) supply the accepted fixes, the harvested program files and starting settings are copied in, and the finished tree is checked
   validate <details.json> [--tree <folder>]
   session-new --id <name> --out <file.json>
@@ -136,6 +136,8 @@ Commands (the same steps, for scripts and testing):
   post-capture <session-folder>         Read a finished capture's notes into a review
   preflight                               Check whether this computer can run the safe test box
   tools [--cache <folder>]              List the pinned PortableApps.com builder tools and check any found in the cache folder
+  tools run-installer <package> --cache <folder> [--generator <program>]   Run the checked PortableApps.com setup maker on a finished package folder
+  tools run-launcher <package> --cache <folder> [--generator <program>]   Run the checked PortableApps.com starter maker on a finished package folder
   specimens <runtime-diff.json>         List first-run files that would seed the package's starting settings
   leaks <package-folder-in-box> <before.json> <after.json>   Judge a finished-copy test run
   rollback-plan <diff.json>             List how a Careful-mode run would be put back
@@ -271,14 +273,108 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             }
             let accepted = accepted.unwrap_or_default();
             let app_files = flag(args, "--app-files");
-            let default_data = flag(args, "--default-data");
+            let mut default_data = flag(args, "--default-data");
+            // Session builds seed the first-run files automatically:
+            // every specimen whose contents were captured (in the
+            // harvest, or dropped in exchange\specimens) is laid out
+            // the way Data\ will hold it.
+            let mut seeded: Vec<String> = Vec::new();
+            let mut unseeded: Vec<String> = Vec::new();
+            let mut seed_dir: Option<std::path::PathBuf> = None;
+            if default_data.is_none() && !specimens.is_empty() {
+                if let Some(dir) = flag(args, "--session") {
+                    let exchange = session_layout_for(&std::path::PathBuf::from(&dir)).exchange;
+                    let dir_path =
+                        std::env::temp_dir().join(format!("pf-seed-{}", std::process::id()));
+                    let _ = std::fs::remove_dir_all(&dir_path);
+                    for spec in &specimens {
+                        let rel = spec
+                            .data_relative
+                            .replace('\\', std::path::MAIN_SEPARATOR_STR);
+                        // Candidate contents, in order: an explicit
+                        // specimens copy, then any harvest file with
+                        // the same name (first-run files commonly live
+                        // beside the program).
+                        let file_name = spec
+                            .sandbox_path
+                            .rsplit('\\')
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
+                        let mut source: Option<std::path::PathBuf> =
+                            Some(exchange.join("specimens").join(&rel)).filter(|p| p.is_file());
+                        if source.is_none() {
+                            let harvest = exchange.join("harvest");
+                            let mut stack = vec![harvest];
+                            while let Some(d) = stack.pop() {
+                                let Ok(entries) = std::fs::read_dir(&d) else {
+                                    continue;
+                                };
+                                for entry in entries.flatten() {
+                                    let p = entry.path();
+                                    if p.is_dir() {
+                                        stack.push(p);
+                                    } else if p.is_file()
+                                        && p.file_name()
+                                            .map(|n| {
+                                                n.to_string_lossy().eq_ignore_ascii_case(&file_name)
+                                            })
+                                            .unwrap_or(false)
+                                    {
+                                        source = Some(p);
+                                        break;
+                                    }
+                                }
+                                if source.is_some() {
+                                    break;
+                                }
+                            }
+                        }
+                        match source {
+                            Some(src_path) => {
+                                let dest = dir_path.join(&rel);
+                                if let Some(parent) = dest.parent() {
+                                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                                }
+                                std::fs::copy(&src_path, &dest).map_err(|e| e.to_string())?;
+                                seeded.push(spec.data_relative.clone());
+                            }
+                            None => unseeded.push(spec.data_relative.clone()),
+                        }
+                    }
+                    if !seeded.is_empty() {
+                        default_data = Some(dir_path.to_string_lossy().into_owned());
+                        seed_dir = Some(dir_path);
+                    } else {
+                        let _ = std::fs::remove_dir_all(&dir_path);
+                    }
+                }
+            }
+            let icon = flag(args, "--icon");
+            let force = args.iter().any(|a| a == "--force");
             let outcome = portableforge_core::build::build_package(
                 Path::new(&out),
                 &meta,
                 &accepted,
                 app_files.as_deref().map(Path::new),
                 default_data.as_deref().map(Path::new),
+                icon.as_deref().map(Path::new),
+                force,
             )?;
+            if let Some(dir) = &seed_dir {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            let zip_path = if args.iter().any(|a| a == "--zip") {
+                let zp = format!("{out}.zip");
+                let n =
+                    portableforge_core::build::write_package_zip(Path::new(&out), Path::new(&zp))?;
+                if !json {
+                    println!("Zip copy: {zp} ({n} files)");
+                }
+                Some(zp)
+            } else {
+                None
+            };
             if json {
                 let value = serde_json::json!({
                     "summary": outcome.summary(),
@@ -287,6 +383,18 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                     "app_bytes_copied": outcome.app_bytes_copied,
                     "default_data_files_copied": outcome.default_data_files_copied,
                     "skipped": outcome.skipped,
+                    "license_file": outcome.license_file,
+                    "icon_installed": outcome.icon_installed,
+                    "icon_source": outcome.icon_source,
+                    "main_exe_arch": outcome.main_exe_arch,
+                    "zip": zip_path,
+                    "specimens_seeded": seeded,
+                    "specimens_unseeded": unseeded,
+                    "preserved_data_files": outcome.preserved_data_files,
+                    "total_bytes": outcome.total_bytes(),
+                    "sizes": outcome.size_breakdown.iter().map(|(folder, bytes, files)| serde_json::json!({
+                        "folder": folder, "bytes": bytes, "files": files
+                    })).collect::<Vec<_>>(),
                     "specimens": specimens.iter().map(|s| s.data_relative.clone()).collect::<Vec<_>>(),
                     "issues": outcome.issues.iter().map(|i| serde_json::json!({
                         "error": i.error, "field": i.field, "message": i.message
@@ -304,8 +412,13 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 };
             }
             println!("{}", outcome.summary());
-            for s in &specimens {
-                println!("Starting-settings seed noted: Data\\{}", s.data_relative);
+            for s in &seeded {
+                println!("Starting-settings seed planted: Data\\{s}");
+            }
+            for s in &unseeded {
+                println!(
+                    "Starting-settings seed noted (its contents were not captured): Data\\{s}"
+                );
             }
             for issue in &outcome.issues {
                 println!(
@@ -501,6 +614,92 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "tools" => {
+            // `tools run-installer|run-launcher <package-folder>
+            // --cache <folder> [--generator <program>]`: run one of
+            // the pinned, fingerprint-checked PortableApps.com maker
+            // programs on a finished package. Explicitly invoked —
+            // nothing runs them automatically.
+            let run_kind = match args.get(1).map(String::as_str) {
+                Some("run-installer") => {
+                    Some(portableforge_core::tools::ToolId::InstallerGenerator)
+                }
+                Some("run-launcher") => Some(portableforge_core::tools::ToolId::LauncherGenerator),
+                _ => None,
+            };
+            if let Some(tool_id) = run_kind {
+                let package = args
+                    .get(2)
+                    .ok_or("Give the finished package folder to run the maker on.")?;
+                let cache = flag(args, "--cache")
+                    .map(std::path::PathBuf::from)
+                    .ok_or("Give --cache <folder>, the folder the tools were downloaded into.")?;
+                let pin = portableforge_core::tools::pin(tool_id);
+                let download = portableforge_core::tools::find_verified_tool(&cache, pin)
+                    .ok_or_else(|| format!(
+                        "The {} {} is not in {} yet, or its fingerprint does not match — download it from {} first.",
+                        pin.plain_name, pin.version, cache.display(), pin.download_url
+                    ))?;
+                // The maker program itself: the path supplied with
+                // --generator wins; otherwise look in the cache folder
+                // and one level down (where its own installer puts it).
+                let mut generator: Option<std::path::PathBuf> =
+                    flag(args, "--generator").map(std::path::PathBuf::from);
+                if generator.is_none() {
+                    let direct = cache.join(pin.generator_exe);
+                    if direct.is_file() {
+                        generator = Some(direct);
+                    } else if let Ok(entries) = std::fs::read_dir(&cache) {
+                        for entry in entries.flatten() {
+                            let candidate = entry.path().join(pin.generator_exe);
+                            if candidate.is_file() {
+                                generator = Some(candidate);
+                                break;
+                            }
+                        }
+                    }
+                }
+                let Some(generator) = generator else {
+                    println!(
+                        "The checked download is ready at {}, but the maker program itself ({}) was not found. Run the download once and install it into a folder inside {}, or say where it is with --generator <program>.",
+                        download.display(),
+                        pin.generator_exe,
+                        cache.display()
+                    );
+                    return Ok(());
+                };
+                if !generator.is_file() {
+                    return Err(format!(
+                        "The maker program {} could not be found.",
+                        generator.display()
+                    ));
+                }
+                let invocation =
+                    portableforge_core::tools::generator_invocation(pin, Path::new(package));
+                let program = generator.with_file_name(&invocation.program);
+                println!(
+                    "{} {} (download checked against the recorded fingerprint)",
+                    pin.plain_name, pin.version
+                );
+                println!("Package: {package}");
+                #[cfg(windows)]
+                {
+                    let status = std::process::Command::new(&program)
+                        .args(&invocation.args)
+                        .status()
+                        .map_err(|e| format!("The maker could not be started: {e}"))?;
+                    println!("The maker finished with: {status}");
+                }
+                #[cfg(not(windows))]
+                {
+                    println!(
+                        "On Windows this runs: {} {}",
+                        program.display(),
+                        invocation.args.join(" ")
+                    );
+                    println!("(This computer is not Windows, so nothing was run.)");
+                }
+                return Ok(());
+            }
             let cache = flag(args, "--cache").map(std::path::PathBuf::from);
             for pin in portableforge_core::tools::TOOL_PINS {
                 println!(
