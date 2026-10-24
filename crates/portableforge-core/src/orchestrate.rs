@@ -873,6 +873,43 @@ mod tests {
     }
 
     #[test]
+    fn the_fixture_session_flows_through_post_capture() {
+        // Item 87: the checked-in fixture session must always read
+        // back into a review — it is the offline rehearsal's base,
+        // so it can never quietly rot.
+        // Work on a copy: post_capture saves its review artifacts
+        // into the session folder, and the checked-in fixture must
+        // stay exactly the inputs it ships.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/fixture-session");
+        let base = std::env::temp_dir().join(format!("pf-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("fixture-session");
+        std::fs::create_dir_all(work.join("exchange")).unwrap();
+        std::fs::copy(fixture.join("session.json"), work.join("session.json")).unwrap();
+        for name in ["before.json", "after-install.json", "after-runtime.json"] {
+            std::fs::copy(
+                fixture.join("exchange").join(name),
+                work.join("exchange").join(name),
+            )
+            .unwrap();
+        }
+        let layout = session_layout(&base, "fixture-session");
+        let outcome = post_capture(&layout).expect("fixture post-capture");
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(!outcome.review.items.is_empty());
+        assert_eq!(outcome.hints.display_name.as_deref(), Some("Widget"));
+        assert_eq!(outcome.hints.publisher.as_deref(), Some("Acme Corp"));
+        assert!(outcome
+            .specimens
+            .iter()
+            .any(|s| s.data_relative.ends_with("settings.ini")));
+        assert!(outcome
+            .shortcut_candidates
+            .iter()
+            .any(|s| s.contains("Widget")));
+    }
+
+    #[test]
     fn platform_helpers_cover_the_variants() {
         // Editions: the IoT family and LTSC spellings count; Home does not.
         assert!(edition_supported("IoTEnterprise"));
