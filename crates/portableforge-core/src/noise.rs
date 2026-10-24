@@ -17,6 +17,9 @@ const NOISE_PATH_FRAGMENTS: &[&str] = &[
     r"\windows\temp",
     r"\appdata\local\microsoft\windows\inetcache",
     r"\appdata\local\microsoft\windows\webcache",
+    r"\softwaredistribution\deliveryoptimization",
+    r"\microsoft\windows\deliveryoptimization",
+    r"\programdata\microsoft\search\data",
     r"\appdata\local\crashdumps",
     r"\programdata\microsoft\windows\wer",
     r"\windows\system32\winevt\logs",
@@ -76,6 +79,23 @@ mod tests {
         assert!(!is_noise_reg(
             r"HKEY_CURRENT_USER\Software\Acme\Widget",
             "Mode"
+        ));
+    }
+
+    #[test]
+    fn delivery_optimization_and_search_index_are_noise() {
+        assert!(is_noise_path(
+            r"C:\Windows\SoftwareDistribution\DeliveryOptimization\Cache\a.bin"
+        ));
+        assert!(is_noise_path(
+            r"C:\Users\X\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache\a.bin"
+        ));
+        assert!(is_noise_path(
+            r"C:\ProgramData\Microsoft\Search\Data\Applications\Windows\Windows.edb"
+        ));
+        // A real program folder that merely mentions search is not noise.
+        assert!(!is_noise_path(
+            r"C:\Program Files\Acme\SearchWidget\search.exe"
         ));
     }
 
