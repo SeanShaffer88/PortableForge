@@ -43,17 +43,29 @@ once per capture and only into fields the person left empty. Gate:
 fmt clean; clippy clean host + windows-msvc; **60/60 tests** (58 core
 + 2 wizard). Windows GUI runtime stays Unverified until SEAN's pass.
 
-## Slice 3 — Capture & agent depth (items 21–30)
-- [ ] 21. Snapshot scan skips unreadable files and reports the skip count instead of failing the whole note
-- [ ] 22. Services capture on Windows (`sc query`) fills `snapshot.services`, so service red flags fire from real captures
-- [ ] 23. Agent heartbeat carries the current action ("looking through …") and scan progress %
-- [ ] 24. Hash cache: unchanged files (same size + mtime) are not re-hashed between notes
-- [ ] 25. Registry export failure names the hive that failed and retries once
-- [ ] 26. `watch` agent command: snapshot when a folder has been quiet for N seconds (hands-free after-install note)
-- [ ] 27. Host capture timeout: wizard/CLI warn when a requested note has not arrived in a set time
-- [ ] 28. Start Menu shortcut targets harvested as main-executable candidates
-- [ ] 29. Agent state writes are atomic (write-then-rename) so the host never reads a half-written state
-- [ ] 30. Mode B packet: CLI generates a folder (agent + plain instructions) to run by hand in your own VM
+## Slice 3 — Capture & agent depth (items 21–30) — DONE 2026-10-24
+- [x] 21. Snapshot scan skips unreadable files and reports the skip count instead of failing the whole note
+- [x] 22. Services capture on Windows (`sc query`) fills `snapshot.services`, so service red flags fire from real captures
+- [x] 23. Agent heartbeat carries the current action ("looking through …", files checked so far — a total can't be known mid-scan, so no invented %)
+- [x] 24. Hash cache: unchanged files (same size + mtime) are not re-hashed between notes
+- [x] 25. Registry export failure names the hive that failed and retries once
+- [x] 26. `watch` agent command: snapshot when a folder has been quiet for N seconds (hands-free after-install note)
+- [x] 27. Host capture timeout: wizard/CLI warn when a requested note has not arrived in a set time
+- [x] 28. Start Menu shortcut targets harvested as main-executable candidates
+- [x] 29. Agent state writes are atomic (write-then-rename) so the host never reads a half-written state
+- [x] 30. Mode B packet: CLI generates a folder (agent + plain instructions) to run by hand in your own VM
+
+Slice 3 notes: snapshots gained `skipped_files` and `capture_warnings`
+(both defaulted, so older notes still read). The hash cache lives in
+the exchange folder (`hash-cache.json`) and is the standard
+size+mtime trade-off — documented in the module. The wizard pre-fills
+the main file from the first shortcut candidate when it's empty, and
+both the wizard and `agent-state` warn after 120 s of waiting for a
+note. Item 28 landed as shortcut *names* (the honest signal available
+without parsing .lnk targets). Gate: fmt clean; clippy clean host +
+windows-msvc; **65/65 tests**; off-Windows smoke green (note sequence
+with cache, pending-request warning, Mode B packet, `watch` settling
+at change+quiet with both files in the note).
 
 ## Slice 4 — Classification & review depth (items 31–40)
 - [ ] 31. Findings de-duplicated across install + runtime passes for every finding type
