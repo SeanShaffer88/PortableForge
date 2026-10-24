@@ -11,6 +11,7 @@ use portableforge_core::orchestrate::{
 };
 use portableforge_core::review::Review;
 use portableforge_core::session::Phase;
+use portableforge_core::settings::{self, WizardDraft, WizardSettings};
 
 pub struct WizardApp {
     step: usize,
@@ -28,11 +29,27 @@ pub struct WizardApp {
     review: Review,
     layout: Option<SessionLayout>,
     build_summary: Option<String>,
+    built_dir: Option<std::path::PathBuf>,
     log: Vec<String>,
+    // The wizard's own memory (recent files, text size, the
+    // unfinished-run draft) and the bookkeeping for saving it.
+    settings: WizardSettings,
+    settings_path: std::path::PathBuf,
+    settings_dirty: bool,
+    last_save: std::time::Instant,
+    resume_offer: bool,
+    hints_applied: bool,
 }
 
 impl Default for WizardApp {
     fn default() -> Self {
+        let settings_path = settings::settings_path();
+        let settings = settings::load(&settings_path);
+        let resume_offer = settings
+            .draft
+            .as_ref()
+            .map(|d| d.has_progress())
+            .unwrap_or(false);
         Self {
             step: 0,
             show_details: false,
@@ -49,9 +66,63 @@ impl Default for WizardApp {
             review: Review::default(),
             layout: None,
             build_summary: None,
+            built_dir: None,
             log: vec!["Welcome to PortableForge.".to_string()],
+            settings,
+            settings_path,
+            settings_dirty: false,
+            last_save: std::time::Instant::now(),
+            resume_offer,
+            hints_applied: false,
         }
     }
+}
+
+/// Where the file chooser should open: the folder of the path the
+/// person already typed, when there is one — never somewhere random.
+fn picker_start_dir(current: &str) -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(current.trim());
+    if p.as_os_str().is_empty() {
+        return None;
+    }
+    if p.is_dir() {
+        return Some(p.to_path_buf());
+    }
+    p.parent()
+        .filter(|parent| parent.is_dir())
+        .map(|parent| parent.to_path_buf())
+}
+
+/// A file size in plain words: `812 KB`, `14.2 MB`, `1.3 GB`.
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1_000;
+    const MB: u64 = 1_000_000;
+    const GB: u64 = 1_000_000_000;
+    if bytes < KB {
+        format!("{bytes} bytes")
+    } else if bytes < MB {
+        format!("{} KB", bytes / KB)
+    } else if bytes < GB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    }
+}
+
+/// Open a folder in the computer's file manager. Best effort — the
+/// wizard always prints the path too, so a failure is never a trap.
+fn open_folder(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let program = "xdg-open";
+    std::process::Command::new(program)
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("We could not open {}: {e}", path.display()))
 }
 
 /// Where session folders live: a `PortableForge Sessions` folder in
@@ -141,6 +212,7 @@ impl WizardApp {
                         "Your work folder is ready: {}",
                         layout.root.display()
                     ));
+                    self.hints_applied = false;
                     self.layout = Some(layout);
                 }
                 Err(e) => {
@@ -203,6 +275,43 @@ impl WizardApp {
                         self.log
                             .push(format!("Notes read in. {}", outcome.review.summary()));
                         self.review = outcome.review;
+                        // Pre-fill the naming step from the program's
+                        // own tags — once per capture, and only into
+                        // fields the person has not filled themselves.
+                        if !self.hints_applied {
+                            let hints = &outcome.hints;
+                            let mut filled: Vec<&str> = Vec::new();
+                            if self.app_name.trim().is_empty() {
+                                if let Some(name) = &hints.display_name {
+                                    self.app_name = name.clone();
+                                    filled.push("the name");
+                                }
+                            }
+                            if self.publisher.trim().is_empty() {
+                                if let Some(publisher) = &hints.publisher {
+                                    self.publisher = publisher.clone();
+                                    filled.push("who makes it");
+                                }
+                            }
+                            if self.package_version == "1.0.0.0" {
+                                if let Some(version) = hints
+                                    .display_version
+                                    .as_deref()
+                                    .and_then(portableforge_core::paf::pad_package_version)
+                                {
+                                    self.package_version = version;
+                                    filled.push("the version");
+                                }
+                            }
+                            if !filled.is_empty() {
+                                self.log.push(format!(
+                                    "Filled in {} from the program's own tags — you can check and change them on the naming step.",
+                                    filled.join(", ")
+                                ));
+                                self.mark_dirty();
+                            }
+                            self.hints_applied = true;
+                        }
                     }
                     Err(e) => self.log.push(e),
                 }
@@ -313,6 +422,7 @@ impl WizardApp {
                 }
                 self.log.push(outcome.summary());
                 self.build_summary = Some(text);
+                self.built_dir = Some(out_root);
             }
             Err(e) => self.log.push(e),
         }
@@ -332,11 +442,218 @@ impl WizardApp {
             _ => Phase::Build,
         }
     }
+
+    /// The run so far, as a draft for the settings file.
+    fn current_draft(&self) -> WizardDraft {
+        WizardDraft {
+            step: STEPS[self.step.min(STEPS.len() - 1)].id.to_string(),
+            installer_path: self.installer_path.clone(),
+            app_name: self.app_name.clone(),
+            description: self.description.clone(),
+            publisher: self.publisher.clone(),
+            main_exe: self.main_exe.clone(),
+            package_version: self.package_version.clone(),
+            online_url: self.online_url.clone(),
+            online_sha: self.online_sha.clone(),
+        }
+    }
+
+    /// Note that the settings (draft included) changed and should be
+    /// written out soon — the write itself is throttled in `update`.
+    fn mark_dirty(&mut self) {
+        self.settings.draft = Some(self.current_draft());
+        self.settings_dirty = true;
+    }
+
+    /// Write the settings out if they changed and a moment has passed
+    /// since the last write (called every frame; the throttle keeps
+    /// typing from hammering the disk).
+    fn persist_if_due(&mut self) {
+        if self.settings_dirty && self.last_save.elapsed() >= std::time::Duration::from_secs(1) {
+            self.persist_now();
+        }
+    }
+
+    fn persist_now(&mut self) {
+        // Saves the settings exactly as they stand — callers that
+        // changed the run snapshot the draft first (see mark_dirty);
+        // callers clearing the draft (Finish, Start fresh) rely on
+        // this not putting it back.
+        if settings::save(&self.settings_path, &self.settings).is_ok() {
+            self.settings_dirty = false;
+            self.last_save = std::time::Instant::now();
+        }
+    }
+
+    /// Take up the unfinished run the settings remembered.
+    fn resume_draft(&mut self) {
+        let Some(draft) = self.settings.draft.clone() else {
+            return;
+        };
+        self.installer_path = draft.installer_path;
+        self.app_name = draft.app_name;
+        self.description = draft.description;
+        self.publisher = draft.publisher;
+        self.main_exe = draft.main_exe;
+        if !draft.package_version.trim().is_empty() {
+            self.package_version = draft.package_version;
+        }
+        self.online_url = draft.online_url;
+        self.online_sha = draft.online_sha;
+        if let Some(pos) = STEPS.iter().position(|s| s.id == draft.step) {
+            self.step = pos;
+        }
+        self.resume_offer = false;
+        self.mark_dirty();
+        self.log
+            .push("Picked up your unfinished run where you left it.".to_string());
+    }
+
+    /// Throw the remembered draft away and start the run fresh.
+    fn discard_draft(&mut self) {
+        self.settings.draft = None;
+        self.resume_offer = false;
+        self.settings_dirty = true;
+        self.persist_now();
+        self.log
+            .push("Started fresh — the unfinished run was cleared.".to_string());
+    }
+
+    /// One step back. Nothing is lost.
+    fn go_back(&mut self) {
+        if self.step > 0 {
+            self.step -= 1;
+            self.mark_dirty();
+        }
+    }
+
+    /// One step forward, when the current step's promise is kept —
+    /// the same check the Continue button makes (a plain refusal in
+    /// the log, never a trap). Returns true when the step moved or
+    /// the run finished.
+    fn advance(&mut self) -> bool {
+        let blocked = match STEPS[self.step].id {
+            "pick" => {
+                if self.installer_path.trim().is_empty() {
+                    self.log.push(
+                        "Pick the program's setup file first — type its full path above."
+                            .to_string(),
+                    );
+                    true
+                } else if !std::path::Path::new(self.installer_path.trim()).exists() {
+                    self.log.push(format!(
+                        "We could not find a file at {} — check the path and try again.",
+                        self.installer_path.trim()
+                    ));
+                    true
+                } else {
+                    self.settings.remember_installer(self.installer_path.trim());
+                    false
+                }
+            }
+            "name" => {
+                if self.app_name.trim().is_empty() {
+                    self.log.push(
+                        "Give your portable copy a name first — anything short and clear."
+                            .to_string(),
+                    );
+                    true
+                } else if self.main_exe.trim().is_empty() {
+                    self.log.push(
+                        "Add the program's main file name — it ends in .exe and starts the program."
+                            .to_string(),
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
+            "changes" => {
+                if !self.review.items.is_empty() && !self.review.all_acknowledged() {
+                    self.log.push(
+                        "There is a warning above that needs a tick in its box before we go on."
+                            .to_string(),
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
+            "sharing" => {
+                if self.sharing.is_none() {
+                    self.log.push(
+                        "Pick one answer above — 'I am not sure' is a good, safe answer."
+                            .to_string(),
+                    );
+                    true
+                } else {
+                    if self.sharing == Some(SharingAnswer::NotSure) {
+                        self.log.push(
+                            "Safest choice picked. When we build, we will use the maker's own download link and check it is genuine."
+                                .to_string(),
+                        );
+                    }
+                    false
+                }
+            }
+            _ => false,
+        };
+        if blocked {
+            return false;
+        }
+        if self.step + 1 < STEPS.len() {
+            self.step += 1;
+            self.log
+                .push(format!("Moved to: {}", STEPS[self.step].title));
+            self.mark_dirty();
+            true
+        } else {
+            // Finish on the last step: the run is complete, so the
+            // unfinished-run draft goes away.
+            self.settings.draft = None;
+            self.settings_dirty = true;
+            self.persist_now();
+            self.log
+                .push("All done — this run is finished.".to_string());
+            true
+        }
+    }
 }
 
 impl eframe::App for WizardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.set_visuals(dark_visuals());
+        ctx.set_zoom_factor(self.settings.text_scale());
+        self.persist_if_due();
+
+        // Keyboard: Enter continues and Escape goes back — but never
+        // while the person is typing in a box, where those keys are
+        // theirs.
+        let typing = ctx.memory(|m| m.focused().is_some());
+        if !typing {
+            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.advance();
+            } else if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.go_back();
+            }
+        }
+
+        // Drag-and-drop: dropping the setup file anywhere on the pick
+        // step is the same as choosing it with Browse.
+        if STEPS[self.step.min(STEPS.len() - 1)].id == "pick" {
+            let dropped = ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone()));
+            if let Some(path) = dropped {
+                self.installer_path = path.to_string_lossy().into_owned();
+                self.settings
+                    .remember_installer(&self.installer_path.clone());
+                self.mark_dirty();
+                self.log.push(format!(
+                    "Setup file chosen: {}",
+                    self.installer_path.clone()
+                ));
+            }
+        }
+
         let step = &STEPS[self.step.min(STEPS.len() - 1)];
         egui::TopBottomPanel::top("progress").show(ctx, |ui| {
             ui.add_space(6.0);
@@ -350,6 +667,27 @@ impl eframe::App for WizardApp {
                         .color(color(guide::theme::ACCENT_RED))
                         .strong(),
                 );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let scale = self.settings.text_scale();
+                    for (label, value) in [
+                        ("Extra large", 1.5f32),
+                        ("Large", 1.25),
+                        ("Standard", 1.0),
+                    ] {
+                        if ui
+                            .selectable_label(scale == value, label)
+                            .on_hover_text("Make all the text in this window bigger or smaller. Your choice is remembered.")
+                            .clicked()
+                        {
+                            self.settings.text_scale = value;
+                            self.settings_dirty = true;
+                        }
+                    }
+                    ui.label(
+                        egui::RichText::new("Text size:")
+                            .color(color(guide::theme::TEXT_MUTED)),
+                    );
+                });
             });
             let frac = (self.step as f32 + 1.0) / STEPS.len() as f32;
             ui.add(
@@ -372,6 +710,33 @@ impl eframe::App for WizardApp {
                     .color(color(guide::theme::TEXT_MUTED)),
             );
             ui.add_space(12.0);
+
+            // An unfinished run from last time is offered, never forced.
+            if self.resume_offer {
+                ui.label(
+                    egui::RichText::new(
+                        "You have an unfinished run from last time. You can pick it up where you left it, or start again.",
+                    )
+                    .color(color(guide::theme::ACCENT_RED)),
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Pick up where I left off")
+                        .on_hover_text("Fill the steps back in with what you had entered.")
+                        .clicked()
+                    {
+                        self.resume_draft();
+                    }
+                    if ui
+                        .button("Start again")
+                        .on_hover_text("Clear the unfinished run and begin fresh.")
+                        .clicked()
+                    {
+                        self.discard_draft();
+                    }
+                });
+                ui.add_space(10.0);
+            }
 
             // Compute the safety report the first time its step shows.
             if step.id == "safety" && self.preflight.is_none() {
@@ -441,25 +806,97 @@ impl eframe::App for WizardApp {
                 "pick" => {
                     ui.label("Where is the program's setup file?");
                     ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.installer_path)
+                        if ui
+                            .text_edit_singleline(&mut self.installer_path)
                             .on_hover_text(
                                 "Type or paste the full path of the setup file you downloaded, or use Browse.",
-                            );
+                            )
+                            .changed()
+                        {
+                            self.mark_dirty();
+                        }
                         if ui
                             .button("Browse…")
                             .on_hover_text("Open a file chooser to find the setup file.")
                             .clicked()
                         {
-                            if let Some(path) = rfd::FileDialog::new()
+                            let mut dialog = rfd::FileDialog::new()
                                 .set_title("Pick the program's setup file")
                                 .add_filter("Setup files", &["exe", "msi", "zip"])
-                                .add_filter("All files", &["*"])
-                                .pick_file()
-                            {
+                                .add_filter("All files", &["*"]);
+                            if let Some(dir) = picker_start_dir(&self.installer_path) {
+                                dialog = dialog.set_directory(dir);
+                            }
+                            if let Some(path) = dialog.pick_file() {
                                 self.installer_path = path.to_string_lossy().into_owned();
+                                self.settings
+                                    .remember_installer(&self.installer_path.clone());
+                                self.mark_dirty();
                             }
                         }
                     });
+                    ui.label(
+                        egui::RichText::new("You can also drag the setup file onto this window.")
+                            .color(color(guide::theme::TEXT_MUTED)),
+                    );
+                    // Say plainly what the typed path points at.
+                    let typed = self.installer_path.trim().to_string();
+                    if !typed.is_empty() {
+                        match std::fs::metadata(&typed) {
+                            Ok(md) if md.is_file() => {
+                                let name = std::path::Path::new(&typed)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                ui.label(format!(
+                                    "That file is {} — {}.",
+                                    format_size(md.len()),
+                                    name
+                                ));
+                            }
+                            Ok(_) => {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "That path is a folder — pick the setup file inside it.",
+                                    )
+                                    .color(color(guide::theme::ACCENT_RED)),
+                                );
+                            }
+                            Err(_) => {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "We can't find a file there yet — check the path, or use Browse.",
+                                    )
+                                    .color(color(guide::theme::TEXT_MUTED)),
+                                );
+                            }
+                        }
+                    }
+                    // Files this wizard has packaged lately, one tap away.
+                    let recents = self.settings.recent_installers.clone();
+                    let others: Vec<&String> =
+                        recents.iter().filter(|p| p.as_str() != typed).collect();
+                    if !others.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new("Setup files you used lately:")
+                                .color(color(guide::theme::TEXT_MUTED)),
+                        );
+                        for path in others {
+                            let name = std::path::Path::new(path)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| path.clone());
+                            if ui
+                                .button(name)
+                                .on_hover_text(path.clone())
+                                .clicked()
+                            {
+                                self.installer_path = path.clone();
+                                self.mark_dirty();
+                            }
+                        }
+                    }
                 }
                 "clean" => {
                     if ui
@@ -504,19 +941,87 @@ impl eframe::App for WizardApp {
                     if let Some(text) = &self.build_summary {
                         ui.label(text.clone());
                     }
+                    if step.id == "done" {
+                        ui.add_space(6.0);
+                        if let Some(dir) = self.built_dir.clone() {
+                            if ui
+                                .button("Open the folder with your portable copy")
+                                .on_hover_text(dir.to_string_lossy().into_owned())
+                                .clicked()
+                            {
+                                if let Err(e) = open_folder(&dir) {
+                                    self.log.push(e);
+                                }
+                            }
+                        }
+                        if let Some(layout) = self.layout.clone() {
+                            if ui
+                                .button("Open the work folder")
+                                .on_hover_text(layout.root.to_string_lossy().into_owned())
+                                .clicked()
+                            {
+                                if let Err(e) = open_folder(&layout.root) {
+                                    self.log.push(e);
+                                }
+                            }
+                        }
+                    }
                 }
                 "name" => {
                     ui.label("Name for your portable copy");
-                    ui.text_edit_singleline(&mut self.app_name);
+                    if ui.text_edit_singleline(&mut self.app_name).changed() {
+                        self.mark_dirty();
+                    }
+                    if self.app_name.trim().is_empty() {
+                        ui.label(
+                            egui::RichText::new("A name is needed before you can continue.")
+                                .color(color(guide::theme::TEXT_MUTED)),
+                        );
+                    }
                     ui.label("Who makes the program");
-                    ui.text_edit_singleline(&mut self.publisher);
+                    if ui.text_edit_singleline(&mut self.publisher).changed() {
+                        self.mark_dirty();
+                    }
                     ui.label("The program's main file name (ends in .exe)");
-                    ui.text_edit_singleline(&mut self.main_exe)
-                        .on_hover_text("The file that starts the program, as it appears inside its folder — for example widget.exe. It was in the list of things the program installed.");
+                    if ui.text_edit_singleline(&mut self.main_exe)
+                        .on_hover_text("The file that starts the program, as it appears inside its folder — for example widget.exe. It was in the list of things the program installed.")
+                        .changed()
+                    {
+                        self.mark_dirty();
+                    }
+                    let exe = self.main_exe.trim();
+                    if exe.is_empty() {
+                        ui.label(
+                            egui::RichText::new("The main file name is needed before you can continue.")
+                                .color(color(guide::theme::TEXT_MUTED)),
+                        );
+                    } else if exe.contains('\\') || exe.contains('/') {
+                        ui.label(
+                            egui::RichText::new("Just the file name — not a whole path.")
+                                .color(color(guide::theme::ACCENT_RED)),
+                        );
+                    } else if !exe.to_ascii_lowercase().ends_with(".exe") {
+                        ui.label(
+                            egui::RichText::new("That doesn't end in .exe — the main file nearly always does.")
+                                .color(color(guide::theme::ACCENT_RED)),
+                        );
+                    }
                     ui.label("Version, as four numbers (like 1.0.0.0)");
-                    ui.text_edit_singleline(&mut self.package_version);
+                    if ui.text_edit_singleline(&mut self.package_version).changed() {
+                        self.mark_dirty();
+                    }
+                    if !portableforge_core::paf::valid_package_version(
+                        self.package_version.trim(),
+                    ) {
+                        ui.label(
+                            egui::RichText::new("Use four numbers with dots between them, like 1.0.0.0.")
+                                .color(color(guide::theme::ACCENT_RED)),
+                        );
+                    }
                     ui.label("A short description");
-                    ui.text_edit_multiline(&mut self.description);
+                    if ui.text_edit_multiline(&mut self.description).changed() {
+                        self.mark_dirty();
+                    }
                 }
                 "sharing" => {
                     for option in SHARING_ANSWERS {
@@ -537,10 +1042,16 @@ impl eframe::App for WizardApp {
                     if self.sharing == Some(SharingAnswer::NotSure) {
                         ui.add_space(4.0);
                         ui.label("Where the maker offers the original program (a web address starting https://)");
-                        ui.text_edit_singleline(&mut self.online_url);
+                        if ui.text_edit_singleline(&mut self.online_url).changed() {
+                            self.mark_dirty();
+                        }
                         ui.label("That file's fingerprint — 64 letters and numbers given by the maker, if they publish one");
-                        ui.text_edit_singleline(&mut self.online_sha)
-                            .on_hover_text("This is how the finished copy checks the download is genuine. It is called a SHA-256 fingerprint.");
+                        if ui.text_edit_singleline(&mut self.online_sha)
+                            .on_hover_text("This is how the finished copy checks the download is genuine. It is called a SHA-256 fingerprint.")
+                            .changed()
+                        {
+                            self.mark_dirty();
+                        }
                     }
                 }
                 _ => {}
@@ -567,7 +1078,7 @@ impl eframe::App for WizardApp {
                         .on_hover_text("Go back one step. Nothing is lost.")
                         .clicked()
                 {
-                    self.step -= 1;
+                    self.go_back();
                 }
                 let next_label = if self.step + 1 >= STEPS.len() {
                     "Finish"
@@ -581,79 +1092,8 @@ impl eframe::App for WizardApp {
                 {
                     // Each step checks its own promise before letting the
                     // person continue — a plain refusal, never a trap.
-                    let blocked = match STEPS[self.step].id {
-                        "pick" => {
-                            if self.installer_path.trim().is_empty() {
-                                self.log.push(
-                                    "Pick the program's setup file first — type its full path above."
-                                        .to_string(),
-                                );
-                                true
-                            } else if !std::path::Path::new(self.installer_path.trim()).exists()
-                            {
-                                self.log.push(format!(
-                                    "We could not find a file at {} — check the path and try again.",
-                                    self.installer_path.trim()
-                                ));
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        "name" => {
-                            if self.app_name.trim().is_empty() {
-                                self.log.push(
-                                    "Give your portable copy a name first — anything short and clear."
-                                        .to_string(),
-                                );
-                                true
-                            } else if self.main_exe.trim().is_empty() {
-                                self.log.push(
-                                    "Add the program's main file name — it ends in .exe and starts the program."
-                                        .to_string(),
-                                );
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        "changes" => {
-                            if !self.review.items.is_empty()
-                                && !self.review.all_acknowledged()
-                            {
-                                self.log.push(
-                                    "There is a warning above that needs a tick in its box before we go on."
-                                        .to_string(),
-                                );
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        "sharing" => {
-                            if self.sharing.is_none() {
-                                self.log.push(
-                                    "Pick one answer above — 'I am not sure' is a good, safe answer."
-                                        .to_string(),
-                                );
-                                true
-                            } else {
-                                if self.sharing == Some(SharingAnswer::NotSure) {
-                                    self.log.push(
-                                        "Safest choice picked. When we build, we will use the maker's own download link and check it is genuine."
-                                            .to_string(),
-                                    );
-                                }
-                                false
-                            }
-                        }
-                        _ => false,
-                    };
-                    if !blocked && self.step + 1 < STEPS.len() {
-                        self.step += 1;
-                        self.log
-                            .push(format!("Moved to: {}", STEPS[self.step].title));
-                    }
+                    // Enter on the keyboard takes this same path.
+                    self.advance();
                 }
                 let _ = self.phase();
             });
@@ -680,4 +1120,32 @@ pub fn run_gui() -> eframe::Result<()> {
         options,
         Box::new(|_cc| Ok(Box::new(WizardApp::default()))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_read_plainly() {
+        assert_eq!(format_size(0), "0 bytes");
+        assert_eq!(format_size(812), "812 bytes");
+        assert_eq!(format_size(812_000), "812 KB");
+        assert_eq!(format_size(14_200_000), "14.2 MB");
+        assert_eq!(format_size(1_300_000_000), "1.3 GB");
+    }
+
+    #[test]
+    fn picker_opens_where_the_person_already_is() {
+        assert_eq!(picker_start_dir(""), None);
+        assert_eq!(picker_start_dir("   "), None);
+        // A folder path opens in itself.
+        let dir = std::env::temp_dir();
+        assert_eq!(picker_start_dir(&dir.to_string_lossy()), Some(dir.clone()));
+        // A file path opens in its folder.
+        let file = dir.join("setup.exe");
+        assert_eq!(picker_start_dir(&file.to_string_lossy()), Some(dir));
+        // A path whose folder does not exist leaves the choice alone.
+        assert_eq!(picker_start_dir(r"Z:\no\such\place\setup.exe"), None);
+    }
 }
