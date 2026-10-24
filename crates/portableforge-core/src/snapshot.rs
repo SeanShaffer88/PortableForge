@@ -358,6 +358,48 @@ pub fn scan_roots_full(
 /// output. Driver services are left out — a packaging tool cares about
 /// program services, and driver installs are already a separate
 /// red-flag category.
+/// The processor family a Windows program file was built for, read
+/// from its PE header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeArch {
+    X86,
+    X64,
+    Arm64,
+    /// A PE file for some other machine type.
+    Other(u16),
+}
+
+impl PeArch {
+    pub fn label(&self) -> String {
+        match self {
+            PeArch::X86 => "x86".to_string(),
+            PeArch::X64 => "x64".to_string(),
+            PeArch::Arm64 => "ARM64".to_string(),
+            PeArch::Other(m) => format!("other (machine {m:#06x})"),
+        }
+    }
+}
+
+/// Read the machine type from a PE file's header bytes. `None` when
+/// the bytes are not a PE file at all (no `MZ`, no `PE\0\0` signature
+/// where the header says, or too short to tell).
+pub fn pe_arch(bytes: &[u8]) -> Option<PeArch> {
+    if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
+        return None;
+    }
+    let pe_off = u32::from_le_bytes(bytes[0x3C..0x40].try_into().ok()?) as usize;
+    if bytes.len() < pe_off + 6 || &bytes[pe_off..pe_off + 4] != b"PE\0\0" {
+        return None;
+    }
+    let machine = u16::from_le_bytes(bytes[pe_off + 4..pe_off + 6].try_into().ok()?);
+    Some(match machine {
+        0x8664 => PeArch::X64,
+        0x014C => PeArch::X86,
+        0xAA64 => PeArch::Arm64,
+        other => PeArch::Other(other),
+    })
+}
+
 pub fn parse_service_names(sc_output: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut name: Option<String> = None;
@@ -482,6 +524,24 @@ mod tests {
         assert_eq!(files[1].path, r"C:\Program Files\Acme\sub\b.txt");
         assert_eq!(p.done(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pe_arch_reads_the_machine_type() {
+        fn fake_pe(machine: u16) -> Vec<u8> {
+            let mut bytes = vec![0u8; 0x100];
+            bytes[0..2].copy_from_slice(b"MZ");
+            bytes[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+            bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+            bytes[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
+            bytes
+        }
+        assert_eq!(pe_arch(&fake_pe(0x8664)), Some(PeArch::X64));
+        assert_eq!(pe_arch(&fake_pe(0x014C)), Some(PeArch::X86));
+        assert_eq!(pe_arch(&fake_pe(0xAA64)), Some(PeArch::Arm64));
+        assert_eq!(pe_arch(b"MZfake"), None);
+        assert_eq!(pe_arch(b"not a program"), None);
+        assert_eq!(pe_arch(&[]), None);
     }
 
     #[test]
