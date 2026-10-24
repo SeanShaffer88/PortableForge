@@ -109,6 +109,80 @@ pub fn build_package(
         outcome.skipped.extend(report.skipped);
     }
     outcome.issues = validate_tree(root, meta);
+
+    // Provenance, in Other\Source (where PortableForge already leaves
+    // its note): a machine-readable build report, and a SHA-256
+    // manifest of the package's authored and program files so any
+    // later copy can be checked against the build. The manifest lists
+    // the report; neither lists itself.
+    let source_dir = root.join("Other").join("Source");
+    std::fs::create_dir_all(&source_dir)
+        .map_err(|e| format!("We could not make {}: {e}", source_dir.display()))?;
+    let report = serde_json::json!({
+        "app_id": meta.app_id,
+        "name": meta.name,
+        "package_version": meta.package_version,
+        "written": outcome.written,
+        "app_files_copied": outcome.app_files_copied,
+        "app_bytes_copied": outcome.app_bytes_copied,
+        "default_data_files_copied": outcome.default_data_files_copied,
+        "skipped": outcome.skipped,
+        "issues": outcome.issues.iter().map(|i| serde_json::json!({
+            "error": i.error, "field": i.field, "message": i.message
+        })).collect::<Vec<_>>(),
+        "valid": !outcome.has_errors(),
+    });
+    let report_rel = r"Other\Source\build-report.json";
+    std::fs::write(
+        source_dir.join("build-report.json"),
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    )
+    .map_err(|e| format!("We could not write the build report: {e}"))?;
+    outcome.written.push(report_rel.to_string());
+
+    let mut manifest_files: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for item in entries.flatten() {
+            let path = item.path();
+            let Ok(kind) = item.file_type() else { continue };
+            if kind.is_dir() {
+                // Data\ is the user's live data at run time, not build output.
+                if path != root.join("Data") {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if kind.is_file() && path != source_dir.join("SHA256SUMS.txt") {
+                manifest_files.push(path);
+            }
+        }
+    }
+    manifest_files.sort();
+    let mut manifest = String::new();
+    for path in manifest_files {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('/', "\\");
+        manifest.push_str(&format!(
+            "{}  {}\n",
+            crate::snapshot::sha256_hex(&bytes),
+            rel
+        ));
+    }
+    std::fs::write(source_dir.join("SHA256SUMS.txt"), &manifest)
+        .map_err(|e| format!("We could not write the file list: {e}"))?;
+    outcome
+        .written
+        .push(r"Other\Source\SHA256SUMS.txt".to_string());
     Ok(outcome)
 }
 
@@ -177,6 +251,24 @@ mod tests {
             .join("Widget")
             .join("settings.ini")
             .is_file());
+        // Provenance: the build report is valid JSON naming the app,
+        // and the manifest hashes the copied program file.
+        let report_text =
+            std::fs::read_to_string(root.join("Other").join("Source").join("build-report.json"))
+                .unwrap();
+        let report_json: serde_json::Value = serde_json::from_str(&report_text).unwrap();
+        assert_eq!(report_json["app_id"], "WidgetPortable");
+        assert_eq!(report_json["app_files_copied"], 2);
+        assert_eq!(report_json["valid"], true);
+        let manifest =
+            std::fs::read_to_string(root.join("Other").join("Source").join("SHA256SUMS.txt"))
+                .unwrap();
+        let exe_hash = crate::snapshot::sha256_hex(b"MZfake");
+        assert!(
+            manifest.contains(&format!("{exe_hash}  App\\Widget\\widget.exe")),
+            "{manifest}"
+        );
+        assert!(!manifest.contains("SHA256SUMS"));
         assert!(outcome.summary().contains("Everything checks out"));
         let _ = std::fs::remove_dir_all(&base);
     }
