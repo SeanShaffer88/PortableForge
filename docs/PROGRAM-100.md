@@ -130,17 +130,30 @@ spelling check against the Template 3.5.2 sections/closed key sets.
 Gate: fmt clean; clippy clean host + windows-msvc; **79/79 tests**;
 CLI smokes green (x64 build + zip + guard + seeding).
 
-## Slice 6 — CLI & scripting (items 51–60)
-- [ ] 51. `--json` for preflight, post-capture, and leaks outputs
-- [ ] 52. `sessions` command lists session folders with phase, age, and next action
-- [ ] 53. `doctor` command: preflight + builder tools + helper presence in one report
-- [ ] 54. Documented exit codes (0 ok, 1 error, 2 validation/leaks found) applied consistently
-- [ ] 55. Per-command help (`portableforge build --help`)
-- [ ] 56. Host `snapshot` accepts several `--root` folders via the multi-root scan
-- [ ] 57. `leaks --out <file>` writes the leak report as JSON
-- [ ] 58. `validate --tree` can run from a details file *or* a built package's own appinfo
-- [ ] 59. Quiet flag for snapshot/build progress in scripts
-- [ ] 60. `classify` prints the technical rows behind a `--details` flag
+## Slice 6 — CLI & scripting (items 51–60) — DONE 2026-10-24
+- [x] 51. `--json` for preflight, post-capture, and leaks outputs
+- [x] 52. `sessions` command lists session folders with phase, age, and next action
+- [x] 53. `doctor` command: preflight + builder tools + helper presence in one report
+- [x] 54. Documented exit codes (0 ok, 1 error, 2 validation/leaks found) applied consistently
+- [x] 55. Per-command help (`portableforge build --help`)
+- [x] 56. Host `snapshot` accepts several `--root` folders via the multi-root scan
+- [x] 57. `leaks --out <file>` writes the leak report as JSON
+- [x] 58. `validate --tree` can run from a details file *or* a built package's own appinfo
+- [x] 59. Quiet flag for snapshot/build progress in scripts
+- [x] 60. `classify` prints the technical rows behind a `--details` flag
+
+Slice 6 notes: exit code 2 is carried by a small process-wide slot
+the judging commands (build, validate, leaks, doctor) set instead of
+failing — scripts can now tell "the tool broke" (1) from "the answer
+is no" (2), and the codes are documented in the help text and every
+per-command help that can produce them. `validate --tree` without a
+details file rebuilds the few fields the tree check needs from the
+package's own appinfo.ini (the main program's name comes from the
+ExtractIcon path). The host `snapshot` multi-root form reuses the
+agent's own multi-root scan, cache and all. Gate: fmt clean; clippy
+clean host + windows-msvc; **79/79 tests**; CLI smokes green for
+every item (help, JSON shapes parse, exit codes 0/1/2 observed,
+multi-root note contents, sessions listing, doctor report).
 
 ## Slice 7 — Leak test & sandbox modes (items 61–70)
 - [ ] 61. `verify` command: build, then judge the leak notes when a leak session exists
