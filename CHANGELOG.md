@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Added — 100-enhancement programme, Slice 1: correctness, capture intelligence, build provenance (2026-10-24)
+The programme plan and tracker live in `docs/PROGRAM-100.md`.
+- Generated `help.html` now escapes the program name, description and
+  maker, and generated INI values can no longer smuggle in extra lines
+  through line breaks in a name or description.
+- When a capture is read back, any text files the helper harvested are
+  checked for addresses baked in from the test box; anything found is
+  added to the fix list. The program's own name, maker and version
+  tags (from its uninstall registration) are read too, saved
+  artefacts (`review.json`, both change lists, the specimen plan) now
+  land in the session folder automatically, and the naming step will
+  pre-fill from those tags in Slice 2.
+- Every build now leaves a receipt in the package:
+  `Other\Source\build-report.json` (what was written, copied, and
+  whether the package passed its checks) and
+  `Other\Source\SHA256SUMS.txt`, a fingerprint list of the finished
+  package's files.
+- New `agent-state` command shows what the helper in the test box is
+  doing, how long since it last reported in, and what should happen
+  next — with a warning if it has gone quiet. `build` learned `--json`
+  for scripted use, and the dark palette's readability ratios are now
+  asserted by a test in the gate.
+
 ### Added — the flow is now wired end to end (2026-10-24)
 - **Build pipeline (new core `build` module):** one call turns the
   package details, the review's accepted fixes, the harvested program
