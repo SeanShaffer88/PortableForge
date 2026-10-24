@@ -31,6 +31,14 @@ pub struct WizardApp {
     build_summary: Option<String>,
     built_dir: Option<std::path::PathBuf>,
     icon_path: String,
+    /// Test-box choices for this run (safe defaults: 4 GB, no
+    /// internet, no clipboard sharing).
+    sandbox_memory_mb: u32,
+    sandbox_networking: bool,
+    sandbox_clipboard: bool,
+    /// The leak judge's verdict, once the test step has read the
+    /// two notes from the leak-test packet.
+    leak_result: Option<String>,
     log: Vec<String>,
     // The wizard's own memory (recent files, text size, the
     // unfinished-run draft) and the bookkeeping for saving it.
@@ -69,6 +77,10 @@ impl Default for WizardApp {
             build_summary: None,
             built_dir: None,
             icon_path: String::new(),
+            sandbox_memory_mb: 4096,
+            sandbox_networking: false,
+            sandbox_clipboard: false,
+            leak_result: None,
             log: vec!["Welcome to PortableForge.".to_string()],
             settings,
             settings_path,
@@ -198,7 +210,9 @@ impl WizardApp {
                 &sessions_base(),
                 &session,
                 agent.as_deref(),
-                false,
+                self.sandbox_networking,
+                self.sandbox_memory_mb,
+                self.sandbox_clipboard,
             ) {
                 Ok(layout) => {
                     // The setup file goes into the read-only input folder.
@@ -229,6 +243,47 @@ impl WizardApp {
                 Err(e) => self.log.push(e),
             }
         }
+    }
+
+    /// Judge the leak test: read the packet's two notes from this
+    /// run's exchange folder and say, in plain words, whether the
+    /// finished copy stayed inside its own folder.
+    fn check_leak_result(&mut self) {
+        let Some(layout) = &self.layout else {
+            self.log
+                .push("Start the test box first — there is no run yet.".to_string());
+            return;
+        };
+        let read = |name: &str| -> Option<portableforge_core::snapshot::Snapshot> {
+            let text = std::fs::read_to_string(layout.exchange.join(name)).ok()?;
+            serde_json::from_str(&text).ok()
+        };
+        let (Some(before), Some(after)) = (read("leak-before.json"), read("leak-after.json"))
+        else {
+            self.leak_result = Some(
+                "No leak-test notes yet. The leak-test packet (portableforge leak-packet) makes two notes in the test box — leak-before.json before the finished copy runs, leak-after.json after it closes — and they belong in this run's exchange folder."
+                    .to_string(),
+            );
+            return;
+        };
+        let d = portableforge_core::diff::diff_snapshots(&before, &after);
+        let app_id = self
+            .built_dir
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Package".to_string());
+        let box_root = format!(r"C:\Users\WDAGUtilityAccount\Desktop\{app_id}");
+        let report = portableforge_core::leaktest::analyse_leaks(&box_root, &before, &after, &d);
+        let mut text = report.verdict();
+        for (label, leaks) in report.grouped() {
+            text.push_str(&format!("\n{label} ({})", leaks.len()));
+            for leak in leaks {
+                text.push_str(&format!("\n- {}", leak.plain));
+                text.push_str(&format!("\n  Fix: {}", leak.fix_line()));
+            }
+        }
+        self.leak_result = Some(text);
     }
 
     /// Look at the helper's state; when the capture has finished, read
@@ -986,6 +1041,30 @@ impl eframe::App for WizardApp {
                     }
                 }
                 "clean" => {
+                    ui.label("How much memory should the test box get?");
+                    ui.horizontal(|ui| {
+                        for (mb, label) in
+                            [(2048u32, "2 GB"), (4096, "4 GB"), (8192, "8 GB")]
+                        {
+                            if ui
+                                .radio(self.sandbox_memory_mb == mb, label)
+                                .clicked()
+                            {
+                                self.sandbox_memory_mb = mb;
+                            }
+                        }
+                    });
+                    ui.checkbox(
+                        &mut self.sandbox_networking,
+                        "Let the test box use the internet (off is safer)",
+                    );
+                    ui.collapsing("More choices", |ui| {
+                        ui.checkbox(
+                            &mut self.sandbox_clipboard,
+                            "Share the clipboard with the test box (off is safer)",
+                        );
+                    });
+                    ui.add_space(4.0);
                     if ui
                         .button("Start the test box")
                         .on_hover_text("Make the work folder and open the safe test box. The setup file and our helper go inside; nothing touches your real computer.")
@@ -1027,6 +1106,20 @@ impl eframe::App for WizardApp {
                 "test" | "done" => {
                     if let Some(text) = &self.build_summary {
                         ui.label(text.clone());
+                    }
+                    if step.id == "test" {
+                        ui.add_space(4.0);
+                        if ui
+                            .button("Check the leak-test result")
+                            .on_hover_text("Read the two notes the leak-test packet made (leak-before and leak-after, in this run's exchange folder) and judge whether the finished copy stayed inside its own folder.")
+                            .clicked()
+                        {
+                            self.check_leak_result();
+                        }
+                        if let Some(text) = &self.leak_result {
+                            ui.add_space(4.0);
+                            ui.label(text.clone());
+                        }
                     }
                     if step.id == "done" {
                         ui.add_space(6.0);
