@@ -1,0 +1,51 @@
+{
+  "label": "after-runtime",
+  "files": [
+    {
+      "path": "C:\\Windows\\System32\\kernel32.dll",
+      "size": 8,
+      "sha256": "8ba8496a2525ae171ffd104d632dede6ef418d9b95962a9d88e2fcdbc8d48d24",
+      "mtime_secs": 0
+    },
+    {
+      "path": "C:\\Program Files\\Widget\\widget.exe",
+      "size": 11,
+      "sha256": "f5d2a4832ac912ccd21fb1b06d20c620f31063203e92faee2918e9e543bb623f",
+      "mtime_secs": 0
+    },
+    {
+      "path": "C:\\Users\\WDAGUtilityAccount\\AppData\\Roaming\\Acme\\Widget\\settings.ini",
+      "size": 20,
+      "sha256": "2c517e1a8dc7dbd38a4c6e1bdfd8cd0b3951a9919d848769b75c0d181ec9e17e",
+      "mtime_secs": 0
+    },
+    {
+      "path": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Widget.lnk",
+      "size": 3,
+      "sha256": "a5da9216129b1d877cbcb7cc536ed71bf3912d9c19cc64b4349177384174deff",
+      "mtime_secs": 0
+    }
+  ],
+  "registry": [
+    {
+      "key": "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Widget",
+      "name": "DisplayName",
+      "data": "\"Widget\""
+    },
+    {
+      "key": "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Widget",
+      "name": "Publisher",
+      "data": "\"Acme Corp\""
+    },
+    {
+      "key": "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Widget",
+      "name": "DisplayVersion",
+      "data": "\"1.2.3\""
+    }
+  ],
+  "services": [
+    "SomeExistingService"
+  ],
+  "skipped_files": 0,
+  "capture_warnings": []
+}
