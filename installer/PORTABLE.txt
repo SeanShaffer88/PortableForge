@@ -1,0 +1,15 @@
+PortableForge — portable copy
+=============================
+
+Run portableforge.exe from this folder. Nothing is installed.
+
+Keep portableforge-agent.exe beside portableforge.exe: the helper
+is what works inside the safe test box during a conversion, and
+PortableForge looks for it next to the main program.
+
+Your settings and run folders live in your home folder (a
+"PortableForge" folder and "PortableForge Sessions"), not in this
+folder, so you can move or replace this folder freely.
+
+This build is unsigned. Windows SmartScreen will warn on first
+run; the release page lists the fingerprints of the genuine files.
