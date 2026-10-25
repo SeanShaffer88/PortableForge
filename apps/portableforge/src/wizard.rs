@@ -552,6 +552,33 @@ impl WizardApp {
             .push("All three notes are in — the list on the next step is filled in.".to_string());
     }
 
+    /// Where the bundled quick box installer sits, if this copy of
+    /// PortableForge carries one (release copies do).
+    fn bundled_sbie_path(&self) -> Option<std::path::PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let dir = exe.parent()?;
+        portableforge_core::sbie::bundled_installer(dir)
+    }
+
+    /// Verify the bundled installer against its recorded
+    /// fingerprint, then open it. A file that does not match is
+    /// never run — that refusal is the point of carrying the
+    /// fingerprint.
+    fn install_bundled_sbie(&mut self, path: &std::path::Path) {
+        let pin =
+            portableforge_core::tools::pin(portableforge_core::tools::ToolId::SandboxieInstaller);
+        match portableforge_core::tools::verify_tool_file(path, pin) {
+            Ok(()) => match crate::run_program_file(path) {
+                Ok(()) => self.log.push(
+                    "The quick test box installer is opening. When it has finished, press Check again."
+                        .to_string(),
+                ),
+                Err(e) => self.log.push(e),
+            },
+            Err(e) => self.log.push(e),
+        }
+    }
+
     /// Open the setup file inside the quick box (install step).
     fn sbie_launch_installer(&mut self) {
         let Some(layout) = &self.layout else {
@@ -1304,6 +1331,45 @@ impl eframe::App for WizardApp {
                         }
                         self.mark_dirty();
                         self.persist_now();
+                    }
+                    // The bundled way in: when this computer has no
+                    // quick test box yet, offer the installer
+                    // PortableForge carries with it (untouched,
+                    // fingerprint-checked before it ever runs) —
+                    // and a fresh check for afterwards.
+                    let sbie_missing = self
+                        .preflight_facts
+                        .as_ref()
+                        .map(|f| !f.sandboxie_present)
+                        .unwrap_or(false);
+                    if sbie_missing {
+                        ui.add_space(8.0);
+                        if let Some(bundled) = self.bundled_sbie_path() {
+                            if ui
+                                .button("Install the quick test box now")
+                                .on_hover_text("This opens the quick box's own installer, which PortableForge carries with it untouched. Windows will ask for an administrator's OK, because the quick box works deep in the system. When it has finished, press Check again.")
+                                .clicked()
+                            {
+                                self.install_bundled_sbie(&bundled);
+                            }
+                            ui.label(
+                                egui::RichText::new("The quick test box is a separate free program. PortableForge carries its installer untouched and checks its fingerprint before opening it.")
+                                    .color(color(guide::theme::TEXT_MUTED)),
+                            );
+                            ui.add_space(4.0);
+                        }
+                        if ui
+                            .button("Check again")
+                            .on_hover_text("Look at this computer once more — for after the quick test box has been installed.")
+                            .clicked()
+                        {
+                            let mut facts = crate::collect_preflight_facts();
+                            facts.sandbox_override = self.force_sandbox;
+                            self.preflight = Some(evaluate_preflight(&facts));
+                            self.preflight_facts = Some(facts);
+                            self.log
+                                .push("Checked again with fresh eyes.".to_string());
+                        }
                     }
                 }
                 "changes" => {

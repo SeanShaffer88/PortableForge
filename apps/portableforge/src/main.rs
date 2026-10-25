@@ -208,6 +208,22 @@ pub fn sbie_user_name() -> String {
     std::env::var("USERNAME").unwrap_or_else(|_| "Default".to_string())
 }
 
+/// Open a program file (an installer) and let it run. Used for
+/// the bundled quick box installer; the program asks for any
+/// permissions itself.
+#[cfg(windows)]
+pub fn run_program_file(path: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new(path)
+        .spawn()
+        .map_err(|e| format!("The installer could not be opened: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn run_program_file(_path: &std::path::Path) -> Result<(), String> {
+    Err("Installers run on Windows.".to_string())
+}
+
 /// Run one boxed command through Sandboxie's own Start.exe.
 #[cfg(windows)]
 pub fn sbie_run(program_args: (String, Vec<String>)) -> Result<(), String> {
@@ -492,6 +508,7 @@ fn command_help(cmd: &str) -> Option<String> {
         "agent-state" => "agent-state <session-folder>\n  Show what the helper in the test box is doing, when it last reported in, and what should happen next.",
         "request-snapshot" => "request-snapshot <session-folder> <before|after-install|after-runtime>\n  Ask the helper in the test box to take one of the three notes.",
         "sbie-launch" => "sbie-launch <session-folder> <program>\n  Run a program inside the session's quick test box (Sandboxie). Used for the setup file on the install step and the installed program on the try-it-out step.",
+        "install-quick-box" => "install-quick-box\n  Open the Sandboxie installer bundled with PortableForge (verified against its recorded fingerprint first), for a computer that has no test box yet. Windows will ask for an administrator's OK.",
         "sbie-capture" => "sbie-capture <session-folder> <before|after-install|after-runtime>\n  The quick box's note flow: the first call asks for the note (boxed registry exports), a later call assembles it from the box folder into the session's exchange folder. The after-runtime note also copies the program's files out.",
         "mode-b" => "mode-b --out <folder>\n  Make a packet (helper program + plain instructions) for testing in your own virtual machine, with no test box.",
         "launch" => "launch <session-folder>\n  Open the session's test box (Windows only).",
@@ -879,6 +896,22 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 "Asked the test box for the {} note. It appears as {} in the session's exchange folder.",
                 point.label(),
                 point.note_name()
+            );
+            Ok(())
+        }
+        "install-quick-box" => {
+            let exe = std::env::current_exe()
+                .map_err(|e| format!("We could not find our own program file: {e}"))?;
+            let dir = exe.parent().ok_or("We could not find our own folder.")?;
+            let path = portableforge_core::sbie::bundled_installer(dir)
+                .ok_or("This copy of PortableForge does not carry the quick box installer.")?;
+            let pin = portableforge_core::tools::pin(
+                portableforge_core::tools::ToolId::SandboxieInstaller,
+            );
+            portableforge_core::tools::verify_tool_file(&path, pin)?;
+            run_program_file(&path)?;
+            println!(
+                "The quick box installer is opening. When it has finished, run preflight again to see the quick test box."
             );
             Ok(())
         }
