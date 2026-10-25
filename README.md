@@ -2,7 +2,7 @@
 
 PortableForge turns a normal Windows program into a **portable** one — a single file you can put on a USB stick, run on any computer, and take your settings with you. It does the whole job for you, step by step, in plain language. You never write code, never edit settings files, and the program you are converting is only ever installed inside a **throwaway test box on your computer that is deleted afterwards — your real computer is never touched by it.**
 
-Pick a program → install it inside the safe box → try it → close it → PortableForge spots everything it left behind and fixes it → you get one finished file. That is the whole experience.
+Pick a program → install it inside the safe box → try it → close it → PortableForge spots everything it left behind and fixes it → you get the finished portable copy. That is the whole experience.
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
@@ -22,7 +22,7 @@ Anyone. The whole program is one guided path with twelve plain steps, one decisi
 - Walks you through twelve plain-language steps, start to finish, with a progress bar and a Back button that always works.
 - Tests the program inside a throwaway test box, so a bad installer cannot hurt your real computer.
 - Works out where the program keeps its settings and files, and shows you each finding as a plain card you can accept or question.
-- Builds the portable package to the current PortableApps.com Format (3.9), with the official builder programs doing the final assembly.
+- Builds the portable package to the current PortableApps.com Format (3.9). The official builder programs can then make the final single file from it, when you ask (`portableforge tools run-installer`).
 - Tests the finished copy in a fresh box and tells you honestly whether it left anything behind.
 
 ## How it works
@@ -36,7 +36,7 @@ Anyone. The whole program is one guided path with twelve plain steps, one decisi
 7. **What it left behind** — a short plain-language list of what the program added, with the fix we suggest for each.
 8. **Name your portable copy** — mostly filled in for you.
 9. **Sharing your portable copy** — one honest question about whether you may pass the program on. Not sure is a perfectly good answer and picks the safest way automatically.
-10. **We build it for you** — one finished file, made to the PortableApps.com Format (version 3.9).
+10. **We build it for you** — the finished package, made to the PortableApps.com Format (version 3.9).
 11. **Testing the finished copy** — a brand-new test box tries your copy and reports anything it leaves behind.
 12. **Done** — take your file.
 
@@ -70,6 +70,31 @@ You never need this — the window does everything. For scripts and testing, eve
 ## Screenshots
 
 Screenshots will be added from real runs on a Windows machine. The capture list is in [docs/screenshots/CAPTURE.md](docs/screenshots/CAPTURE.md).
+
+## Downloading a release
+
+Releases live on this project's GitHub releases page. (The first
+one, v1.0.0, is published once the on-machine runbook in
+`docs/ON_MACHINE_RUNBOOK.md` has passed — until then, building from
+source below is the way in.)
+
+1. Download the zip named like `PortableForge-v1.0.0-windows-x64.zip`.
+2. Unzip it anywhere. You get both programs — keep
+   `portableforge-agent.exe` beside `portableforge.exe`; the helper
+   is needed inside the test box — plus the README, the license,
+   the runbook, and `SHA256SUMS.txt`.
+3. **Check your download is genuine.** The release page lists a
+   fingerprint (a long line of letters and numbers) for the zip.
+   Compare it with your copy: open PowerShell in the folder where
+   the zip is and run
+   `Get-FileHash .\PortableForge-v1.0.0-windows-x64.zip`
+   — the `Hash` line it prints must match the one on the release
+   page, letter for letter. If it does not match, delete the zip
+   and download it again from the releases page.
+4. The programs are **unsigned**, so Windows SmartScreen will warn
+   the first time you run one. That is expected for now; once your
+   fingerprint check matches, "More info" → "Run anyway" is the
+   honest way through.
 
 ## Building from source
 
