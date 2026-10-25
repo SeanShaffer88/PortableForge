@@ -89,6 +89,16 @@ inside the throwaway box, exactly like a normal install.
 
 ![Step 4: install the program](docs/screenshots/wizard-04-install.png)
 
+**Step 9 — Sharing your portable copy.** One honest question,
+because it changes how the copy is made.
+
+![Step 9: sharing your portable copy](docs/screenshots/wizard-09-sharing.png)
+
+**Step 12 — Done.** Your file is ready: one file, take it
+anywhere.
+
+![Step 12: done — your file is ready](docs/screenshots/wizard-12-done.png)
+
 ## Downloading a release
 
 Releases live on this project's GitHub releases page. (Version
@@ -107,6 +117,13 @@ Every release has exactly two downloads:
   `portableforge-agent.exe` beside it; the helper is needed inside
   the test box. A short `PORTABLE.txt` inside the zip says the
   same in fewer words.
+
+Both downloads also carry a `bundled` folder with the official
+Sandboxie-Plus installer (about 24 MB, the maker's own file,
+untouched — its licenses and a note sit beside it). That is what
+PortableForge offers to open when a computer has no test box yet,
+so the quick test box can be set up. It is the reason the
+downloads are the size they are; PortableForge itself is small.
 
 **Check your download is genuine.** The release notes list a
 fingerprint (a long line of letters and numbers) for each file.
