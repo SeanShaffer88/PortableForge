@@ -26,6 +26,10 @@ pub struct WizardDraft {
     pub package_version: String,
     pub online_url: String,
     pub online_sha: String,
+    /// The person vouched for the safe test box on the safety step
+    /// ("use it anyway") — resumed runs keep their word.
+    #[serde(default)]
+    pub force_sandbox: bool,
 }
 
 impl WizardDraft {
