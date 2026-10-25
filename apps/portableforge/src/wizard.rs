@@ -32,6 +32,8 @@ pub struct WizardApp {
     /// Set by Finish on the last step: the window closes (the run
     /// is complete and its draft already cleared).
     finished: bool,
+    /// The current session's way of testing, once one is started.
+    session_mode: Option<portableforge_core::wsb::SandboxMode>,
     /// The person's word that this computer can run the safe test
     /// box, whatever the checks concluded (persisted in the draft).
     force_sandbox: bool,
@@ -84,6 +86,7 @@ impl Default for WizardApp {
             preflight_facts: None,
             force_sandbox: false,
             finished: false,
+            session_mode: None,
             review: Review::default(),
             layout: None,
             build_summary: None,
@@ -286,6 +289,7 @@ impl WizardApp {
                 .map(|r| r.best_mode)
                 .unwrap_or(portableforge_core::wsb::SandboxMode::WindowsSandbox);
             let session = portableforge_core::Session::new(id, mode);
+            self.session_mode = Some(mode);
             let agent = std::env::current_exe().ok().and_then(|exe| {
                 let p = exe.with_file_name("portableforge-agent.exe");
                 if p.is_file() {
@@ -308,10 +312,12 @@ impl WizardApp {
                     if let Some(name) = src.file_name() {
                         let _ = std::fs::copy(src, layout.input.join(name));
                     }
-                    let _ = portableforge_core::orchestrate::request_snapshot(
-                        &layout,
-                        CapturePoint::Before,
-                    );
+                    if mode != portableforge_core::wsb::SandboxMode::Sandboxie {
+                        let _ = portableforge_core::orchestrate::request_snapshot(
+                            &layout,
+                            CapturePoint::Before,
+                        );
+                    }
                     self.log.push(format!(
                         "Your work folder is ready: {}",
                         layout.root.display()
@@ -326,9 +332,21 @@ impl WizardApp {
             }
         }
         if let Some(layout) = &self.layout {
-            match crate::launch_sandbox(layout) {
-                Ok(()) => self.log.push("The test box is starting.".to_string()),
-                Err(e) => self.log.push(e),
+            if self.session_mode == Some(portableforge_core::wsb::SandboxMode::Sandboxie) {
+                // The quick box has no window of its own to open:
+                // starting means asking it for the clean note.
+                match crate::sbie_ask_point(layout, "before") {
+                    Ok(()) => self.log.push(
+                        "The quick test box is getting ready — press Check on the test box in a few seconds."
+                            .to_string(),
+                    ),
+                    Err(e) => self.log.push(e),
+                }
+            } else {
+                match crate::launch_sandbox(layout) {
+                    Ok(()) => self.log.push("The test box is starting.".to_string()),
+                    Err(e) => self.log.push(e),
+                }
             }
         }
     }
@@ -434,6 +452,10 @@ impl WizardApp {
             );
             return;
         };
+        if self.session_mode == Some(portableforge_core::wsb::SandboxMode::Sandboxie) {
+            self.check_quick_box(&layout);
+            return;
+        }
         // On the try/close steps, make sure the later notes are asked
         // for in order: after-install once its note is missing and the
         // clean note exists, after-runtime likewise.
@@ -484,65 +506,198 @@ impl WizardApp {
                 self.log.push(line);
             }
             portableforge_core::orchestrate::HostAction::Harvest => {
-                match portableforge_core::orchestrate::post_capture(&layout) {
-                    Ok(outcome) => {
-                        self.log
-                            .push(format!("Notes read in. {}", outcome.review.summary()));
-                        self.review = outcome.review;
-                        // Pre-fill the naming step from the program's
-                        // own tags — once per capture, and only into
-                        // fields the person has not filled themselves.
-                        if !self.hints_applied {
-                            let hints = &outcome.hints;
-                            let mut filled: Vec<&str> = Vec::new();
-                            if self.app_name.trim().is_empty() {
-                                if let Some(name) = &hints.display_name {
-                                    self.app_name = name.clone();
-                                    filled.push("the name");
-                                }
-                            }
-                            if self.publisher.trim().is_empty() {
-                                if let Some(publisher) = &hints.publisher {
-                                    self.publisher = publisher.clone();
-                                    filled.push("who makes it");
-                                }
-                            }
-                            if self.package_version == "1.0.0.0" {
-                                if let Some(version) = hints
-                                    .display_version
-                                    .as_deref()
-                                    .and_then(portableforge_core::paf::pad_package_version)
-                                {
-                                    self.package_version = version;
-                                    filled.push("the version");
-                                }
-                            }
-                            if !filled.is_empty() {
-                                self.log.push(format!(
+                self.finish_capture(&layout);
+            }
+        }
+    }
+
+    /// The quick box's check: its notes are asked for and then
+    /// assembled here on the host, one press apart — ask, give it
+    /// a few seconds, press again to read the note in. Same shape
+    /// as the safe test box's helper notes, no window to watch.
+    fn check_quick_box(&mut self, layout: &portableforge_core::orchestrate::SessionLayout) {
+        let exchange = &layout.exchange;
+        let points = ["before", "after-install", "after-runtime"];
+        for point in points {
+            if exchange.join(format!("{point}.json")).is_file() {
+                continue;
+            }
+            if !exchange.join(format!("sbie-asked-{point}.txt")).is_file() {
+                match crate::sbie_ask_point(layout, point) {
+                    Ok(()) => self.log.push(format!(
+                        "Asking the quick test box for the {} note — press Check again in a few seconds.",
+                        point.replace('-', " ")
+                    )),
+                    Err(e) => self.log.push(e),
+                }
+                return;
+            }
+            match crate::sbie_collect_point(layout, point) {
+                Ok(Some(line)) => {
+                    self.log.push(line);
+                    if point == "after-runtime" {
+                        let layout = layout.clone();
+                        self.finish_capture(&layout);
+                    }
+                }
+                Ok(None) => self.log.push(
+                    "The quick test box is still writing that note — give it a few seconds and check again."
+                        .to_string(),
+                ),
+                Err(e) => self.log.push(e),
+            }
+            return;
+        }
+        self.log
+            .push("All three notes are in — the list on the next step is filled in.".to_string());
+    }
+
+    /// Open the setup file inside the quick box (install step).
+    fn sbie_launch_installer(&mut self) {
+        let Some(layout) = &self.layout else {
+            self.log.push(
+                "Start the quick test box first — the button is on the clean test computer step."
+                    .to_string(),
+            );
+            return;
+        };
+        let Some(start) = crate::sbie_start_exe() else {
+            self.log
+                .push("The quick test box was not found on this computer.".to_string());
+            return;
+        };
+        let Some(name) = std::path::Path::new(self.installer_path.trim())
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let program = layout.input.join(&name).to_string_lossy().into_owned();
+        let session_id = layout
+            .root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let box_name = portableforge_core::sbie::box_name_for(&session_id);
+        match crate::sbie_run(portableforge_core::sbie::boxed_command(
+            &start,
+            &box_name,
+            &program,
+            &[],
+        )) {
+            Ok(()) => self
+                .log
+                .push("The setup is opening in the quick test box.".to_string()),
+            Err(e) => self.log.push(e),
+        }
+    }
+
+    /// Run a program the person picks inside the quick box
+    /// (try-it-out step: the program they just installed).
+    fn sbie_launch_program(&mut self) {
+        let Some(layout) = &self.layout else {
+            self.log.push(
+                "Start the quick test box first — the button is on the clean test computer step."
+                    .to_string(),
+            );
+            return;
+        };
+        let Some(start) = crate::sbie_start_exe() else {
+            self.log
+                .push("The quick test box was not found on this computer.".to_string());
+            return;
+        };
+        let picked = rfd::FileDialog::new()
+            .set_title("Pick the program to run in the quick test box")
+            .add_filter("Programs", &["exe"])
+            .pick_file();
+        let Some(path) = picked else {
+            return;
+        };
+        let session_id = layout
+            .root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let box_name = portableforge_core::sbie::box_name_for(&session_id);
+        match crate::sbie_run(portableforge_core::sbie::boxed_command(
+            &start,
+            &box_name,
+            &path.to_string_lossy(),
+            &[],
+        )) {
+            Ok(()) => self.log.push(format!(
+                "Opening {} in the quick test box.",
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "the program".to_string())
+            )),
+            Err(e) => self.log.push(e),
+        }
+    }
+
+    /// Read the three notes in and fill the review — the shared
+    /// ending of every capture, however the notes were made (the
+    /// helper in the safe test box, or the quick box here on the
+    /// host).
+    fn finish_capture(&mut self, layout: &portableforge_core::orchestrate::SessionLayout) {
+        match portableforge_core::orchestrate::post_capture(layout) {
+            Ok(outcome) => {
+                self.log
+                    .push(format!("Notes read in. {}", outcome.review.summary()));
+                self.review = outcome.review;
+                // Pre-fill the naming step from the program's
+                // own tags — once per capture, and only into
+                // fields the person has not filled themselves.
+                if !self.hints_applied {
+                    let hints = &outcome.hints;
+                    let mut filled: Vec<&str> = Vec::new();
+                    if self.app_name.trim().is_empty() {
+                        if let Some(name) = &hints.display_name {
+                            self.app_name = name.clone();
+                            filled.push("the name");
+                        }
+                    }
+                    if self.publisher.trim().is_empty() {
+                        if let Some(publisher) = &hints.publisher {
+                            self.publisher = publisher.clone();
+                            filled.push("who makes it");
+                        }
+                    }
+                    if self.package_version == "1.0.0.0" {
+                        if let Some(version) = hints
+                            .display_version
+                            .as_deref()
+                            .and_then(portableforge_core::paf::pad_package_version)
+                        {
+                            self.package_version = version;
+                            filled.push("the version");
+                        }
+                    }
+                    if !filled.is_empty() {
+                        self.log.push(format!(
                                     "Filled in {} from the program's own tags — you can check and change them on the naming step.",
                                     filled.join(", ")
                                 ));
-                                self.mark_dirty();
-                            }
-                            self.hints_applied = true;
-                        }
-                        // Start Menu shortcuts are the honest guess
-                        // for the main file: the shortcut's name is
-                        // usually the program's name.
-                        if !outcome.shortcut_candidates.is_empty() {
-                            self.log.push(format!(
+                        self.mark_dirty();
+                    }
+                    self.hints_applied = true;
+                }
+                // Start Menu shortcuts are the honest guess
+                // for the main file: the shortcut's name is
+                // usually the program's name.
+                if !outcome.shortcut_candidates.is_empty() {
+                    self.log.push(format!(
                                 "Shortcut found for: {}. The main file is often the same name with .exe on the end.",
                                 outcome.shortcut_candidates.join(", ")
                             ));
-                            if self.main_exe.trim().is_empty() {
-                                self.main_exe = format!("{}.exe", outcome.shortcut_candidates[0]);
-                                self.mark_dirty();
-                            }
-                        }
+                    if self.main_exe.trim().is_empty() {
+                        self.main_exe = format!("{}.exe", outcome.shortcut_candidates[0]);
+                        self.mark_dirty();
                     }
-                    Err(e) => self.log.push(e),
                 }
             }
+            Err(e) => self.log.push(e),
         }
     }
 
@@ -1346,33 +1501,48 @@ impl eframe::App for WizardApp {
                     }
                 }
                 "clean" => {
-                    ui.label("How much memory should the test box get?");
-                    ui.horizontal(|ui| {
-                        for (mb, label) in
-                            [(2048u32, "2 GB"), (4096, "4 GB"), (8192, "8 GB")]
-                        {
-                            if ui
-                                .radio(self.sandbox_memory_mb == mb, label)
-                                .clicked()
+                    let quick = self.session_mode
+                        == Some(portableforge_core::wsb::SandboxMode::Sandboxie)
+                        || self
+                            .preflight
+                            .as_ref()
+                            .map(|r| r.best_mode)
+                            == Some(portableforge_core::wsb::SandboxMode::Sandboxie);
+                    if quick {
+                        ui.label("The quick test box runs on this computer and needs nothing set here — it starts in seconds and keeps everything the program writes in one sealed folder.");
+                    } else {
+                        ui.label("How much memory should the test box get?");
+                        ui.horizontal(|ui| {
+                            for (mb, label) in
+                                [(2048u32, "2 GB"), (4096, "4 GB"), (8192, "8 GB")]
                             {
-                                self.sandbox_memory_mb = mb;
+                                if ui
+                                    .radio(self.sandbox_memory_mb == mb, label)
+                                    .clicked()
+                                {
+                                    self.sandbox_memory_mb = mb;
+                                }
                             }
-                        }
-                    });
-                    ui.checkbox(
-                        &mut self.sandbox_networking,
-                        "Let the test box use the internet (off is safer)",
-                    );
-                    ui.collapsing("More choices", |ui| {
+                        });
                         ui.checkbox(
-                            &mut self.sandbox_clipboard,
-                            "Share the clipboard with the test box (off is safer)",
+                            &mut self.sandbox_networking,
+                            "Let the test box use the internet (off is safer)",
                         );
-                    });
+                        ui.collapsing("More choices", |ui| {
+                            ui.checkbox(
+                                &mut self.sandbox_clipboard,
+                                "Share the clipboard with the test box (off is safer)",
+                            );
+                        });
+                    }
                     ui.add_space(4.0);
                     if ui
-                        .button("Start the test box")
-                        .on_hover_text("Make the work folder and open the safe test box. The setup file and our helper go inside; nothing touches your real computer.")
+                        .button(if quick {
+                            "Start the quick test box"
+                        } else {
+                            "Start the test box"
+                        })
+                        .on_hover_text("Make the work folder and open the test box. The setup file and our helper go inside; nothing touches your real computer.")
                         .clicked()
                     {
                         self.start_test_box();
@@ -1380,16 +1550,38 @@ impl eframe::App for WizardApp {
                     ui.add_space(4.0);
                     if ui
                         .button("Check on the test box")
-                        .on_hover_text("Look at what the helper in the test box has done so far.")
+                        .on_hover_text("Look at what the test box has done so far.")
                         .clicked()
                     {
                         self.check_test_box();
                     }
                 }
                 "install" | "try" | "close" => {
+                    let quick =
+                        self.session_mode == Some(portableforge_core::wsb::SandboxMode::Sandboxie);
+                    if quick && step.id == "install" {
+                        if ui
+                            .button("Open the setup in the quick test box")
+                            .on_hover_text("Run the setup file inside the quick test box. Click through it there, the way you normally would — everything it writes is caught in the sealed folder.")
+                            .clicked()
+                        {
+                            self.sbie_launch_installer();
+                        }
+                        ui.add_space(4.0);
+                    }
+                    if quick && step.id == "try" {
+                        if ui
+                            .button("Run a program in the quick test box")
+                            .on_hover_text("Pick the program you just installed (its main file) and it opens inside the quick test box, so trying it is captured too.")
+                            .clicked()
+                        {
+                            self.sbie_launch_program();
+                        }
+                        ui.add_space(4.0);
+                    }
                     if ui
                         .button("Check on the test box")
-                        .on_hover_text("Ask the helper for its next note and look at what it has done so far. When all three notes are in, the list on the next steps fills itself in.")
+                        .on_hover_text("Ask the test box for its next note and look at what it has done so far. When all three notes are in, the list on the next steps fills itself in.")
                         .clicked()
                     {
                         self.check_test_box();
