@@ -40,6 +40,18 @@ pub struct PreflightFacts {
     /// Whether hardware virtualisation is switched on (the test box
     /// cannot run without it). `None` = could not be checked.
     pub virt_enabled: Option<bool>,
+    /// The person says this computer can run the safe test box,
+    /// whatever the edition and program-file checks concluded. Set
+    /// from the wizard's "use it anyway" choice (or a CLI flag);
+    /// detection stays honest — the report shows the override as
+    /// its own line — but the person's word wins the mode choice.
+    #[serde(default)]
+    pub sandbox_override: bool,
+    /// What the machine actually called its edition (the raw
+    /// `EditionID` or product-name string), shown in the details
+    /// when the edition check fails so a wrong guess is visible.
+    #[serde(default)]
+    pub edition_witness: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,26 +80,31 @@ impl PreflightReport {
     }
 }
 
-/// Whether a Windows edition (its `EditionID` value) includes
-/// Windows Sandbox: Pro, Enterprise, Education and their variants —
-/// including the IoT Enterprise family (`IoTEnterprise`,
-/// `IoTEnterpriseS`, `IoTEnterpriseK`), whose name does not start
-/// with the plain edition names.
+/// Whether a Windows edition includes Windows Sandbox: Pro,
+/// Enterprise, Education and their variants. Accepts BOTH naming
+/// forms Windows uses: the `EditionID` value (`Professional`,
+/// `ProfessionalWorkstation`, `IoTEnterpriseS`, the N/KN spellings)
+/// and the product name (`Windows 11 Pro`, `Windows 10 Pro for
+/// Workstations`) — the two do not spell the edition the same way,
+/// and reading only one form misjudges real Pro machines as Home.
 pub fn edition_supported(edition: &str) -> bool {
-    matches!(
-        edition,
-        "Professional"
-            | "Enterprise"
-            | "Education"
-            | "ProfessionalWorkstation"
-            | "ProfessionalEducation"
-            | "ServerRdsh"
-            | "EnterpriseS"
-            | "IoTEnterprise"
-            | "IoTEnterpriseS"
-            | "IoTEnterpriseK"
-    ) || edition.contains("Enterprise")
-        || edition.contains("Education")
+    let lower = edition.to_ascii_lowercase();
+    let squashed: String = lower
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if squashed.contains("professional")
+        || squashed.contains("enterprise")
+        || squashed.contains("education")
+        || squashed == "serverrdsh"
+    {
+        return true;
+    }
+    // Product-name forms carry the edition as a standalone word:
+    // "Windows 11 Pro". ("Home" never produces this token.)
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| token == "pro")
 }
 
 /// The Sandbox feature's state from `dism /Get-FeatureInfo` output:
@@ -148,18 +165,37 @@ pub fn evaluate_preflight(f: &PreflightFacts) -> PreflightReport {
         "Update Windows: the safe test box needs Windows 10 build 18342 or newer, or Windows 11.",
         Some("ms-settings:windowsupdate"),
     );
+    // When the edition check fails, its fix names what the machine
+    // actually reported — a misread edition must be visible in the
+    // open, not silent.
+    let edition_fix = if f.edition_witness.is_empty() {
+        "The test box comes with Windows Pro, Enterprise, or Education. On Windows Home, use Careful mode instead — we will explain it honestly before anything runs.".to_string()
+    } else {
+        format!(
+            "The test box comes with Windows Pro, Enterprise, or Education. This computer calls its edition '{}' — if that name is wrong, the 'use it anyway' choice below is yours. On Windows Home, use Careful mode instead — we will explain it honestly before anything runs.",
+            f.edition_witness
+        )
+    };
     check(
         "Your Windows edition includes the safe test box",
-        f.edition_supported,
-        "The test box comes with Windows Pro, Enterprise, or Education. On Windows Home, use Careful mode instead — we will explain it honestly before anything runs.",
+        f.edition_supported || f.sandbox_override,
+        &edition_fix,
         None,
     );
     check(
         "The safe test box is installed",
-        f.sandbox_exe_present,
+        f.sandbox_exe_present || f.sandbox_override,
         "Turn on 'Windows Sandbox' in Windows Features (we can show you exactly where), then restart the computer.",
         Some("optionalfeatures"),
     );
+    if f.sandbox_override {
+        check(
+            "You told us this computer can run the safe test box",
+            true,
+            "",
+            None,
+        );
+    }
     // Unknown facts are never dressed up as passes: an unmeasured check
     // does not block, but its label says it was not checked.
     check(
@@ -219,8 +255,8 @@ pub fn evaluate_preflight(f: &PreflightFacts) -> PreflightReport {
 
     let sandbox_ok = f.is_windows
         && f.os_build >= 18342
-        && f.edition_supported
-        && f.sandbox_exe_present
+        && (f.edition_supported || f.sandbox_override)
+        && (f.sandbox_exe_present || f.sandbox_override)
         && f.virt_enabled != Some(false)
         && f.feature_enabled != Some(false);
     let best_mode = if sandbox_ok {
@@ -821,6 +857,8 @@ mod tests {
             free_ram_mb: Some(8_000),
             restore_point: Some(true),
             virt_enabled: Some(true),
+            sandbox_override: false,
+            edition_witness: "Professional".to_string(),
         }
     }
 
@@ -919,6 +957,36 @@ mod tests {
         assert!(edition_supported("ProfessionalEducation"));
         assert!(!edition_supported("Core"));
         assert!(!edition_supported("CoreSingleLanguage"));
+        // Both naming forms Windows uses: the product name spells
+        // Pro as its own word where EditionID says "Professional" —
+        // reading only one form misjudges real Pro machines (field
+        // report, 2026-10-25).
+        assert!(edition_supported("Windows 11 Pro"));
+        assert!(edition_supported("Windows 10 Pro"));
+        assert!(edition_supported("Windows 11 Pro for Workstations"));
+        assert!(edition_supported("ProfessionalN"));
+        assert!(edition_supported("Windows 11 Professional"));
+        assert!(!edition_supported("Windows 11 Home"));
+        assert!(!edition_supported("Windows 10 Home"));
+        assert!(!edition_supported(""));
+        // The person's word: the override rescues a misread edition
+        // and a missing program file, is shown as its own line, and
+        // never rescues a feature Windows says is switched off.
+        let mut f = facts_good();
+        f.edition_supported = false;
+        f.sandbox_exe_present = false;
+        let r = evaluate_preflight(&f);
+        assert_eq!(r.best_mode, SandboxMode::HostSnapshot);
+        f.sandbox_override = true;
+        let r = evaluate_preflight(&f);
+        assert_eq!(r.best_mode, SandboxMode::WindowsSandbox);
+        assert!(r
+            .checks
+            .iter()
+            .any(|c| c.ok && c.label.starts_with("You told us")));
+        f.feature_enabled = Some(false);
+        let r = evaluate_preflight(&f);
+        assert_eq!(r.best_mode, SandboxMode::HostSnapshot);
         // DISM output parsing.
         assert_eq!(
             parse_dism_feature_state("Feature Name : X\nState : Enabled\n"),
