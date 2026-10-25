@@ -7,6 +7,14 @@
 //! pinned here by exact version, size, and SHA-256, measured from the
 //! real downloads on 2026-10-23 (see `tools-pins/PINS.md`).
 //!
+//! The Sandboxie-Plus installer pin (added 2026-10-25) is different
+//! in kind: Sandboxie is a whole program of its own that PortableForge
+//! *bundles unmodified* (its license expressly permits redistributing
+//! the original unmodified binaries free of charge; the license texts
+//! ship in `third-party/`) and offers to run when a computer has no
+//! test box of either kind. The pin was measured from the official
+//! download the same way as the others.
+//!
 //! A tool may only be used after [`verify_tool_file`] passes. A missing
 //! or mismatched file is a plain-language error, never a silent run.
 
@@ -19,6 +27,9 @@ pub enum ToolId {
     LauncherGenerator,
     InstallerGenerator,
     AppTemplate,
+    /// The bundled, unmodified Sandboxie-Plus installer (Mode A2's
+    /// way in on a computer that has no test box yet).
+    SandboxieInstaller,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +76,16 @@ pub const TOOL_PINS: &[ToolPin] = &[
         download_url: "https://downloads.sourceforge.net/portableapps/PortableApps.com_Application_Template_3.5.2.zip",
         size_bytes: 341_702,
         sha256: "f432bf127820aa36d160c5e83e75df2d87ea3bda25bfc3c36da18f94c76ffa00",
+        generator_exe: "",
+    },
+    ToolPin {
+        id: ToolId::SandboxieInstaller,
+        plain_name: "Sandboxie quick box installer",
+        version: "1.18.8",
+        filename: "Sandboxie-Plus-x64-v1.18.8.exe",
+        download_url: "https://github.com/sandboxie-plus/Sandboxie/releases/download/v1.18.8/Sandboxie-Plus-x64-v1.18.8.exe",
+        size_bytes: 24_930_680,
+        sha256: "f27078ff74a07906fd51476079e1a7a8f5e20c8bb75a9d2ae86169d47179ae76",
         generator_exe: "",
     },
 ];

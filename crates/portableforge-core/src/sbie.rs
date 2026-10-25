@@ -263,6 +263,20 @@ pub fn terminate_command(start_exe: &str, box_name: &str) -> (String, Vec<String
     )
 }
 
+/// Find the bundled Sandboxie installer next to the running
+/// program (in its `bundled` folder, or beside the program
+/// itself). Existence only — the caller verifies the pin before
+/// running anything (see `tools::verify_tool_file`).
+pub fn bundled_installer(exe_dir: &Path) -> Option<PathBuf> {
+    let pin = crate::tools::pin(crate::tools::ToolId::SandboxieInstaller);
+    [
+        exe_dir.join("bundled").join(pin.filename),
+        exe_dir.join(pin.filename),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
