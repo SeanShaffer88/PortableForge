@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added — first release packaging (2026-10-25)
+- A proper installer joins the portable pair in the release zip:
+  a per-user setup program (no admin needed, Start menu shortcut,
+  clean uninstall) that installs both programs together — the
+  helper always lands beside the main program, where it belongs.
+  The version stays 0.1.0; 1.0.0 still waits for the on-machine
+  runbook pass, as planned.
+
 ### The 100-enhancement programme — complete (2026-10-24)
 
 Ninety-eight of the hundred planned improvements shipped in ten
