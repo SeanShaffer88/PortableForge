@@ -1,5 +1,21 @@
 # Decisions — PortableForge
 
+## 2026-10-25 — Sandboxie installer bundled (SEAN's pick over link/download-in-app)
+Offered three ways to get Sandboxie onto a machine with no test
+box (download-in-app / bundle / link button), SEAN picked
+**bundle**. Basis: Sandboxie-Plus's own `LICENSE.Plus` expressly
+permits redistributing "the original unmodified binaries free of
+charge", so the bundle is the maker's untouched installer file,
+byte for byte, pinned by size + SHA-256 in `tools.rs` (v1.18.8,
+24,930,680 B, f27078ff…), fingerprint-verified by the program
+before it is ever opened, and staged by the release workflow
+(download + hash check) into both assets under `bundled/` with
+both license texts and a notice (`third-party/`). PortableForge
+stays MIT; no rights over Sandboxie are claimed. Accepted costs
+(named when the choice was offered): releases grow ~4 MB →
+~29 MB, and the bundled copy ages as Sandboxie releases — the pin
+moves in a later PortableForge release when it must.
+
 ## 2026-10-25 — Sandboxie quick box (Mode A2), SEAN's pick
 Windows Sandbox needs Pro/Enterprise/Education; SEAN's own machine
 reports its edition as 'Core' (Windows Home), so the safe test box
