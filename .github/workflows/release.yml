@@ -30,6 +30,21 @@ jobs:
       - name: Release build
         run: cargo build --locked --release
 
+      - name: Stage the bundled Sandboxie installer (pinned, fingerprint-checked)
+        shell: pwsh
+        run: |
+          # The pin lives in crates/portableforge-core/src/tools.rs;
+          # these values must match it. The file is the maker's own
+          # unmodified installer, redistributed free of charge under
+          # its license (third-party/ ships the texts + notice).
+          $url = "https://github.com/sandboxie-plus/Sandboxie/releases/download/v1.18.8/Sandboxie-Plus-x64-v1.18.8.exe"
+          $want = "f27078ff74a07906fd51476079e1a7a8f5e20c8bb75a9d2ae86169d47179ae76"
+          New-Item -ItemType Directory -Path bundled | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile "bundled/Sandboxie-Plus-x64-v1.18.8.exe"
+          $got = (Get-FileHash "bundled/Sandboxie-Plus-x64-v1.18.8.exe" -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $want) { throw "Bundled Sandboxie installer fingerprint mismatch: $got" }
+          Write-Host "Bundled Sandboxie installer verified: $got"
+
       - name: Build the installer (Inno Setup)
         shell: pwsh
         run: |
@@ -56,6 +71,13 @@ jobs:
           Copy-Item target/release/portableforge-agent.exe $portDir
           Copy-Item LICENSE $portDir
           Copy-Item installer/PORTABLE.txt $portDir
+          # The bundled Sandboxie installer + its licenses and
+          # notice, in their own folder (see third-party/).
+          New-Item -ItemType Directory -Path "$portDir/bundled" | Out-Null
+          Copy-Item bundled/Sandboxie-Plus-x64-v1.18.8.exe "$portDir/bundled"
+          Copy-Item third-party/SANDBOXIE-NOTICE.txt "$portDir/bundled"
+          Copy-Item third-party/Sandboxie-LICENSE-Plus.txt "$portDir/bundled"
+          Copy-Item third-party/Sandboxie-LICENSE-Classic.txt "$portDir/bundled"
           $portZip = "PortableForge-v$ver-portable.zip"
           Compress-Archive -Path "$portDir/*" -DestinationPath $portZip
           "INSTALLER=$installer" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -84,6 +106,12 @@ jobs:
           - **Portable** ($env:PORTZIP): unzip anywhere and run
             portableforge.exe from the folder. Keep
             portableforge-agent.exe beside it.
+
+          Both downloads also carry the official Sandboxie-Plus
+          installer (unmodified, about 24 MB) in a `bundled` folder,
+          with its licenses and a note — PortableForge offers to open
+          it only when a computer has no test box yet (for example
+          Windows Home), so the quick test box can be set up.
 
           SHA-256 fingerprints:
           - $env:INSTALLER — $instHash
