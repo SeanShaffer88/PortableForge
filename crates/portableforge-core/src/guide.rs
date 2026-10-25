@@ -154,7 +154,28 @@ pub const BANNED_IN_PRIMARY: &[&str] = &[
     "executable",
 ];
 
+/// The first-run welcome: the whole journey in five plain lines,
+/// shown on the first step until the person says "Got it". Checked
+/// by the same jargon guard as every other primary wording.
+pub const WELCOME: &[&str] = &[
+    "Welcome to PortableForge — we turn a program you have into a portable copy you can carry anywhere.",
+    "You pick the program's setup file; we do the rest, one plain step at a time.",
+    "The program is only ever installed inside a throwaway test box, so your real computer stays untouched.",
+    "We watch what the program leaves behind, carry its settings into your copy, and build it for you.",
+    "At the end you test the finished copy, and we tell you honestly whether it left anything behind.",
+];
+
 pub fn primary_wording_is_plain() -> Result<(), String> {
+    for line in WELCOME {
+        let lower = line.to_ascii_lowercase();
+        for banned in BANNED_IN_PRIMARY {
+            if lower.contains(banned) {
+                return Err(format!(
+                    "welcome wording contains banned jargon '{banned}': {line}"
+                ));
+            }
+        }
+    }
     for step in STEPS {
         for text in [step.title, step.what_happens, step.what_you_do] {
             let lower = text.to_ascii_lowercase();
