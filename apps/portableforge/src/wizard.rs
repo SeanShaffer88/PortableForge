@@ -163,17 +163,84 @@ fn color(hex: &str) -> egui::Color32 {
 
 pub fn dark_visuals() -> egui::Visuals {
     let mut v = egui::Visuals::dark();
-    v.panel_fill = color(guide::theme::PANEL);
-    v.window_fill = color(guide::theme::PANEL);
-    v.extreme_bg_color = color(guide::theme::BG);
+    v.panel_fill = color(guide::theme::BG);
+    v.window_fill = color(guide::theme::BG);
+    v.extreme_bg_color = color(guide::theme::PANEL);
     v.faint_bg_color = color(guide::theme::PANEL);
     v.override_text_color = Some(color(guide::theme::TEXT));
     v.hyperlink_color = color(guide::theme::ACCENT_RED);
     v.selection.bg_fill = color(guide::theme::PRIMARY_RED);
+    v.selection.stroke = egui::Stroke::new(1.0_f32, color(guide::theme::ACCENT_RED));
     v.widgets.active.bg_fill = color(guide::theme::PRIMARY_RED);
+    v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::ACCENT_RED));
     v.widgets.hovered.bg_fill = color(guide::theme::HAIRLINE);
-    v.widgets.inactive.bg_fill = color(guide::theme::HAIRLINE);
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::TEXT_FAINT));
+    v.widgets.inactive.bg_fill = color(guide::theme::PANEL);
+    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::HAIRLINE));
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::HAIRLINE));
+    let radius = egui::CornerRadius::same(6);
+    for w in [
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+        &mut v.widgets.noninteractive,
+    ] {
+        w.corner_radius = radius;
+    }
     v
+}
+
+/// The whole window style: family colours, rounded widgets,
+/// Fluent-rhythm spacing (4/8/16/24), readable text sizes, and a
+/// short animation time so hovers, scrolls and state changes glide
+/// instead of snapping. Presentation only — no wording lives here.
+pub fn polished_style() -> egui::Style {
+    let mut style = egui::Style {
+        visuals: dark_visuals(),
+        ..Default::default()
+    };
+    style.animation_time = 0.15;
+    style.spacing.item_spacing = egui::vec2(10.0, 9.0);
+    style.spacing.button_padding = egui::vec2(14.0, 7.0);
+    style.spacing.indent = 20.0;
+    style.spacing.interact_size = egui::vec2(42.0, 28.0);
+    style.spacing.slider_width = 180.0;
+    style.text_styles = [
+        (
+            egui::TextStyle::Heading,
+            egui::FontId::new(26.0, egui::FontFamily::Proportional),
+        ),
+        (
+            egui::TextStyle::Body,
+            egui::FontId::new(15.5, egui::FontFamily::Proportional),
+        ),
+        (
+            egui::TextStyle::Button,
+            egui::FontId::new(15.0, egui::FontFamily::Proportional),
+        ),
+        (
+            egui::TextStyle::Small,
+            egui::FontId::new(12.5, egui::FontFamily::Proportional),
+        ),
+        (
+            egui::TextStyle::Monospace,
+            egui::FontId::new(13.5, egui::FontFamily::Monospace),
+        ),
+    ]
+    .into();
+    style
+}
+
+/// A content card: panel fill, hairline edge, soft corners,
+/// comfortable padding. Step controls live on cards so the window
+/// reads as grouped panels instead of text floating on black.
+pub fn card() -> egui::Frame {
+    egui::Frame::new()
+        .fill(color(guide::theme::PANEL))
+        .stroke(egui::Stroke::new(1.0_f32, color(guide::theme::HAIRLINE)))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(16))
 }
 
 impl WizardApp {
@@ -788,7 +855,7 @@ impl WizardApp {
 
 impl eframe::App for WizardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.set_visuals(dark_visuals());
+        ctx.set_style(polished_style());
         ctx.set_zoom_factor(self.settings.text_scale());
         self.persist_if_due();
 
@@ -825,8 +892,13 @@ impl eframe::App for WizardApp {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(format!("Step {} of {}", self.step + 1, STEPS.len()))
-                        .color(color(guide::theme::TEXT_MUTED)),
+                    egui::RichText::new(format!(
+                        "Step {} of {} · {}%",
+                        self.step + 1,
+                        STEPS.len(),
+                        (((self.step as f32 + 1.0) / STEPS.len() as f32) * 100.0).round() as u32
+                    ))
+                    .color(color(guide::theme::TEXT_MUTED)),
                 );
                 ui.label(
                     egui::RichText::new("PortableForge")
@@ -859,19 +931,54 @@ impl eframe::App for WizardApp {
                     );
                 });
             });
+            // A slim progress track whose fill glides to the new
+            // step instead of jumping — small, but it makes the
+            // whole window feel calmer.
             let frac = (self.step as f32 + 1.0) / STEPS.len() as f32;
-            ui.add(
-                egui::ProgressBar::new(frac)
-                    .fill(color(guide::theme::PRIMARY_RED))
-                    .show_percentage(),
+            let shown = ctx.animate_value_with_time(egui::Id::new("pf-progress"), frac, 0.35);
+            ui.add_space(8.0);
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(
+                rect,
+                egui::CornerRadius::same(3),
+                color(guide::theme::PANEL),
             );
-            ui.add_space(6.0);
+            let fill_w = rect.width() * shown.clamp(0.0, 1.0);
+            if fill_w > 0.5 {
+                let mut fill = rect;
+                fill.max.x = rect.min.x + fill_w;
+                painter.rect_filled(
+                    fill,
+                    egui::CornerRadius::same(3),
+                    color(guide::theme::ACCENT_RED),
+                );
+            }
+            ui.add_space(8.0);
+            ui.separator();
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(10.0);
-            ui.heading(egui::RichText::new(step.title).size(26.0));
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin {
+                    left: 26,
+                    right: 26,
+                    top: 18,
+                    bottom: 14,
+                }),
+            )
+            .show(ctx, |ui| {
+            ui.heading(egui::RichText::new(step.title).size(30.0));
             ui.add_space(6.0);
+            let (rule, _) =
+                ui.allocate_exact_size(egui::vec2(46.0, 3.0), egui::Sense::hover());
+            ui.painter_at(rule).rect_filled(
+                rule,
+                egui::CornerRadius::same(2),
+                color(guide::theme::ACCENT_RED),
+            );
+            ui.add_space(10.0);
             ui.label(egui::RichText::new(step.what_happens).size(16.0));
             ui.add_space(4.0);
             ui.label(
@@ -921,6 +1028,7 @@ impl eframe::App for WizardApp {
                 "safety" => {
                     let mut override_change: Option<bool> = None;
                     if let Some(report) = &self.preflight {
+                        card().show(ui, |ui| {
                         for check in &report.checks {
                             let mark = if check.ok { "✓" } else { "✗" };
                             let col = if check.ok {
@@ -965,6 +1073,7 @@ impl eframe::App for WizardApp {
                                 override_change = Some(want);
                             }
                         }
+                        });
                     }
                     if let Some(want) = override_change {
                         self.force_sandbox = want;
@@ -1417,39 +1526,58 @@ impl eframe::App for WizardApp {
                 );
             }
 
-            ui.add_space(16.0);
+            let _ = self.phase();
+            });
+
+        // Pinned footer: navigation always in the same place,
+        // Continue as the one filled accent button, and the latest
+        // plain status line under it.
+        egui::TopBottomPanel::bottom("log").show(ctx, |ui| {
+            ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if self.step > 0
                     && ui
-                        .button("Back")
+                        .add(egui::Button::new("Back").min_size(egui::vec2(110.0, 38.0)))
                         .on_hover_text("Go back one step. Nothing is lost.")
                         .clicked()
                 {
                     self.go_back();
                 }
-                let next_label = if self.step + 1 >= STEPS.len() {
-                    "Finish"
-                } else {
-                    "Continue"
-                };
-                if ui
-                    .button(egui::RichText::new(next_label).strong())
-                    .on_hover_text("Go to the next step.")
-                    .clicked()
-                {
-                    // Each step checks its own promise before letting the
-                    // person continue — a plain refusal, never a trap.
-                    // Enter on the keyboard takes this same path.
-                    self.advance();
-                }
-                let _ = self.phase();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let next_label = if self.step + 1 >= STEPS.len() {
+                        "Finish"
+                    } else {
+                        "Continue"
+                    };
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(next_label)
+                                    .strong()
+                                    .color(color(guide::theme::TEXT)),
+                            )
+                            .fill(color(guide::theme::PRIMARY_RED))
+                            .min_size(egui::vec2(160.0, 38.0)),
+                        )
+                        .on_hover_text("Go to the next step.")
+                        .clicked()
+                    {
+                        // Each step checks its own promise before letting
+                        // the person continue — a plain refusal, never a
+                        // trap. Enter on the keyboard takes this same path.
+                        self.advance();
+                    }
+                });
             });
-        });
-
-        egui::TopBottomPanel::bottom("log").show(ctx, |ui| {
             if let Some(last) = self.log.last() {
-                ui.label(egui::RichText::new(last.clone()).color(color(guide::theme::TEXT_FAINT)));
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(last.clone())
+                        .size(12.5)
+                        .color(color(guide::theme::TEXT_FAINT)),
+                );
             }
+            ui.add_space(8.0);
         });
     }
 }
