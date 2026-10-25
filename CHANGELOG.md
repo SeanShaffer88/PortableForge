@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-25
+
+### Added
+- **The quick test box (Sandboxie).** A whole new way to test,
+  for computers where the safe test box cannot run — most
+  importantly Windows Home, which does not include it at all.
+  If Sandboxie-Plus is installed (a free program you install
+  yourself; PortableForge only detects it and drives it), the
+  safety check picks the quick test box on its own. The program
+  runs on your computer, but everything it writes is caught in a
+  sealed folder that is thrown away afterwards; it starts in
+  seconds, and the notes, the review, and the build work exactly
+  as before. It is not a separate computer — programs that
+  install deep system parts may not install properly in it, and
+  the review flags those, as it always has. New commands match
+  the window, as always: `sbie-launch` and `sbie-capture`.
+
 ## [0.1.4] — 2026-10-25
 
 ### Fixed
