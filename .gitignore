@@ -5,3 +5,8 @@ sessions/
 # crates/portableforge-core/src/tools.rs and tools-pins/PINS.md.
 tools-pins/*.paf.exe
 tools-pins/*.zip
+tools-pins/*.exe
+# The bundled Sandboxie installer is staged by the release
+# workflow (downloaded + fingerprint-checked there) — never a
+# committed file. Its pin lives in tools.rs like the others.
+/bundled/
