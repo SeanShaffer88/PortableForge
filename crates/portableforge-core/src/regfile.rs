@@ -12,6 +12,21 @@ use crate::snapshot::RegEntry;
 /// rather than failing the whole capture — a snapshot with a warning is
 /// more useful than no snapshot; the caller counts skipped lines via
 /// [`parse_reg_with_report`].
+/// Decode a `.reg` export's bytes: UTF-16LE with a BOM (what
+/// `reg.exe` writes) or plain UTF-8. The same decoding the agent
+/// does, kept here so the host side (Sandboxie captures) reads
+/// exports identically.
+pub fn decode_reg_export(bytes: &[u8]) -> Result<String, String> {
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        return String::from_utf16(&units).map_err(|e| format!("Bad UTF-16 export: {e}"));
+    }
+    String::from_utf8(bytes.to_vec()).map_err(|e| format!("Bad export text: {e}"))
+}
+
 pub fn parse_reg(text: &str) -> Vec<RegEntry> {
     parse_reg_with_report(text).0
 }
