@@ -1,0 +1,76 @@
+name: Release
+
+# Tag a commit `vX.Y.Z` (only once the release-readiness checklist
+# in docs/RELEASE_READINESS.md passes) and this builds the release
+# zip and attaches it to a GitHub Release of the same name.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Gate (the full suite, same as CI)
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+
+      - name: Release build
+        run: cargo build --locked --release
+
+      - name: Assemble the release zip
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $stage = "PortableForge-$tag-windows-x64"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item target/release/portableforge.exe $stage
+          Copy-Item target/release/portableforge-agent.exe $stage
+          Copy-Item README.md $stage
+          Copy-Item LICENSE $stage
+          Copy-Item docs/ON_MACHINE_RUNBOOK.md $stage
+          # Fingerprints of everything in the zip, listed inside it
+          # and printed again in the release notes.
+          Get-ChildItem $stage -File | Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } |
+            Set-Content "$stage/SHA256SUMS.txt"
+          Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip"
+          "ZIP_NAME=$stage.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "STAGE=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Create the GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $sums = Get-Content "$env:STAGE/SHA256SUMS.txt" -Raw
+          $notes = @"
+          PortableForge ${{ github.ref_name }} — the guided portable-package maker.
+
+          **This build is unsigned.** Windows SmartScreen will warn on
+          first run; choose "More info" then "Run anyway" only if the
+          fingerprint of your download matches the list below.
+
+          SHA-256 fingerprints:
+          ``````
+          $sums
+          ``````
+
+          What's inside the zip: portableforge.exe (the window and
+          the commands), portableforge-agent.exe (the helper that
+          works inside the test box — keep it beside the main
+          program), README.md, LICENSE, the on-machine runbook, and
+          SHA256SUMS.txt.
+          "@
+          gh release create "${{ github.ref_name }}" "$env:ZIP_NAME" --title "PortableForge ${{ github.ref_name }}" --notes $notes
