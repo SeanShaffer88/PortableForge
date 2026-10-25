@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-10-25
+
+### Fixed
+- **The safety check misjudged a computer that can run the safe
+  test box** (field report from the first installed run). Windows
+  names your edition two different ways — the short name and the
+  product name spell "Pro" differently — and the check only read
+  one of them, so a capable computer was sent to Careful mode.
+  It now reads both, and when the check still says no, its fix
+  words name the edition your computer actually reported, so a
+  wrong reading is visible instead of silent.
+- **New choice on the safety step: "Use the safe test box
+  anyway."** If you know your computer can run the test box, your
+  word wins: PortableForge uses the box, and the report keeps an
+  honest line saying the choice was yours. (A test box Windows
+  says is truly switched off still says so — no choice can
+  override the computer itself.)
+
+### Changed
+- Releases now carry exactly two downloads: the installer on its
+  own, and one zip with the portable copy — no more bundle zip.
+
 ## [0.1.1] — 2026-10-25
 
 ### Fixed
