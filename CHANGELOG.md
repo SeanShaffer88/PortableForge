@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-10-25
+
+### Fixed
+- **The wizard no longer opens a console window beside it.** The
+  v0.1.0 release binary was built as a console program, so starting
+  the window also opened a black terminal window behind it (caught
+  by checking the shipped file itself, before any install). The
+  program is now built as a windowed program, and commands run
+  from a terminal re-attach to that terminal first, so the
+  command line keeps its output. The helper keeps its console —
+  inside the test box that is where its work shows.
+
+## [0.1.0] — 2026-10-25
+
 ### Added — first release packaging (2026-10-25)
 - A proper installer joins the portable pair in the release zip:
   a per-user setup program (no admin needed, Start menu shortcut,
