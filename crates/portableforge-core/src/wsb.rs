@@ -14,6 +14,11 @@ use serde::{Deserialize, Serialize};
 pub enum SandboxMode {
     /// Mode A — Windows Sandbox (true isolation, disposable).
     WindowsSandbox,
+    /// Mode A2 — Sandboxie quick box: the program runs on the host
+    /// under Sandboxie's redirection, so everything it writes is
+    /// caught in a sealed folder area and thrown away. Works on
+    /// every Windows edition; not a separate computer.
+    Sandboxie,
     /// Mode B — the user's own VM snapshot.
     OwnVm,
     /// Mode C — host snapshot + restore-point rollback (NOT isolated;
@@ -28,6 +33,10 @@ impl SandboxMode {
             SandboxMode::WindowsSandbox => (
                 "Safe test box",
                 "Your computer is untouched — everything happens in a throwaway box that is deleted afterwards.",
+            ),
+            SandboxMode::Sandboxie => (
+                "Quick test box",
+                "The program runs on this computer, but Sandboxie catches everything it writes in a sealed folder area that is thrown away afterwards. It starts in seconds and works on any Windows edition — but it is not a separate computer, and programs that install deep system parts may not install properly here; we flag those when we see them.",
             ),
             SandboxMode::OwnVm => (
                 "Your own test computer",
