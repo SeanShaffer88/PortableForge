@@ -2,7 +2,8 @@ name: Release
 
 # Tag a commit `vX.Y.Z` (only once the release-readiness checklist
 # in docs/RELEASE_READINESS.md passes) and this builds the release
-# zip and attaches it to a GitHub Release of the same name.
+# zip — installer + portable pair + docs + fingerprints — and
+# attaches it to a GitHub Release of the same name.
 on:
   push:
     tags: ["v*"]
@@ -29,12 +30,24 @@ jobs:
       - name: Release build
         run: cargo build --locked --release
 
+      - name: Build the installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag.TrimStart('v')
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup (ISCC.exe) not found on the runner" }
+          & $iscc "/DAppVersion=$ver" installer/PortableForge.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
       - name: Assemble the release zip
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
+          $ver = $tag.TrimStart('v')
           $stage = "PortableForge-$tag-windows-x64"
           New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "installer/Output/PortableForge-Setup-v$ver-x64.exe" $stage
           Copy-Item target/release/portableforge.exe $stage
           Copy-Item target/release/portableforge-agent.exe $stage
           Copy-Item README.md $stage
@@ -49,28 +62,38 @@ jobs:
           "ZIP_NAME=$stage.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
           "STAGE=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Create the GitHub Release
+      - name: Publish the GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $tag = "${{ github.ref_name }}"
           $sums = Get-Content "$env:STAGE/SHA256SUMS.txt" -Raw
           $notes = @"
-          PortableForge ${{ github.ref_name }} — the guided portable-package maker.
+          PortableForge $tag — the guided portable-package maker.
 
           **This build is unsigned.** Windows SmartScreen will warn on
           first run; choose "More info" then "Run anyway" only if the
           fingerprint of your download matches the list below.
+
+          Two ways in, both inside the one zip:
+          - **Installer:** PortableForge-Setup runs a normal per-user
+            install (no admin needed) with a Start menu shortcut.
+          - **Portable:** run portableforge.exe straight from the
+            unzipped folder — keep portableforge-agent.exe beside it;
+            the helper is needed inside the test box.
 
           SHA-256 fingerprints:
           ``````
           $sums
           ``````
 
-          What's inside the zip: portableforge.exe (the window and
-          the commands), portableforge-agent.exe (the helper that
-          works inside the test box — keep it beside the main
-          program), README.md, LICENSE, the on-machine runbook, and
-          SHA256SUMS.txt.
+          Also inside the zip: README.md, LICENSE, the on-machine
+          runbook, and SHA256SUMS.txt.
           "@
-          gh release create "${{ github.ref_name }}" "$env:ZIP_NAME" --title "PortableForge ${{ github.ref_name }}" --notes $notes
+          # The release may already exist (created from the web UI to
+          # make the tag); create it if not, then attach the zip.
+          gh release create $tag --title "PortableForge $tag" --notes $notes
+          if ($LASTEXITCODE -ne 0) { Write-Host "Release already exists; attaching the zip to it." }
+          gh release upload $tag "$env:ZIP_NAME" --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Attaching the release zip failed" }
