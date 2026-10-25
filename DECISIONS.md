@@ -1,5 +1,22 @@
 # Decisions — PortableForge
 
+## 2026-10-25 — Sandboxie quick box (Mode A2), SEAN's pick
+Windows Sandbox needs Pro/Enterprise/Education; SEAN's own machine
+reports its edition as 'Core' (Windows Home), so the safe test box
+can never run there. Offered four ways forward (Sandboxie mode /
+productised VirtualBox mode / both / keep current modes), SEAN
+picked the Sandboxie mode. Design: Sandboxie stays an external
+black box we orchestrate (its own `Start.exe`), never bundled —
+the person installs Sandboxie-Plus themselves; PortableForge
+detects it in its standard install places. A fresh named box per
+session makes the box folder itself the after-state; registry
+notes are `reg.exe` exports run inside the box (same three hives
+as the agent), so the existing diff/classify/build pipeline is
+untouched. Honesty label: fast and works on any edition, but not
+a separate computer — deep system parts may not install properly;
+the classifier's existing red flags carry that warning. The leak
+test still uses the safe/careful ways in this version.
+
 ## 2026-10-23 — Name: PortableForge
 SEAN chose the name (working title was PAFForge). Repo/workspace renamed
 before first code landed, so no legacy name survives in paths.
