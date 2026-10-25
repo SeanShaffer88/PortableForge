@@ -29,6 +29,9 @@ pub struct WizardApp {
     /// The collected machine facts behind the safety report, kept
     /// so the "use it anyway" choice can re-judge them on the spot.
     preflight_facts: Option<portableforge_core::orchestrate::PreflightFacts>,
+    /// Set by Finish on the last step: the window closes (the run
+    /// is complete and its draft already cleared).
+    finished: bool,
     /// The person's word that this computer can run the safe test
     /// box, whatever the checks concluded (persisted in the draft).
     force_sandbox: bool,
@@ -80,6 +83,7 @@ impl Default for WizardApp {
             preflight: None,
             preflight_facts: None,
             force_sandbox: false,
+            finished: false,
             review: Review::default(),
             layout: None,
             build_summary: None,
@@ -842,12 +846,17 @@ impl WizardApp {
             true
         } else {
             // Finish on the last step: the run is complete, so the
-            // unfinished-run draft goes away.
+            // unfinished-run draft goes away — and the window
+            // closes, so Finish visibly finishes. (Before this, the
+            // click only cleared the draft behind the scenes and
+            // looked like it did nothing — field report,
+            // 2026-10-25.)
             self.settings.draft = None;
             self.settings_dirty = true;
             self.persist_now();
             self.log
                 .push("All done — this run is finished.".to_string());
+            self.finished = true;
             true
         }
     }
@@ -857,6 +866,9 @@ impl eframe::App for WizardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.set_style(polished_style());
         ctx.set_zoom_factor(self.settings.text_scale());
+        if self.finished {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         self.persist_if_due();
 
         // Keyboard: Enter continues and Escape goes back — but never
@@ -988,6 +1000,14 @@ impl eframe::App for WizardApp {
             );
             ui.add_space(12.0);
 
+            // The step body scrolls: a tall step (the safety check
+            // with several fixes, a long changes list) used to run
+            // past the bottom of the window with no way to reach
+            // its end (field run, 2026-10-25 — the mode line and
+            // the use-it-anyway choice were below the fold).
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
             // An unfinished run from last time is offered, never forced.
             if self.resume_offer {
                 ui.label(
@@ -1030,14 +1050,59 @@ impl eframe::App for WizardApp {
                     if let Some(report) = &self.preflight {
                         card().show(ui, |ui| {
                         for check in &report.checks {
-                            let mark = if check.ok { "✓" } else { "✗" };
                             let col = if check.ok {
                                 color(guide::theme::TEXT)
                             } else {
                                 color(guide::theme::ACCENT_RED)
                             };
-                            ui.label(egui::RichText::new(format!("{mark}  {}", check.label)).color(col))
-                                .on_hover_text("A tick means this is fine. A cross means it needs fixing — the fix is written under it.");
+                            // The tick / cross is DRAWN, not a
+                            // character: the bundled font has no
+                            // ✓/✗ glyphs and showed hollow squares
+                            // on a real machine (field run,
+                            // 2026-10-25) — pass and fail looked
+                            // identical.
+                            ui.horizontal(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(16.0, 16.0),
+                                    egui::Sense::hover(),
+                                );
+                                let painter = ui.painter_at(rect);
+                                let c = rect.center();
+                                let stroke = egui::Stroke::new(2.0_f32, col);
+                                if check.ok {
+                                    painter.line_segment(
+                                        [
+                                            egui::pos2(c.x - 5.0, c.y),
+                                            egui::pos2(c.x - 1.5, c.y + 4.0),
+                                        ],
+                                        stroke,
+                                    );
+                                    painter.line_segment(
+                                        [
+                                            egui::pos2(c.x - 1.5, c.y + 4.0),
+                                            egui::pos2(c.x + 5.5, c.y - 4.5),
+                                        ],
+                                        stroke,
+                                    );
+                                } else {
+                                    painter.line_segment(
+                                        [
+                                            egui::pos2(c.x - 4.0, c.y - 4.0),
+                                            egui::pos2(c.x + 4.0, c.y + 4.0),
+                                        ],
+                                        stroke,
+                                    );
+                                    painter.line_segment(
+                                        [
+                                            egui::pos2(c.x + 4.0, c.y - 4.0),
+                                            egui::pos2(c.x - 4.0, c.y + 4.0),
+                                        ],
+                                        stroke,
+                                    );
+                                }
+                                ui.label(egui::RichText::new(&check.label).color(col))
+                                    .on_hover_text("A tick means this is fine. A cross means it needs fixing — the fix is written under it.");
+                            });
                             if !check.fix.is_empty() {
                                 ui.label(
                                     egui::RichText::new(format!("     {}", check.fix))
@@ -1526,6 +1591,7 @@ impl eframe::App for WizardApp {
                 );
             }
 
+                });
             let _ = self.phase();
             });
 
