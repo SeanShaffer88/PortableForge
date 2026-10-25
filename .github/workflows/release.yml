@@ -95,3 +95,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Host "Release already exists; attaching the assets to it." }
           gh release upload $tag "$env:INSTALLER" "$env:PORTZIP" --clobber
           if ($LASTEXITCODE -ne 0) { throw "Attaching the release assets failed" }
+          # Always land the fingerprint notes, even when the release
+          # itself was created from the web UI (to make the tag).
+          gh release edit $tag --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw "Refreshing the release notes failed" }
