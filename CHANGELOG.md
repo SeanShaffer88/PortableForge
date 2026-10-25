@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### The 100-enhancement programme — complete (2026-10-24)
+
+Ninety-eight of the hundred planned improvements shipped in ten
+slices, each one checked by the full test suite, published file by
+file with fingerprint verification, and confirmed on a real Windows
+build runner. The test suite grew from 47 checks to 92 along the
+way. Two items wait, on purpose: the version stays at 0.1.0 until
+the on-machine runbook has passed on a real Windows computer
+(that pass is also where the README's screenshots come from) —
+everything they need is built and waiting, including the release
+machinery that turns a version tag into a downloadable zip with
+fingerprints. A final audit traced every claim in the README to a
+test, a build-runner result, or an on-machine result, and rewrote
+the two claims that said more than the evidence allowed.
+
+### Added — Slice 10: release & finish (2026-10-24)
+- Tagging a version now builds the release by itself: a checked,
+  fingerprinted zip (both programs, README, license, runbook) on a
+  GitHub Release page, with the unsigned warning written into the
+  notes. The README explains, in plain words, how to download a
+  release and check its fingerprint before trusting it.
+- First-run welcome: five plain lines on the first step explain the
+  whole journey; they disappear once read and are held to the same
+  no-jargon rule as every other line in the window.
+- `portableforge --version` prints the version, the window's header
+  shows it too, and the Done step can save the whole run — picks,
+  decisions, build, leak verdict, and the log — as one plain text
+  file.
+
 ### Added — 100-enhancement programme, Slice 9: proof, not promises (2026-10-24)
 - The plain-language promise is now enforced on the wizard itself,
   not just the guide text: a test reads the wizard's own buttons and
