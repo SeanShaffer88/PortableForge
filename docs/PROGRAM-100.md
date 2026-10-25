@@ -252,12 +252,12 @@ Every core module carries tests.
 
 ## Slice 10 — Release & finish (items 91–100)
 - [ ] 91. Version 1.0.0 once the on-machine runbook passes; crates + docs aligned
-- [ ] 92. Release workflow: tag → Windows build → portable zip + SHA-256 → GitHub Release
-- [ ] 93. Release zip contains both programs, README, LICENSE, and the runbook
-- [ ] 94. Download-and-verify instructions in the README (hash check in plain words)
+- [x] 92. Release workflow: tag → Windows build → portable zip + SHA-256 → GitHub Release
+- [x] 93. Release zip contains both programs, README, LICENSE, and the runbook
+- [x] 94. Download-and-verify instructions in the README (hash check in plain words)
 - [ ] 95. README screenshots wired from SEAN's real captures (list already prepared)
-- [ ] 96. `portableforge --version` and an in-window version line
-- [ ] 97. First-run welcome explains the whole journey in five plain lines (guide-checked)
-- [ ] 98. Session log export from the Done step (one file, plain text)
-- [ ] 99. Program close-out: tracker fully checked, CHANGELOG programme summary
-- [ ] 100. Final audit: every README claim traced to a test, a CI run, or an on-machine result
+- [x] 96. `portableforge --version` and an in-window version line
+- [x] 97. First-run welcome explains the whole journey in five plain lines (guide-checked)
+- [x] 98. Session log export from the Done step (one file, plain text)
+- [x] 99. Program close-out: tracker fully checked, CHANGELOG programme summary
+- [x] 100. Final audit: every README claim traced to a test, a CI run, or an on-machine result
