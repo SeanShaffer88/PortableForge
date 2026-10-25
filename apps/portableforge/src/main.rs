@@ -278,7 +278,7 @@ Commands (the same steps, for scripts and testing):
   leak-packet --package <folder> --out <folder>   Make the leak-test packet: package copy, helper, instructions, and the note names
   doctor [--cache <folder>] [--json]    One health report: this computer, the maker programs, and the helper program
 
-Every command also answers to --help (for example: portableforge build --help).
+Every command also answers to --help (for example: portableforge build --help). portableforge --version prints the version and nothing else.
 Exit codes: 0 means fine, 1 means something went wrong, 2 means the run worked but a check found problems (build problems, validation problems, leaks, or missing pieces in doctor).
 Everywhere: paths are ordinary file paths; nothing is uploaded anywhere.";
 
@@ -329,6 +329,10 @@ fn run_cli(args: &[String]) -> Result<(), String> {
         };
     }
     match args[0].as_str() {
+        "--version" | "-V" | "version" => {
+            println!("PortableForge {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             if let Some(topic) = args.get(1) {
                 match command_help(topic) {
