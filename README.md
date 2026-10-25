@@ -69,7 +69,24 @@ You never need this — the window does everything. For scripts and testing, eve
 
 ## Screenshots
 
-Screenshots will be added from real runs on a Windows machine. The capture list is in [docs/screenshots/CAPTURE.md](docs/screenshots/CAPTURE.md).
+From a real run on a Windows machine (the remaining captures on
+the list in [docs/screenshots/CAPTURE.md](docs/screenshots/CAPTURE.md)
+are added as the run-through reaches them):
+
+**Step 1 — Pick your program.** The setup file is chosen; its
+size is confirmed in plain words before anything runs.
+
+![Step 1: pick your program](docs/screenshots/wizard-01-pick.png)
+
+**Step 3 — A clean test computer.** How much memory the test box
+gets, and whether it may use the internet or the clipboard.
+
+![Step 3: a clean test computer](docs/screenshots/wizard-03-clean.png)
+
+**Step 4 — Install the program.** The program's own setup runs
+inside the throwaway box, exactly like a normal install.
+
+![Step 4: install the program](docs/screenshots/wizard-04-install.png)
 
 ## Downloading a release
 
