@@ -73,28 +73,35 @@ Screenshots will be added from real runs on a Windows machine. The capture list 
 
 ## Downloading a release
 
-Releases live on this project's GitHub releases page. (The first
-one, v1.0.0, is published once the on-machine runbook in
-`docs/ON_MACHINE_RUNBOOK.md` has passed — until then, building from
-source below is the way in.)
+Releases live on this project's GitHub releases page. (Version
+1.0.0 comes once the on-machine runbook in
+`docs/ON_MACHINE_RUNBOOK.md` has passed; the 0.1.x releases are
+the same program, honestly labelled as not yet field-proven.)
 
-1. Download the zip named like `PortableForge-v1.0.0-windows-x64.zip`.
-2. Unzip it anywhere. You get both programs — keep
-   `portableforge-agent.exe` beside `portableforge.exe`; the helper
-   is needed inside the test box — plus the README, the license,
-   the runbook, and `SHA256SUMS.txt`.
-3. **Check your download is genuine.** The release page lists a
-   fingerprint (a long line of letters and numbers) for the zip.
-   Compare it with your copy: open PowerShell in the folder where
-   the zip is and run
-   `Get-FileHash .\PortableForge-v1.0.0-windows-x64.zip`
-   — the `Hash` line it prints must match the one on the release
-   page, letter for letter. If it does not match, delete the zip
-   and download it again from the releases page.
-4. The programs are **unsigned**, so Windows SmartScreen will warn
-   the first time you run one. That is expected for now; once your
-   fingerprint check matches, "More info" → "Run anyway" is the
-   honest way through.
+Every release has exactly two downloads:
+
+- **The installer** (`PortableForge-Setup-v…-x64.exe`) — a normal
+  per-user install, no admin needed, with a Start menu shortcut.
+  It installs both programs together; the helper belongs beside
+  the main program.
+- **The portable zip** (`PortableForge-v…-portable.zip`) — unzip
+  anywhere and run `portableforge.exe` from the folder. Keep
+  `portableforge-agent.exe` beside it; the helper is needed inside
+  the test box. A short `PORTABLE.txt` inside the zip says the
+  same in fewer words.
+
+**Check your download is genuine.** The release notes list a
+fingerprint (a long line of letters and numbers) for each file.
+Compare it with your copy: open PowerShell in the folder where
+the file is and run `Get-FileHash .\<the file's name>` — the
+`Hash` line it prints must match the one in the release notes,
+letter for letter. If it does not match, delete the file and
+download it again from the releases page.
+
+The programs are **unsigned**, so Windows SmartScreen will warn
+the first time you run one. That is expected; once your
+fingerprint check matches, "More info" → "Run anyway" is the
+honest way through.
 
 ## Building from source
 
