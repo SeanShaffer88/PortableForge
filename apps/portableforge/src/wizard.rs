@@ -254,6 +254,56 @@ impl WizardApp {
         }
     }
 
+    /// The whole run as one plain text file: what was picked, what
+    /// the review decided, what was built, what the leak test said,
+    /// and the window's own log lines in order.
+    fn run_log_text(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "PortableForge run log — version {}\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+        out.push_str(&format!(
+            "Written (UTC): {}\n",
+            portableforge_core::timeutil::now_iso()
+        ));
+        out.push_str(&format!("Setup file: {}\n", self.installer_path.trim()));
+        if let Some(layout) = &self.layout {
+            out.push_str(&format!("Work folder: {}\n", layout.root.display()));
+        }
+        out.push_str(&format!("\nReview: {}\n", self.review.summary()));
+        if let Some(text) = &self.build_summary {
+            out.push_str(&format!("\nBuild: {text}\n"));
+        }
+        if let Some(text) = &self.leak_result {
+            out.push_str(&format!("\nLeak test:\n{text}\n"));
+        }
+        out.push_str("\nWhat happened, in order:\n");
+        for line in &self.log {
+            out.push_str(&format!("- {line}\n"));
+        }
+        out
+    }
+
+    fn export_run_log(&mut self) {
+        let text = self.run_log_text();
+        let picked = rfd::FileDialog::new()
+            .set_title("Save the run log")
+            .set_file_name("portableforge-run-log.txt")
+            .add_filter("Text file", &["txt"])
+            .save_file();
+        if let Some(path) = picked {
+            match std::fs::write(&path, text) {
+                Ok(()) => self
+                    .log
+                    .push(format!("Run log saved to {}.", path.display())),
+                Err(e) => self
+                    .log
+                    .push(format!("The run log could not be saved: {e}")),
+            }
+        }
+    }
+
     /// Judge the leak test: read the packet's two notes from this
     /// run's exchange folder and say, in plain words, whether the
     /// finished copy stayed inside its own folder.
@@ -773,6 +823,10 @@ impl eframe::App for WizardApp {
                         .color(color(guide::theme::ACCENT_RED))
                         .strong(),
                 );
+                ui.label(
+                    egui::RichText::new(format!("version {}", env!("CARGO_PKG_VERSION")))
+                        .color(color(guide::theme::TEXT_FAINT)),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let scale = self.settings.text_scale();
                     for (label, value) in [
@@ -973,6 +1027,21 @@ impl eframe::App for WizardApp {
                     }
                 }
                 "pick" => {
+                    if !self.settings.welcomed {
+                        for line in portableforge_core::guide::WELCOME {
+                            ui.label(*line);
+                        }
+                        if ui
+                            .button("Got it")
+                            .on_hover_text("Hide this welcome. It only shows the first time.")
+                            .clicked()
+                        {
+                            self.settings.welcomed = true;
+                            self.settings_dirty = true;
+                            self.persist_now();
+                        }
+                        ui.add_space(8.0);
+                    }
                     ui.label("Where is the program's setup file?");
                     ui.horizontal(|ui| {
                         if ui
@@ -1171,6 +1240,14 @@ impl eframe::App for WizardApp {
                                     self.log.push(e);
                                 }
                             }
+                        }
+                        ui.add_space(6.0);
+                        if ui
+                            .button("Save the run log")
+                            .on_hover_text("Save one plain text file with everything this run did and decided — handy to keep, or to send to whoever helps you.")
+                            .clicked()
+                        {
+                            self.export_run_log();
                         }
                     }
                 }
