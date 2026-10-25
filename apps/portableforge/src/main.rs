@@ -108,19 +108,21 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
         let build = reg_value("CurrentBuildNumber")
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
-        let edition = reg_value("EditionID").unwrap_or_default();
-        // The edition logic lives in the core (it knows the IoT
-        // Enterprise spellings); when EditionID is missing, the
-        // product name is the fallback witness.
-        let edition_supported = portableforge_core::orchestrate::edition_supported(&edition)
-            || reg_value("ProductName")
-                .map(|p| {
-                    p.contains("IoT Enterprise")
-                        || p.contains("Professional")
-                        || p.contains("Enterprise")
-                        || p.contains("Education")
-                })
-                .unwrap_or(false);
+        let edition_id = reg_value("EditionID").unwrap_or_default();
+        let product_name = reg_value("ProductName").unwrap_or_default();
+        // The edition logic lives in the core and reads BOTH naming
+        // forms Windows uses (EditionID says "Professional" where
+        // the product name says "Windows 11 Pro" — one matcher, so
+        // the two witnesses can never disagree by spelling again).
+        let edition_supported = portableforge_core::orchestrate::edition_supported(&edition_id)
+            || portableforge_core::orchestrate::edition_supported(&product_name);
+        // What the machine called its edition — shown in the report
+        // when the check fails, so a misread is visible.
+        let edition_witness = if !edition_id.is_empty() {
+            edition_id
+        } else {
+            product_name
+        };
         let sandbox_exe_present =
             std::path::Path::new(r"C:\Windows\System32\WindowsSandbox.exe").exists();
         // The Sandbox feature's real state, asked from DISM itself
@@ -167,6 +169,8 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
             free_ram_mb,
             restore_point,
             virt_enabled,
+            sandbox_override: false,
+            edition_witness,
         }
     }
     #[cfg(not(windows))]
@@ -181,6 +185,8 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
             free_ram_mb: None,
             restore_point: None,
             virt_enabled: None,
+            sandbox_override: false,
+            edition_witness: String::new(),
         }
     }
 }
@@ -316,7 +322,7 @@ fn command_help(cmd: &str) -> Option<String> {
         "build" => "build <details.json> --out <folder> [--session <session-folder>] [--review <review.json>] [--app-files <folder>] [--default-data <folder>] [--icon <file.ico>] [--zip] [--force] [--json] [--quiet]\n  Make the finished package folder from the details file. --session takes the accepted fixes, name tags, and first-run files from a finished capture. --zip also leaves a zip copy beside the folder. --force allows building into a non-empty folder that is not an earlier package. Ends with exit code 2 when the package has problems to fix.",
         "generate" => "generate <details.json> --out <folder> [--review <review.json>]\n  Write only the text files of a package (no program files copied). Without --review the starter rules carry no fixes, and it says so.",
         "validate" => "validate [<details.json>] [--tree <package-folder>]\n  Check package details, and with --tree also a built package folder. With no details file, --tree reads the package's own appinfo.ini. Exit code 2 when there are problems.",
-        "preflight" => "preflight [--json]\n  Check this computer: Windows edition, the test box feature, memory, disk, and which testing way is available.",
+        "preflight" => "preflight [--json] [--force-sandbox]\n  Check this computer: Windows edition, the test box feature, memory, disk, and which testing way is available. --force-sandbox shows the report as it looks when the person vouches for the test box (the wizard's 'use it anyway' choice).",
         "doctor" => "doctor [--cache <tools-folder>] [--json]\n  One health report: the preflight checks, the official maker programs (checked in --cache when given), and whether the helper program is beside PortableForge. Exit code 2 when something is missing.",
         "sessions" => "sessions [--base <folder>]\n  List the runs in the sessions folder (default: the PortableForge Sessions folder in your home folder) with their step, how long since they were last touched, and what should happen next.",
         "snapshot" => "snapshot (<folder> --prefix <path-prefix> | --root <folder> [--root <folder> ...]) --out <note.json> [--label <name>] [--quiet]\n  Take a note of a folder's files. Several --root folders are read into one note.",
@@ -902,8 +908,11 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "preflight" => {
-            let report =
-                portableforge_core::orchestrate::evaluate_preflight(&collect_preflight_facts());
+            let mut facts = collect_preflight_facts();
+            if args.iter().any(|a| a == "--force-sandbox") {
+                facts.sandbox_override = true;
+            }
+            let report = portableforge_core::orchestrate::evaluate_preflight(&facts);
             let (name, honesty) = report.best_mode.describe();
             if args.iter().any(|a| a == "--json") {
                 let value = serde_json::json!({
