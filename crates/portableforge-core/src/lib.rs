@@ -22,6 +22,7 @@ pub mod progress;
 pub mod regfile;
 pub mod review;
 pub mod rollback;
+pub mod sbie;
 pub mod session;
 pub mod settings;
 pub mod snapshot;
