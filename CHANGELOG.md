@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-10-25
+
+### Added
+- **The quick test box's installer now travels with
+  PortableForge.** Both downloads carry a `bundled` folder with
+  the official Sandboxie-Plus installer — the maker's own file,
+  untouched (its license allows passing the original along free
+  of charge; the license texts and a plain note are in the folder
+  too). On a computer with no test box yet, the safety check now
+  offers "Install the quick test box now": PortableForge checks
+  the installer's fingerprint against the value it was shipped
+  with before opening it, and a copy that does not match is never
+  opened. A "Check again" button re-reads the computer
+  afterwards. The same action exists as a command, as always:
+  `install-quick-box`. This makes the downloads bigger (about
+  24 MB more) — that trade was chosen knowingly, for a setup with
+  no hunting on the web.
+
 ## [0.2.0] — 2026-10-25
 
 ### Added
