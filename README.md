@@ -12,7 +12,7 @@ Anyone. The whole program is one guided path with twelve plain steps, one decisi
 
 ## What you need
 
-- A Windows 10 (build 18342 or newer) or Windows 11 computer. The safe test box needs the Pro, Enterprise, or Education edition — on Home, PortableForge offers Careful mode and says plainly that it is watched-and-reverted, not sealed off.
+- A Windows 10 (build 18342 or newer) or Windows 11 computer. The safe test box needs the Pro, Enterprise, or Education edition. On Home, if you have Sandboxie-Plus installed (a free program), PortableForge can use its quick test box instead; otherwise it offers Careful mode and says plainly that it is watched-and-reverted, not sealed off.
 - About 2 GB of free disk space and 2 GB of free memory while it works.
 - A program whose installer you have, and — only if you plan to share the finished portable copy — the right to share it. PortableForge asks, and builds differently depending on your answer.
 - Nothing else. No coding, no accounts, no internet needed after the one-time download of the two official builder programs (PortableForge checks their fingerprints before trusting them).
@@ -43,6 +43,7 @@ Anyone. The whole program is one guided path with twelve plain steps, one decisi
 ## Safety, in plain words
 
 - The conversion install happens **only** inside Windows Sandbox, a throwaway mini-PC built into Windows 10/11 (Pro, Enterprise, or Education editions). Closing it deletes everything in it.
+- On any edition — including Home — the **quick test box** works too, if Sandboxie-Plus is installed: the program runs on your computer, but Sandboxie catches everything it writes in a sealed folder that is thrown away afterwards. It starts in seconds. It is not a separate computer, and programs that install deep system parts may not install properly in it; PortableForge flags those when it sees them. Sandboxie is a separate free program you install yourself; PortableForge only detects it and drives it.
 - Only three folders are shared with the box: where the setup file lives (read-only), PortableForge's own tools (read-only), and one work folder where the results come out.
 - No internet inside the box unless you turn it on for that run.
 - PortableForge itself is offline, collects nothing, and phones nothing home.
