@@ -52,6 +52,11 @@ pub struct PreflightFacts {
     /// when the edition check fails so a wrong guess is visible.
     #[serde(default)]
     pub edition_witness: String,
+    /// Sandboxie (`Start.exe`) was found in one of its standard
+    /// install places — the quick test box is available, on any
+    /// Windows edition.
+    #[serde(default)]
+    pub sandboxie_present: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +201,17 @@ pub fn evaluate_preflight(f: &PreflightFacts) -> PreflightReport {
             None,
         );
     }
+    // The quick test box is an alternative, not a requirement: its
+    // line appears only when Sandboxie is actually there, so nobody
+    // is pushed to install anything by a red cross.
+    if f.sandboxie_present {
+        check(
+            "Sandboxie is installed (the quick test box)",
+            true,
+            "",
+            None,
+        );
+    }
     // Unknown facts are never dressed up as passes: an unmeasured check
     // does not block, but its label says it was not checked.
     check(
@@ -261,6 +277,10 @@ pub fn evaluate_preflight(f: &PreflightFacts) -> PreflightReport {
         && f.feature_enabled != Some(false);
     let best_mode = if sandbox_ok {
         SandboxMode::WindowsSandbox
+    } else if f.is_windows && f.sandboxie_present {
+        // The quick box works on every edition — it is the way on
+        // Windows Home, where the safe test box does not exist.
+        SandboxMode::Sandboxie
     } else if f.is_windows {
         // A user VM cannot be detected reliably; Mode B is chosen by the
         // user, not auto-detected. Fallback offer is the honest Mode C.
@@ -859,6 +879,7 @@ mod tests {
             virt_enabled: Some(true),
             sandbox_override: false,
             edition_witness: "Professional".to_string(),
+            sandboxie_present: false,
         }
     }
 
@@ -987,6 +1008,25 @@ mod tests {
         f.feature_enabled = Some(false);
         let r = evaluate_preflight(&f);
         assert_eq!(r.best_mode, SandboxMode::HostSnapshot);
+        // The quick box: on a Home machine (edition 'Core', no
+        // Sandbox program file) Sandboxie is the way — and its
+        // report line shows. A working safe test box still wins
+        // over it when both are available.
+        let mut f = facts_good();
+        f.edition_supported = false;
+        f.edition_witness = "Core".to_string();
+        f.sandbox_exe_present = false;
+        f.sandboxie_present = true;
+        let r = evaluate_preflight(&f);
+        assert_eq!(r.best_mode, SandboxMode::Sandboxie);
+        assert!(r
+            .checks
+            .iter()
+            .any(|c| c.ok && c.label.starts_with("Sandboxie is installed")));
+        f.edition_supported = true;
+        f.sandbox_exe_present = true;
+        let r = evaluate_preflight(&f);
+        assert_eq!(r.best_mode, SandboxMode::WindowsSandbox);
         // DISM output parsing.
         assert_eq!(
             parse_dism_feature_state("Feature Name : X\nState : Enabled\n"),
