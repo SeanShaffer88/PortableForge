@@ -5,6 +5,12 @@
 //! wizard action is scriptable and testable. All logic lives in
 //! `portableforge-core`; this binary only parses, calls, and prints.
 
+// GUI subsystem on Windows: double-clicking (or a shortcut) must
+// open ONLY the wizard window, never a console window behind it.
+// CLI runs re-attach to the parent console in `main` before
+// anything prints, so commands keep their terminal output.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod wizard;
 
 use portableforge_core::classify::classify;
@@ -29,8 +35,29 @@ fn set_exit_code(code: u8) {
     EXIT_CODE.store(code, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Re-attach to the launching terminal's console (CLI mode only).
+/// The binary is built with the GUI subsystem so the wizard never
+/// shows a console window; a command run from a terminal gets its
+/// console — and therefore its stdout/stderr — back here, before
+/// anything prints. Failing to attach (no parent console) is fine:
+/// output is simply discarded, exactly like any GUI program's.
+#[cfg(windows)]
+fn attach_parent_console() {
+    extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    if !args.is_empty() {
+        attach_parent_console();
+    }
     if args.is_empty() {
         return match wizard::run_gui() {
             Ok(()) => ExitCode::SUCCESS,
