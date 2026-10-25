@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-10-25
+
+### Changed
+- **The window looks finished now.** Same dark family colours and
+  the same words everywhere, presented properly: the safety
+  checks sit on a card instead of floating on black, the progress
+  line at the top is slim and glides to each step instead of
+  jumping, buttons and boxes have soft corners and room to
+  breathe, the headings carry a small red rule, and Back /
+  Continue are pinned at the bottom where your eye expects them —
+  Continue is now the one filled red button on every step.
+
 ## [0.1.2] — 2026-10-25
 
 ### Fixed
