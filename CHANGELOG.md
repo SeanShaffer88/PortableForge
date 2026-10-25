@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-10-25
+
+### Fixed
+- **Finish finishes.** On the last step, Finish quietly tidied up
+  behind the scenes and left the window sitting there, so it
+  looked like the click did nothing (field report). It now
+  closes the window — the run is complete and its unfinished-run
+  note is cleared, so the next launch starts fresh.
+- **Long steps scroll.** The safety step with several fixes ran
+  past the bottom of the window, and its last lines — the chosen
+  way and the "use it anyway" choice — could not be reached at
+  all. Step content now scrolls inside the window; the heading
+  and the bottom buttons stay put.
+- **Ticks and crosses are drawn, not typed.** The safety check's
+  marks were characters the included font does not have, so every
+  line showed the same hollow square and a pass looked like a
+  fail. They are now drawn shapes — a tick you can tell from a
+  cross at a glance.
+
 ## [0.1.3] — 2026-10-25
 
 ### Changed
