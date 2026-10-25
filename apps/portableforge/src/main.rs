@@ -171,6 +171,7 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
             virt_enabled,
             sandbox_override: false,
             edition_witness,
+            sandboxie_present: sbie_start_exe().is_some(),
         }
     }
     #[cfg(not(windows))]
@@ -187,8 +188,163 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
             virt_enabled: None,
             sandbox_override: false,
             edition_witness: String::new(),
+            sandboxie_present: false,
         }
     }
+}
+
+/// Sandboxie's `Start.exe`, when it is installed in one of its
+/// standard places. Detection only — Sandboxie is the person's own
+/// install, an external black box we orchestrate, never bundled.
+pub fn sbie_start_exe() -> Option<String> {
+    portableforge_core::sbie::START_EXE_CANDIDATES
+        .iter()
+        .find(|p| std::path::Path::new(p).is_file())
+        .map(|p| p.to_string())
+}
+
+/// The current user's name (for Sandboxie's default box folder).
+pub fn sbie_user_name() -> String {
+    std::env::var("USERNAME").unwrap_or_else(|_| "Default".to_string())
+}
+
+/// Run one boxed command through Sandboxie's own Start.exe.
+#[cfg(windows)]
+pub fn sbie_run(program_args: (String, Vec<String>)) -> Result<(), String> {
+    let (program, args) = program_args;
+    std::process::Command::new(&program)
+        .args(&args)
+        .spawn()
+        .map_err(|e| format!("The quick test box could not be started: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn sbie_run(_program_args: (String, Vec<String>)) -> Result<(), String> {
+    Err("The quick test box runs on Windows.".to_string())
+}
+
+/// Ask the quick box for one capture point: make the mirror
+/// folders and launch the three boxed registry exports. The note
+/// itself is assembled by [`sbie_collect_point`] once the exports
+/// have landed in the box folder.
+pub fn sbie_ask_point(
+    layout: &portableforge_core::orchestrate::SessionLayout,
+    point: &str,
+) -> Result<(), String> {
+    let start = sbie_start_exe().ok_or("Sandboxie was not found on this computer.")?;
+    let session_id = layout
+        .root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let box_name = portableforge_core::sbie::box_name_for(&session_id);
+    let box_dir = portableforge_core::sbie::default_box_dir(&sbie_user_name(), &box_name);
+    let mirror = portableforge_core::sbie::export_mirror_dir(&box_dir, point);
+    std::fs::create_dir_all(&mirror).map_err(|e| {
+        format!(
+            "We could not make the note folder {}: {e}",
+            mirror.display()
+        )
+    })?;
+    for cmd in portableforge_core::sbie::export_commands(&start, &box_name, point) {
+        sbie_run(cmd)?;
+    }
+    std::fs::write(
+        layout.exchange.join(format!("sbie-asked-{point}.txt")),
+        "asked",
+    )
+    .map_err(|e| format!("We could not save the note request: {e}"))?;
+    Ok(())
+}
+
+/// Assemble one capture point's note from the box folder and
+/// write it into the exchange folder, in the exact shape the
+/// review step reads. Returns `Ok(None)` while the boxed exports
+/// are still landing.
+pub fn sbie_collect_point(
+    layout: &portableforge_core::orchestrate::SessionLayout,
+    point: &str,
+) -> Result<Option<String>, String> {
+    let session_id = layout
+        .root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let box_name = portableforge_core::sbie::box_name_for(&session_id);
+    let user = sbie_user_name();
+    let box_dir = portableforge_core::sbie::default_box_dir(&user, &box_name);
+    if !portableforge_core::sbie::exports_ready(&box_dir, point) {
+        return Ok(None);
+    }
+    let (registry, warnings) = portableforge_core::sbie::registry_from_exports(&box_dir, point);
+    let mut snap = match point {
+        "before" => {
+            // The box starts empty, so the clean note has no files
+            // — only the registry as the box sees it before
+            // anything runs.
+            let mut s = portableforge_core::snapshot::Snapshot::new("pre");
+            s.registry = registry;
+            s.capture_warnings = warnings;
+            s
+        }
+        _ => {
+            let label = if point == "after-install" {
+                "post-install"
+            } else {
+                "post-run"
+            };
+            let mut s = portableforge_core::sbie::snapshot_from_box(&box_dir, &user, label);
+            s.registry = registry;
+            s.capture_warnings.extend(warnings);
+            s
+        }
+    };
+    if point == "after-runtime" {
+        // Copy the program's own files out of the box, exactly
+        // where the build step looks for them.
+        let load = |name: &str| -> Option<portableforge_core::snapshot::Snapshot> {
+            let text = std::fs::read_to_string(layout.exchange.join(name)).ok()?;
+            portableforge_core::snapshot::Snapshot::from_json(&text).ok()
+        };
+        if let (Some(before), Some(after)) = (load("before.json"), Some(snap.clone())) {
+            if let Some(dir) = portableforge_core::sbie::pick_install_dir(&before, &after) {
+                match portableforge_core::sbie::host_to_box_path(&box_dir, &user, &dir) {
+                    Some(source) if source.is_dir() => {
+                        match portableforge_core::orchestrate::harvest_tree(
+                            &source,
+                            &layout.exchange.join("harvest"),
+                        ) {
+                            Ok(r) => snap.capture_warnings.push(format!(
+                                "Copied {} program files out of the quick box ({} bytes).",
+                                r.files_copied, r.bytes_copied
+                            )),
+                            Err(e) => snap
+                                .capture_warnings
+                                .push(format!("Copying the program files out failed: {e}")),
+                        }
+                    }
+                    _ => snap.capture_warnings.push(
+                        "The program folder could not be read in the quick box, so no files were copied out."
+                            .to_string(),
+                    ),
+                }
+            }
+        }
+    }
+    let name = match point {
+        "before" => "before.json",
+        "after-install" => "after-install.json",
+        _ => "after-runtime.json",
+    };
+    std::fs::write(layout.exchange.join(name), snap.to_json())
+        .map_err(|e| format!("We could not save the note: {e}"))?;
+    Ok(Some(format!(
+        "The {} note is ready ({} files, {} remembered settings).",
+        point,
+        snap.files.len(),
+        snap.registry.len()
+    )))
 }
 
 /// Virtualisation state, free disk and free memory, straight from
@@ -335,6 +491,8 @@ fn command_help(cmd: &str) -> Option<String> {
         "review" => "review <session-folder>\n  Show the review list for a finished capture as plain cards, and save the choices file.",
         "agent-state" => "agent-state <session-folder>\n  Show what the helper in the test box is doing, when it last reported in, and what should happen next.",
         "request-snapshot" => "request-snapshot <session-folder> <before|after-install|after-runtime>\n  Ask the helper in the test box to take one of the three notes.",
+        "sbie-launch" => "sbie-launch <session-folder> <program>\n  Run a program inside the session's quick test box (Sandboxie). Used for the setup file on the install step and the installed program on the try-it-out step.",
+        "sbie-capture" => "sbie-capture <session-folder> <before|after-install|after-runtime>\n  The quick box's note flow: the first call asks for the note (boxed registry exports), a later call assembles it from the box folder into the session's exchange folder. The after-runtime note also copies the program's files out.",
         "mode-b" => "mode-b --out <folder>\n  Make a packet (helper program + plain instructions) for testing in your own virtual machine, with no test box.",
         "launch" => "launch <session-folder>\n  Open the session's test box (Windows only).",
         "tools" => "tools [--cache <folder>]\n  List the official maker programs PortableForge works with, pinned and fingerprinted; with --cache, check what is already downloaded.\ntools run-installer <package> --cache <folder> [--generator <program>]\ntools run-launcher <package> --cache <folder> [--generator <program>]\n  Run one of the makers (fingerprint-checked first) on a finished package folder.",
@@ -722,6 +880,60 @@ fn run_cli(args: &[String]) -> Result<(), String> {
                 point.label(),
                 point.note_name()
             );
+            Ok(())
+        }
+        "sbie-launch" => {
+            let dir = args
+                .get(1)
+                .ok_or("Give the session folder (the one containing exchange\\).")?;
+            let program = args
+                .get(2)
+                .ok_or("Give the program to run in the quick test box.")?;
+            let layout = session_layout_for(&std::path::PathBuf::from(dir));
+            let start = sbie_start_exe().ok_or("Sandboxie was not found on this computer.")?;
+            let session_id = layout
+                .root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let box_name = portableforge_core::sbie::box_name_for(&session_id);
+            sbie_run(portableforge_core::sbie::boxed_command(
+                &start,
+                &box_name,
+                program,
+                &[],
+            ))?;
+            println!("Started {program} in the quick test box {box_name}.");
+            Ok(())
+        }
+        "sbie-capture" => {
+            let dir = args
+                .get(1)
+                .ok_or("Give the session folder (the one containing exchange\\).")?;
+            let point = args
+                .get(2)
+                .ok_or("Say which note: before, after-install, or after-runtime.")?;
+            if !matches!(point.as_str(), "before" | "after-install" | "after-runtime") {
+                return Err("Say which note: before, after-install, or after-runtime.".into());
+            }
+            let layout = session_layout_for(&std::path::PathBuf::from(dir));
+            let asked = layout.exchange.join(format!("sbie-asked-{point}.txt"));
+            let note = layout.exchange.join(format!("{point}.json"));
+            if note.is_file() {
+                println!("The {point} note is already in the exchange folder.");
+                return Ok(());
+            }
+            if !asked.is_file() {
+                sbie_ask_point(&layout, point)?;
+                println!("Asked the quick test box for the {point} note — run sbie-capture again in a few seconds to read it in.");
+                return Ok(());
+            }
+            match sbie_collect_point(&layout, point)? {
+                Some(line) => println!("{line}"),
+                None => {
+                    println!("The quick test box is still writing that note — try again in a few seconds.")
+                }
+            }
             Ok(())
         }
         "agent-state" => {
