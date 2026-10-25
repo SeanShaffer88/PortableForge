@@ -26,6 +26,12 @@ pub struct WizardApp {
     online_sha: String,
     sharing: Option<SharingAnswer>,
     preflight: Option<PreflightReport>,
+    /// The collected machine facts behind the safety report, kept
+    /// so the "use it anyway" choice can re-judge them on the spot.
+    preflight_facts: Option<portableforge_core::orchestrate::PreflightFacts>,
+    /// The person's word that this computer can run the safe test
+    /// box, whatever the checks concluded (persisted in the draft).
+    force_sandbox: bool,
     review: Review,
     layout: Option<SessionLayout>,
     build_summary: Option<String>,
@@ -72,6 +78,8 @@ impl Default for WizardApp {
             online_sha: String::new(),
             sharing: None,
             preflight: None,
+            preflight_facts: None,
+            force_sandbox: false,
             review: Review::default(),
             layout: None,
             build_summary: None,
@@ -611,6 +619,7 @@ impl WizardApp {
             package_version: self.package_version.clone(),
             online_url: self.online_url.clone(),
             online_sha: self.online_sha.clone(),
+            force_sandbox: self.force_sandbox,
         }
     }
 
@@ -656,6 +665,7 @@ impl WizardApp {
         }
         self.online_url = draft.online_url;
         self.online_sha = draft.online_sha;
+        self.force_sandbox = draft.force_sandbox;
         if let Some(pos) = STEPS.iter().position(|s| s.id == draft.step) {
             self.step = pos;
         }
@@ -900,12 +910,16 @@ impl eframe::App for WizardApp {
 
             // Compute the safety report the first time its step shows.
             if step.id == "safety" && self.preflight.is_none() {
-                self.preflight = Some(evaluate_preflight(&crate::collect_preflight_facts()));
+                let mut facts = crate::collect_preflight_facts();
+                facts.sandbox_override = self.force_sandbox;
+                self.preflight = Some(evaluate_preflight(&facts));
+                self.preflight_facts = Some(facts);
             }
 
             // Per-step intent collection (the core decides what it means).
             match step.id {
                 "safety" => {
+                    let mut override_change: Option<bool> = None;
                     if let Some(report) = &self.preflight {
                         for check in &report.checks {
                             let mark = if check.ok { "✓" } else { "✗" };
@@ -940,6 +954,27 @@ impl eframe::App for WizardApp {
                         ui.label(
                             egui::RichText::new(honesty).color(color(guide::theme::TEXT_MUTED)),
                         );
+                        if report.best_mode != portableforge_core::wsb::SandboxMode::WindowsSandbox {
+                            ui.add_space(6.0);
+                            let mut want = self.force_sandbox;
+                            if ui
+                                .checkbox(&mut want, "Use the safe test box anyway — I know this computer can run it")
+                                .on_hover_text("Tick this only if you are sure this computer can run the safe test box — for example, you have used it yourself. PortableForge will try the box; if Windows cannot open it, we will say so plainly and nothing will be touched.")
+                                .changed()
+                            {
+                                override_change = Some(want);
+                            }
+                        }
+                    }
+                    if let Some(want) = override_change {
+                        self.force_sandbox = want;
+                        if let Some(facts) = &mut self.preflight_facts {
+                            facts.sandbox_override = want;
+                            let facts = facts.clone();
+                            self.preflight = Some(evaluate_preflight(&facts));
+                        }
+                        self.mark_dirty();
+                        self.persist_now();
                     }
                 }
                 "changes" => {
