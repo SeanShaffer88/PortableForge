@@ -15,3 +15,21 @@ Template note: the template's example INIs (3.5.2) were used to verify
 Launcher `.ini` semantics. Where the template and the current Format
 specification (3.9) differ — e.g. `[Format] Type=` — the 3.9
 specification wins for `appinfo.ini`.
+
+## Detected, never shipped: Sandboxie (quick test box, Mode A2)
+
+Sandboxie is **not** a pin in the table above: it is a program the
+person installs themselves, and PortableForge only detects and
+drives it — nothing is downloaded, bundled, or redistributed.
+
+| What | Where it is looked for |
+|---|---|
+| `Start.exe` (Sandboxie-Plus install) | `C:\Program Files\Sandboxie-Plus\Start.exe` |
+| `Start.exe` (Sandboxie Classic install) | `C:\Program Files\Sandboxie\Start.exe` |
+
+Driven through its own command line only: `Start.exe /box:<name>
+<program>`, the same form for boxed `reg.exe` exports, and
+`/terminate` to end a box's programs. A custom Sandboxie
+`FileRootPath` (boxes living somewhere other than the default
+`C:\Sandbox\<user>\<box>`) is a known limitation: captures come
+back empty with a warning that says so.
