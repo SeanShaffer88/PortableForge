@@ -44,6 +44,9 @@ pub struct WizardSettings {
     pub text_scale: f32,
     #[serde(default)]
     pub draft: Option<WizardDraft>,
+    /// Whether the first-run welcome has been read and dismissed.
+    #[serde(default)]
+    pub welcomed: bool,
 }
 
 fn default_text_scale() -> f32 {
@@ -56,6 +59,7 @@ impl Default for WizardSettings {
             recent_installers: Vec::new(),
             text_scale: 1.0,
             draft: None,
+            welcomed: false,
         }
     }
 }
