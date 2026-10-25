@@ -1,9 +1,9 @@
 name: Release
 
 # Tag a commit `vX.Y.Z` (only once the release-readiness checklist
-# in docs/RELEASE_READINESS.md passes) and this builds the release
-# zip — installer + portable pair + docs + fingerprints — and
-# attaches it to a GitHub Release of the same name.
+# in docs/RELEASE_READINESS.md passes) and this builds the release's
+# two assets — the installer loose, and one zip with the portable
+# build — and attaches both to a GitHub Release of the same name.
 on:
   push:
     tags: ["v*"]
@@ -40,27 +40,26 @@ jobs:
           & $iscc "/DAppVersion=$ver" installer/PortableForge.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 
-      - name: Assemble the release zip
+      - name: Assemble the two release assets
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           $ver = $tag.TrimStart('v')
-          $stage = "PortableForge-$tag-windows-x64"
-          New-Item -ItemType Directory -Path $stage | Out-Null
-          Copy-Item "installer/Output/PortableForge-Setup-v$ver-x64.exe" $stage
-          Copy-Item target/release/portableforge.exe $stage
-          Copy-Item target/release/portableforge-agent.exe $stage
-          Copy-Item README.md $stage
-          Copy-Item LICENSE $stage
-          Copy-Item docs/ON_MACHINE_RUNBOOK.md $stage
-          # Fingerprints of everything in the zip, listed inside it
-          # and printed again in the release notes.
-          Get-ChildItem $stage -File | Get-FileHash -Algorithm SHA256 |
-            ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } |
-            Set-Content "$stage/SHA256SUMS.txt"
-          Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip"
-          "ZIP_NAME=$stage.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "STAGE=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # Asset 1: the installer, loose (never inside a zip).
+          $installer = "PortableForge-Setup-v$ver-x64.exe"
+          Copy-Item "installer/Output/$installer" $installer
+          # Asset 2: the portable zip — the two programs (the helper
+          # must stay beside the main program), LICENSE, PORTABLE note.
+          $portDir = "portable"
+          New-Item -ItemType Directory -Path $portDir | Out-Null
+          Copy-Item target/release/portableforge.exe $portDir
+          Copy-Item target/release/portableforge-agent.exe $portDir
+          Copy-Item LICENSE $portDir
+          Copy-Item installer/PORTABLE.txt $portDir
+          $portZip = "PortableForge-v$ver-portable.zip"
+          Compress-Archive -Path "$portDir/*" -DestinationPath $portZip
+          "INSTALLER=$installer" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PORTZIP=$portZip" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Publish the GitHub Release
         shell: pwsh
@@ -68,7 +67,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ github.ref_name }}"
-          $sums = Get-Content "$env:STAGE/SHA256SUMS.txt" -Raw
+          $instHash = (Get-FileHash $env:INSTALLER -Algorithm SHA256).Hash.ToLower()
+          $zipHash = (Get-FileHash $env:PORTZIP -Algorithm SHA256).Hash.ToLower()
           $notes = @"
           PortableForge $tag — the guided portable-package maker.
 
@@ -76,24 +76,22 @@ jobs:
           first run; choose "More info" then "Run anyway" only if the
           fingerprint of your download matches the list below.
 
-          Two ways in, both inside the one zip:
-          - **Installer:** PortableForge-Setup runs a normal per-user
-            install (no admin needed) with a Start menu shortcut.
-          - **Portable:** run portableforge.exe straight from the
-            unzipped folder — keep portableforge-agent.exe beside it;
-            the helper is needed inside the test box.
+          Two downloads:
+          - **Installer** ($env:INSTALLER): a normal per-user install
+            (no admin needed) with a Start menu shortcut. It installs
+            both programs together — the helper belongs beside the
+            main program.
+          - **Portable** ($env:PORTZIP): unzip anywhere and run
+            portableforge.exe from the folder. Keep
+            portableforge-agent.exe beside it.
 
           SHA-256 fingerprints:
-          ``````
-          $sums
-          ``````
-
-          Also inside the zip: README.md, LICENSE, the on-machine
-          runbook, and SHA256SUMS.txt.
+          - $env:INSTALLER — $instHash
+          - $env:PORTZIP — $zipHash
           "@
           # The release may already exist (created from the web UI to
-          # make the tag); create it if not, then attach the zip.
+          # make the tag); create it if not, then attach both assets.
           gh release create $tag --title "PortableForge $tag" --notes $notes
-          if ($LASTEXITCODE -ne 0) { Write-Host "Release already exists; attaching the zip to it." }
-          gh release upload $tag "$env:ZIP_NAME" --clobber
-          if ($LASTEXITCODE -ne 0) { throw "Attaching the release zip failed" }
+          if ($LASTEXITCODE -ne 0) { Write-Host "Release already exists; attaching the assets to it." }
+          gh release upload $tag "$env:INSTALLER" "$env:PORTZIP" --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Attaching the release assets failed" }
