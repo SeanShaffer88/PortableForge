@@ -16,20 +16,37 @@ Launcher `.ini` semantics. Where the template and the current Format
 specification (3.9) differ — e.g. `[Format] Type=` — the 3.9
 specification wins for `appinfo.ini`.
 
-## Detected, never shipped: Sandboxie (quick test box, Mode A2)
+## Bundled, unmodified: the Sandboxie installer (Mode A2's way in)
 
-Sandboxie is **not** a pin in the table above: it is a program the
-person installs themselves, and PortableForge only detects and
-drives it — nothing is downloaded, bundled, or redistributed.
+Since v0.2.1 (SEAN's pick), PortableForge **bundles** the official
+Sandboxie-Plus installer and offers to open it on computers that
+have no test box yet. Redistribution basis, from the maker's own
+`LICENSE.Plus`: "It is permitted to redistribute the original
+unmodified binaries free of charge." The bundle is exactly that —
+the original file, byte for byte, free of charge, with both
+license texts and a notice (`third-party/`). The program checks
+the fingerprint below before the installer is ever opened.
+
+| Tool | Version | File | Bytes | SHA-256 |
+|---|---|---|---|---|
+| Sandboxie-Plus installer (x64) | 1.18.8 | `Sandboxie-Plus-x64-v1.18.8.exe` | 24,930,680 | `f27078ff74a07906fd51476079e1a7a8f5e20c8bb75a9d2ae86169d47179ae76` |
+
+Measured 2026-10-25 from the official download
+(`https://github.com/sandboxie-plus/Sandboxie/releases/download/v1.18.8/Sandboxie-Plus-x64-v1.18.8.exe`).
+The binary is never committed: the release workflow downloads it
+and verifies the fingerprint before staging it into both assets.
+
+Once installed, Sandboxie itself is detected (never the bundled
+copy) in its standard places and driven through its own command
+line only:
 
 | What | Where it is looked for |
 |---|---|
 | `Start.exe` (Sandboxie-Plus install) | `C:\Program Files\Sandboxie-Plus\Start.exe` |
 | `Start.exe` (Sandboxie Classic install) | `C:\Program Files\Sandboxie\Start.exe` |
 
-Driven through its own command line only: `Start.exe /box:<name>
-<program>`, the same form for boxed `reg.exe` exports, and
-`/terminate` to end a box's programs. A custom Sandboxie
-`FileRootPath` (boxes living somewhere other than the default
-`C:\Sandbox\<user>\<box>`) is a known limitation: captures come
-back empty with a warning that says so.
+`Start.exe /box:<name> <program>`, the same form for boxed
+`reg.exe` exports, and `/terminate` to end a box's programs. A
+custom Sandboxie `FileRootPath` (boxes living somewhere other
+than the default `C:\Sandbox\<user>\<box>`) is a known limitation:
+captures come back empty with a warning that says so.
