@@ -11,5 +11,12 @@ Your settings and run folders live in your home folder (a
 "PortableForge" folder and "PortableForge Sessions"), not in this
 folder, so you can move or replace this folder freely.
 
+The bundled folder carries the official Sandboxie-Plus
+installer, untouched, with its licenses and a note explaining
+why it is there (SANDBOXIE-NOTICE.txt). It is what PortableForge
+offers to open when a computer has no test box yet. You can
+delete the bundled folder if you like — the quick test box just
+will not be offered on computers that do not already have it.
+
 This build is unsigned. Windows SmartScreen will warn on first
 run; the release page lists the fingerprints of the genuine files.
