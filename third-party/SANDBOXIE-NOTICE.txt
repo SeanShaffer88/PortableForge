@@ -1,0 +1,39 @@
+About the bundled folder
+========================
+
+The `bundled` folder in this PortableForge copy carries one file
+that is NOT PortableForge:
+
+    Sandboxie-Plus-x64-v1.18.8.exe
+    (24,930,680 bytes, SHA-256
+     f27078ff74a07906fd51476079e1a7a8f5e20c8bb75a9d2ae86169d47179ae76)
+
+It is the official Sandboxie-Plus installer, exactly as its maker
+publishes it — unmodified, byte for byte. Copyright 2020–2026
+David Xanatos (xanasoft.com) and the Sandboxie contributors.
+
+Why it is here: PortableForge's quick test box is Sandboxie. On a
+computer that has no test box yet (for example Windows Home,
+which has no built-in one), PortableForge offers to open this
+installer so the quick box can be set up. PortableForge checks
+the file's fingerprint against the value above before it ever
+opens it, and never runs a copy that does not match.
+
+License: Sandboxie-Plus may be redistributed as the original
+unmodified binaries, free of charge — that permission, and the
+terms for its parts, are in the two license files beside the
+installer in this folder:
+
+    Sandboxie-LICENSE-Plus.txt     (Sandboxie-Plus terms)
+    Sandboxie-LICENSE-Classic.txt  (the GNU GPL v3, for the core)
+
+PortableForge itself is under the MIT license (see LICENSE) and
+claims no rights over Sandboxie. Using Sandboxie is under its
+own terms: free for noncommercial use; some extra features of
+Sandboxie-Plus itself need a supporter certificate from its
+maker, and none of those are needed by PortableForge.
+
+Source code for this exact version of Sandboxie is published by
+its maker at https://github.com/sandboxie-plus/Sandboxie
+(tag v1.18.8) — the same place this installer came from:
+https://github.com/sandboxie-plus/Sandboxie/releases/download/v1.18.8/Sandboxie-Plus-x64-v1.18.8.exe
