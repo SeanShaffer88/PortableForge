@@ -31,16 +31,16 @@ const MAX_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Fingerprint {
-    sha256: String,
-    size_bytes: u64,
+pub(crate) struct Fingerprint {
+    pub(crate) sha256: String,
+    pub(crate) size_bytes: u64,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TreeEntry {
-    path: String,
-    file: Option<Fingerprint>,
+pub(crate) struct TreeEntry {
+    pub(crate) path: String,
+    pub(crate) file: Option<Fingerprint>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +50,8 @@ struct CaptureEvidence {
     before_sha256: String,
     after_install_sha256: String,
     after_runtime_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sandboxie_receipt_sha256: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -122,8 +124,13 @@ pub fn save(
     let session_file = read_small(&layout.session_path, &session, MAX_MANIFEST)?;
     let session_record =
         Session::from_json(std::str::from_utf8(&session_file).map_err(|e| e.to_string())?)?;
-    if session_record.sandbox_mode != SandboxMode::WindowsSandbox {
-        return Err("Save a profile from a Windows Sandbox capture.".into());
+    if !matches!(
+        session_record.sandbox_mode,
+        SandboxMode::WindowsSandbox | SandboxMode::Sandboxie
+    ) {
+        return Err(
+            "Save a profile from Windows Sandbox or a verified Sandboxie-Plus capture.".into(),
+        );
     }
     if session_record.id.trim().is_empty() {
         return Err("The capture session has no identifier.".into());
@@ -147,13 +154,24 @@ pub fn save(
         read_small(&layout.exchange.join(name), &session, MAX_CAPTURE_NOTE)
             .map(|bytes| sha256_hex(&bytes))
     };
-    let capture_evidence = || {
-        Ok::<_, String>(CaptureEvidence {
+    let capture_evidence = || -> Result<CaptureEvidence, String> {
+        let mut evidence = CaptureEvidence {
             mode: session_record.sandbox_mode,
             before_sha256: note_hash("before.json")?,
             after_install_sha256: note_hash("after-install.json")?,
             after_runtime_sha256: note_hash("after-runtime.json")?,
-        })
+            sandboxie_receipt_sha256: None,
+        };
+        if evidence.mode == SandboxMode::Sandboxie {
+            evidence.sandboxie_receipt_sha256 = Some(sandboxie_receipt_digest(
+                &session,
+                &session_record.id,
+                &setup.sha256,
+                &evidence,
+                &harvest_before,
+            )?);
+        }
+        Ok(evidence)
     };
     let notes_before = capture_evidence()?;
     let observed = read_capture(&layout)?;
@@ -274,7 +292,18 @@ fn approved_manifest(bytes: &[u8], expected: &str) -> Result<Manifest, String> {
     let manifest: Manifest =
         serde_json::from_slice(bytes).map_err(|e| format!("Invalid profile manifest: {e}"))?;
     if manifest.schema_version != SCHEMA_VERSION
-        || manifest.capture.mode != SandboxMode::WindowsSandbox
+        || !matches!(
+            (
+                manifest.capture.mode,
+                &manifest.capture.sandboxie_receipt_sha256
+            ),
+            (SandboxMode::WindowsSandbox, None) | (SandboxMode::Sandboxie, Some(_))
+        )
+        || manifest
+            .capture
+            .sandboxie_receipt_sha256
+            .as_deref()
+            .is_some_and(|hash| !valid_digest(hash))
         || [
             &manifest.capture.before_sha256,
             &manifest.capture.after_install_sha256,
@@ -327,7 +356,7 @@ fn verify_review(approved: &Review, observed: &Review) -> Result<(), String> {
     Ok(())
 }
 
-fn local_file(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn local_file(path: &Path) -> Result<PathBuf, String> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -361,7 +390,7 @@ fn only_setup(input: &Path) -> Result<Fingerprint, String> {
     Ok(fingerprint)
 }
 
-fn fingerprint(path: &Path) -> Result<Fingerprint, String> {
+pub(crate) fn fingerprint(path: &Path) -> Result<Fingerprint, String> {
     let before = metadata_at(path)?;
     if !before.is_file() || before.len() > MAX_BYTES {
         return Err(format!(
@@ -379,7 +408,7 @@ fn fingerprint(path: &Path) -> Result<Fingerprint, String> {
     Ok(Fingerprint { sha256, size_bytes })
 }
 
-fn inventory(root: &Path) -> Result<Vec<TreeEntry>, String> {
+pub(crate) fn inventory(root: &Path) -> Result<Vec<TreeEntry>, String> {
     let root = local_directory(root)?;
     let mut folders = vec![(root, String::new(), 0usize)];
     let mut seen = BTreeSet::new();
@@ -444,7 +473,7 @@ fn verify_inventory(root: &Path, expected: &[TreeEntry]) -> Result<(), String> {
     Ok(())
 }
 
-fn read_small(path: &Path, root: &Path, max: usize) -> Result<Vec<u8>, String> {
+pub(crate) fn read_small(path: &Path, root: &Path, max: usize) -> Result<Vec<u8>, String> {
     require_regular_path(path, root)?;
     let mut bytes = Vec::new();
     File::open(path)
@@ -459,13 +488,63 @@ fn read_small(path: &Path, root: &Path, max: usize) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(path)
         .and_then(|mut file| file.write_all(bytes))
         .map_err(|e| format!("Could not write {}: {e}", path.display()))
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn tree_sha256(root: &Path) -> Result<String, String> {
+    inventory_sha256(&inventory(root)?)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn inventory_sha256(entries: &[TreeEntry]) -> Result<String, String> {
+    serde_json::to_vec(entries)
+        .map(|bytes| sha256_hex(&bytes))
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(target_arch = "x86_64")]
+fn sandboxie_receipt_digest(
+    session: &Path,
+    session_id: &str,
+    setup_sha256: &str,
+    evidence: &CaptureEvidence,
+    harvest: &[TreeEntry],
+) -> Result<String, String> {
+    use crate::sbie_verified::{verify_clean_storage, verify_receipt, RECEIPT_FILE};
+    verify_clean_storage(session)?;
+    let bytes = read_small(&session.join(RECEIPT_FILE), session, 16_384).map_err(|error| {
+        format!("This capture needs a verified Sandboxie cleanup receipt. {error}")
+    })?;
+    verify_receipt(
+        &bytes,
+        session_id,
+        setup_sha256,
+        [
+            &evidence.before_sha256,
+            &evidence.after_install_sha256,
+            &evidence.after_runtime_sha256,
+        ],
+        &inventory_sha256(harvest)?,
+    )?;
+    Ok(sha256_hex(&bytes))
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn sandboxie_receipt_digest(
+    _session: &Path,
+    _session_id: &str,
+    _setup_sha256: &str,
+    _evidence: &CaptureEvidence,
+    _harvest: &[TreeEntry],
+) -> Result<String, String> {
+    Err("Saving a Sandboxie-Plus capture profile requires Windows x64.".into())
 }
 
 #[cfg(test)]
@@ -483,6 +562,7 @@ mod tests {
                 before_sha256: sha256_hex(b"before"),
                 after_install_sha256: sha256_hex(b"install"),
                 after_runtime_sha256: sha256_hex(b"runtime"),
+                sandboxie_receipt_sha256: None,
             },
             setup: Fingerprint {
                 sha256: sha256_hex(b"setup"),
@@ -505,6 +585,31 @@ mod tests {
         let edited = serde_json::to_vec(&edited).unwrap();
         assert!(approved_manifest(&edited, &digest).is_err());
         assert!(approved_manifest(&edited, &sha256_hex(&edited)).is_err());
+    }
+
+    #[test]
+    fn sandboxie_manifest_requires_a_receipt_fingerprint() {
+        let input = serde_json::json!({
+            "schema_version": 1,
+            "session_id": "widget",
+            "capture": {
+                "mode": "Sandboxie",
+                "before_sha256": sha256_hex(b"before"),
+                "after_install_sha256": sha256_hex(b"install"),
+                "after_runtime_sha256": sha256_hex(b"runtime")
+            },
+            "setup": { "sha256": sha256_hex(b"setup"), "size_bytes": 5 },
+            "review_sha256": sha256_hex(b"review"),
+            "redistribution_asserted": true,
+            "reviewed_package_approved": true,
+            "package": [{ "path": "App", "file": null }]
+        });
+        let bytes = serde_json::to_vec(&input).unwrap();
+        assert!(approved_manifest(&bytes, &sha256_hex(&bytes)).is_err());
+        let mut sealed = input;
+        sealed["capture"]["sandboxie_receipt_sha256"] = sha256_hex(b"receipt").into();
+        let bytes = serde_json::to_vec(&sealed).unwrap();
+        assert!(approved_manifest(&bytes, &sha256_hex(&bytes)).is_ok());
     }
 
     #[test]

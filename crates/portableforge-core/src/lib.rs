@@ -27,6 +27,8 @@ pub mod regfile;
 pub mod review;
 pub mod rollback;
 pub mod sbie;
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub mod sbie_verified;
 pub mod session;
 pub mod settings;
 pub mod snapshot;

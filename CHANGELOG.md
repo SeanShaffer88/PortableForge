@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- Capture trusted setups on Windows Home x64 with a dedicated
+  Sandboxie-Plus box. The verified setup process, completed capture and
+  confirmed cleanup are recorded before the session can be saved as a
+  reusable profile.
 - Save a reviewed Windows Sandbox capture and prepared package with
   `portableforge profile save`. Rebuild its installer unattended with
   `portableforge profile build` when the setup file and saved profile

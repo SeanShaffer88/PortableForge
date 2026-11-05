@@ -1,5 +1,18 @@
 # Decisions — PortableForge
 
+## 2026-11-05 — Dedicated Sandboxie-Plus capture for reusable profiles
+
+The explicit Windows x64 capture command provisions an owned fresh
+box with the supported Sandboxie-Plus version. It checks setup's
+process identity and driver-reported membership before resuming it.
+The selected app runs through a verified boxed helper, which waits for
+the app's exit. The host observes the supported redirected filesystem
+and scoped registry changes, then copies the selected payload.
+Unchanged host registry entries are discarded before writing the notes.
+The receipt is written outside the box only after cleanup is confirmed.
+Profile approval binds that receipt to the same setup, three notes and
+harvest. Previous Windows Sandbox profile manifests stay compatible.
+
 ## 2026-11-05 — Unattended builds reuse a sealed capture profile
 
 Review and prepare the package once from a completed Windows Sandbox
