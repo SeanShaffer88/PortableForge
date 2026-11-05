@@ -1,5 +1,17 @@
 # Decisions — PortableForge
 
+## 2026-11-05 — Unattended compilation starts from a prepared package
+
+`portableforge compile` takes a trusted Format 3.9 package, an explicit
+redistribution assertion, and a trusted local PortableApps.com Installer
+3.9.19 installation. This boundary lets the official maker compile a
+checked, staged package after the operator prepares a launcher and
+reviews the application. It limits the installer settings to offline
+bundling and rejects custom installer scripts. The staged maker uses
+its local compiler files, and PortableForge pins the four directly
+identified executables by hash. The installer and manifest are
+published together after the source recompile and embedded icon check.
+
 ## 2026-10-25 — Sandboxie installer bundled (SEAN's pick over link/download-in-app)
 Offered three ways to get Sandboxie onto a machine with no test
 box (download-in-app / bundle / link button), SEAN picked

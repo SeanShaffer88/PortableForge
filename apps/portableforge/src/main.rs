@@ -445,6 +445,62 @@ fn need_flag(args: &[String], name: &str) -> Result<String, String> {
     flag(args, name).ok_or_else(|| format!("Missing {name} — see `portableforge help`."))
 }
 
+#[cfg(windows)]
+fn compile_command(args: &[String]) -> Result<(), String> {
+    let usage = "Use portableforge compile <prepared-package> --installer <tool-folder> --out <new-folder> --assert-redistribution.";
+    let (package, options) = args.split_first().ok_or(usage)?;
+    if package.starts_with("--") {
+        return Err(usage.into());
+    }
+    let mut options = options.iter();
+    let mut tool = None;
+    let mut out = None;
+    let mut asserted = false;
+    while let Some(flag) = options.next() {
+        match flag.as_str() {
+            "--installer" if tool.is_none() => {
+                tool = Some(
+                    options
+                        .next()
+                        .filter(|arg| !arg.starts_with("--"))
+                        .ok_or(usage)?,
+                );
+            }
+            "--out" if out.is_none() => {
+                out = Some(
+                    options
+                        .next()
+                        .filter(|arg| !arg.starts_with("--"))
+                        .ok_or(usage)?,
+                );
+            }
+            "--assert-redistribution" if !asserted => asserted = true,
+            _ => return Err(usage.into()),
+        }
+    }
+    if !asserted {
+        return Err(
+            "Confirm you may share everything in this package by giving --assert-redistribution."
+                .into(),
+        );
+    }
+    let report = portableforge_core::compile::compile_installer(
+        Path::new(package),
+        Path::new(tool.ok_or(usage)?),
+        Path::new(out.ok_or(usage)?),
+        asserted,
+    )?;
+    println!("Installer: {}", report.artifact.display());
+    println!("Size: {} bytes", report.size_bytes);
+    println!("SHA-256: {}", report.sha256);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn compile_command(_args: &[String]) -> Result<(), String> {
+    Err("Creating a PortableApps.com installer requires Windows.".into())
+}
+
 const HELP: &str = "\
 PortableForge — make a portable copy of a program, guided step by step.
 
@@ -460,6 +516,8 @@ Commands (the same steps, for scripts and testing):
   generate <details.json> --out <folder> [--review <review.json>]
   build <details.json> --out <folder> [--session <session-folder>] [--review <review.json>] [--app-files <folder>] [--default-data <folder>] [--icon <file.ico>] [--zip] [--force] [--json]
                                           Build the finished package: the session's notes (or a saved review) supply the accepted fixes, the harvested program files and starting settings are copied in, and the finished tree is checked
+  compile <prepared-package> --installer <tool-folder> --out <new-folder> --assert-redistribution
+                                          Create a .paf.exe from a trusted, ready-to-build package on Windows
   validate [<details.json>] [--tree <folder>]   (with no details file, --tree reads the package's own appinfo.ini)
   session-new --id <name> --out <file.json>
   request-snapshot <session-folder> <before|after-install|after-runtime>
@@ -492,6 +550,7 @@ Everywhere: paths are ordinary file paths; nothing is uploaded anywhere.";
 fn command_help(cmd: &str) -> Option<String> {
     let text = match cmd {
         "build" => "build <details.json> --out <folder> [--session <session-folder>] [--review <review.json>] [--app-files <folder>] [--default-data <folder>] [--icon <file.ico>] [--zip] [--force] [--json] [--quiet]\n  Make the finished package folder from the details file. --session takes the accepted fixes, name tags, and first-run files from a finished capture. --zip also leaves a zip copy beside the folder. --force allows building into a non-empty folder that is not an earlier package. Ends with exit code 2 when the package has problems to fix.",
+        "compile" => "compile <prepared-package> --installer <tool-folder> --out <new-folder> --assert-redistribution\n  Make an offline .paf.exe using a trusted, prepared package with a launcher and icons. On Windows, give the trusted installation folder for PortableApps.com Installer 3.9.19. The new folder receives the installer and build record under result. Only assert redistribution when you may share everything included.",
         "generate" => "generate <details.json> --out <folder> [--review <review.json>]\n  Write only the text files of a package (no program files copied). Without --review the starter rules carry no fixes, and it says so.",
         "validate" => "validate [<details.json>] [--tree <package-folder>]\n  Check package details, and with --tree also a built package folder. With no details file, --tree reads the package's own appinfo.ini. Exit code 2 when there are problems.",
         "preflight" => "preflight [--json] [--force-sandbox]\n  Check this computer: Windows edition, the test box feature, memory, disk, and which testing way is available. --force-sandbox shows the report as it looks when the person vouches for the test box (the wizard's 'use it anyway' choice).",
@@ -1184,6 +1243,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             println!("Best available way: {name} — {honesty}");
             Ok(())
         }
+        "compile" => compile_command(&args[1..]),
         "tools" => {
             // `tools run-installer|run-launcher <package-folder>
             // --cache <folder> [--generator <program>]`: run one of

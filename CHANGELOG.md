@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- On Windows, `portableforge compile` turns a trusted, prepared offline
+  PortableApps.com package into a `.paf.exe` using the official installer
+  tool. PortableForge checks the embedded icons against the package ICO
+  and records the final file's SHA-256 and size.
+
 ## [0.2.1] — 2026-10-25
 
 ### Added
