@@ -68,6 +68,37 @@ Your answer is written into the package's notes, so anyone can see which kind of
 
 You never need this — the window does everything. For scripts and testing, every step is also a command: `portableforge guide`, `snapshot`, `diff`, `wsb`, `generate`, `validate`, plus the end-to-end ones — `launch`, `request-snapshot`, `post-capture`, and `build` (session notes + package details → a finished, checked package folder). Run `portableforge help` for the list.
 
+### Build an installer without clicking through the maker
+
+```powershell
+portableforge compile "D:\PortableApps\WidgetPortable" --installer "D:\PortableApps\PortableApps.comInstaller" --out "D:\Builds\widget-run-1" --assert-redistribution
+```
+
+Use Windows, a trusted local installation of PortableApps.com Installer
+3.9.19, and a trusted, prepared Format 3.9 package with its launcher,
+help file and original ICO plus 16px and 32px PNG icons. Set
+`Shareable=true` and give `--assert-redistribution` when you may share
+everything bundled in the package. This command supports offline
+English and Multilingual packages with basic ASCII metadata and either
+no `installer.ini` or one with only `[Source]` and optional
+`[CheckRunning]` settings. Use a clean prepared copy free of installer
+scripts and plugin settings.
+
+Use a new output directory whose parent already exists. The command
+checks the four supported tool executables by SHA-256 and relies on the
+rest of the selected official installation for templates and compiler
+support files. Keep both input directories stable during the build.
+Each stage runs from a working copy and has a two-minute deadline.
+The `result` folder contains the installer and `build-manifest.json`
+after both stages pass and the embedded installer icons match the
+original ICO. The `work` folder keeps the staged inputs and
+logs for troubleshooting. On timeout, the command requests termination
+of its direct child. Check for a remaining compiler process before
+retrying in a fresh directory.
+
+The command builds the installer. Installation, upgrades, and the
+portable program's behavior are separate checks.
+
 ## Screenshots
 
 From a real run on a Windows machine (the remaining captures on

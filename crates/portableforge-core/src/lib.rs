@@ -12,6 +12,8 @@
 
 pub mod build;
 pub mod classify;
+#[cfg(any(windows, test))]
+pub mod compile;
 pub mod diff;
 pub mod guide;
 pub mod leaktest;
