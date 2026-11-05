@@ -8,6 +8,7 @@
 //! [`PreflightFacts`] into [`evaluate_preflight`].
 
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::diff::diff_snapshots;
@@ -746,9 +747,9 @@ fn shortcut_candidates(before: &Snapshot, after: &Snapshot) -> Vec<String> {
 /// Read the three notes the agent leaves in the exchange folder
 /// (`before.json`, `after-install.json`, `after-runtime.json` — each a
 /// snapshot the agent's own commands produce) and turn them into the
-/// review the wizard shows. A missing note is a plain error naming
-/// exactly which one and which step makes it.
-pub fn post_capture(layout: &SessionLayout) -> Result<CaptureOutcome, String> {
+/// review the wizard shows, without changing the session files. A missing
+/// note is a plain error naming exactly which one and which step makes it.
+pub fn read_capture(layout: &SessionLayout) -> Result<CaptureOutcome, String> {
     fn load(layout: &SessionLayout, name: &str, step: &str) -> Result<Snapshot, String> {
         let path = layout.exchange.join(name);
         let text = std::fs::read_to_string(&path).map_err(|_| {
@@ -810,10 +811,13 @@ pub fn post_capture(layout: &SessionLayout) -> Result<CaptureOutcome, String> {
                 ) {
                     continue;
                 }
-                let Ok(bytes) = std::fs::read(&path) else {
-                    continue;
-                };
-                if bytes.len() > 262_144 {
+                const CANARY_MAX_BYTES: usize = 262_144;
+                let mut bytes = Vec::new();
+                let read = std::fs::File::open(&path).and_then(|file| {
+                    file.take(CANARY_MAX_BYTES as u64 + 1)
+                        .read_to_end(&mut bytes)
+                });
+                if read.is_err() || bytes.len() > CANARY_MAX_BYTES {
                     continue;
                 }
                 let Ok(text) = String::from_utf8(bytes) else {
@@ -834,31 +838,33 @@ pub fn post_capture(layout: &SessionLayout) -> Result<CaptureOutcome, String> {
         }
     }
 
-    let review = crate::review::Review::from_classifications(classifications);
-    let specimens = specimen_plan(&runtime_diff);
-    let hints = MetadataHints::from_snapshot(&after_install);
-
-    // Save the artefacts next to the session record, so a run can be
-    // inspected, resumed, or sent back without re-reading the notes.
-    let _ = std::fs::write(layout.root.join("review.json"), review.to_json());
-    if let Ok(json) = serde_json::to_string_pretty(&install_diff) {
-        let _ = std::fs::write(layout.root.join("install-diff.json"), json);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&runtime_diff) {
-        let _ = std::fs::write(layout.root.join("runtime-diff.json"), json);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&specimens) {
-        let _ = std::fs::write(layout.root.join("specimens.json"), json);
-    }
-
     Ok(CaptureOutcome {
+        review: crate::review::Review::from_classifications(classifications),
+        specimens: specimen_plan(&runtime_diff),
+        hints: MetadataHints::from_snapshot(&after_install),
+        shortcut_candidates: shortcut_candidates(&before, &after_runtime),
         install_diff,
         runtime_diff,
-        review,
-        specimens,
-        hints,
-        shortcut_candidates: shortcut_candidates(&before, &after_runtime),
     })
+}
+
+/// Read a finished capture and save the default review and its supporting
+/// records for the wizard and legacy CLI workflows.
+pub fn post_capture(layout: &SessionLayout) -> Result<CaptureOutcome, String> {
+    let outcome = read_capture(layout)?;
+    // Save the artefacts next to the session record, so a run can be
+    // inspected, resumed, or sent back without re-reading the notes.
+    let _ = std::fs::write(layout.root.join("review.json"), outcome.review.to_json());
+    if let Ok(json) = serde_json::to_string_pretty(&outcome.install_diff) {
+        let _ = std::fs::write(layout.root.join("install-diff.json"), json);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&outcome.runtime_diff) {
+        let _ = std::fs::write(layout.root.join("runtime-diff.json"), json);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&outcome.specimens) {
+        let _ = std::fs::write(layout.root.join("specimens.json"), json);
+    }
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -932,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn the_fixture_session_flows_through_post_capture() {
+    fn read_capture_preserves_choices_and_post_capture_writes_defaults() {
         // Item 87: the checked-in fixture session must always read
         // back into a review — it is the offline rehearsal's base,
         // so it can never quietly rot.
@@ -953,7 +959,23 @@ mod tests {
             .unwrap();
         }
         let layout = session_layout(&base, "fixture-session");
+        let review_path = layout.root.join("review.json");
+        let existing_review = crate::review::Review::default().to_json();
+        std::fs::write(&review_path, &existing_review).unwrap();
+        let read_only = read_capture(&layout).expect("fixture read-only capture");
+        assert_eq!(
+            std::fs::read_to_string(&review_path).unwrap(),
+            existing_review
+        );
+        assert!(!layout.root.join("install-diff.json").exists());
+        assert!(!layout.root.join("runtime-diff.json").exists());
+        assert!(!layout.root.join("specimens.json").exists());
         let outcome = post_capture(&layout).expect("fixture post-capture");
+        assert_eq!(outcome, read_only);
+        assert_eq!(
+            std::fs::read_to_string(&review_path).unwrap(),
+            outcome.review.to_json()
+        );
         let _ = std::fs::remove_dir_all(&base);
         assert!(!outcome.review.items.is_empty());
         assert_eq!(outcome.hints.display_name.as_deref(), Some("Widget"));
@@ -1161,6 +1183,14 @@ mod tests {
             "home=C:\\Users\\WDAGUtilityAccount\\Widget\n",
         )
         .unwrap();
+        let oversized = harvest.join("oversized.ini");
+        std::fs::write(&oversized, "home=C:\\Users\\WDAGUtilityAccount\\Widget\n").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(oversized)
+            .unwrap()
+            .set_len(262_145)
+            .unwrap();
         let outcome = post_capture(&layout).unwrap();
         assert!(!outcome.review.items.is_empty(), "review should have cards");
         assert_eq!(outcome.specimens.len(), 1);
@@ -1170,6 +1200,10 @@ mod tests {
         assert!(outcome.review.items.iter().any(|i| matches!(
             i.classification.finding,
             crate::classify::Finding::FileWriteRewrite { .. }
+        )));
+        assert!(!outcome.review.items.iter().any(|i| matches!(
+            &i.classification.finding,
+            crate::classify::Finding::FileWriteRewrite { path, .. } if path == "oversized.ini"
         )));
         // Artefacts are saved into the session folder.
         assert!(layout.root.join("review.json").is_file());

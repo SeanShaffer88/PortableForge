@@ -501,6 +501,84 @@ fn compile_command(_args: &[String]) -> Result<(), String> {
     Err("Creating a PortableApps.com installer requires Windows.".into())
 }
 
+const PROFILE_HELP: &str = "\
+profile save <session-folder> --review <exported-review> --package <prepared-package> --out <new-profile-folder> --approve-reviewed-package --assert-redistribution\n\
+  Close the test box, then save its approved review and finished package together. Keep the printed profile SHA-256 separately.\n\
+profile build <setup-file> --profile <profile-folder> --profile-sha256 <saved-sha256> --installer <tool-folder> --out <new-build-folder>\n\
+  Check the setup file and approved profile, then build the installer without reopening the test box.";
+
+#[cfg(windows)]
+fn profile_command(args: &[String]) -> Result<(), String> {
+    use std::collections::BTreeMap;
+
+    let usage = || format!("Use one of these commands:\n{PROFILE_HELP}");
+    let [action, input, options @ ..] = args else {
+        return Err(usage());
+    };
+    if input.starts_with("--") {
+        return Err(usage());
+    }
+    let allowed: &[&str] = match action.as_str() {
+        "save" => &["--review", "--package", "--out"],
+        "build" => &["--profile", "--profile-sha256", "--installer", "--out"],
+        _ => return Err(usage()),
+    };
+    let mut values = BTreeMap::new();
+    let mut asserted = false;
+    let mut approved = false;
+    let mut options = options.iter();
+    while let Some(option) = options.next() {
+        let option = option.as_str();
+        match option {
+            "--assert-redistribution" if action == "save" && !asserted => asserted = true,
+            "--approve-reviewed-package" if action == "save" && !approved => approved = true,
+            name if allowed.contains(&name) && !values.contains_key(name) => {
+                let value = options
+                    .next()
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or_else(usage)?;
+                values.insert(name, value.as_str());
+            }
+            _ => return Err(usage()),
+        }
+    }
+    let get = |name| values.get(name).copied().ok_or_else(usage);
+    let out = Path::new(get("--out")?);
+    if action == "save" {
+        if !approved || !asserted {
+            return Err("Confirm the prepared package implements your reviewed choices and may be shared with --approve-reviewed-package and --assert-redistribution.".into());
+        }
+        let profile = portableforge_core::profile::save(
+            Path::new(input),
+            Path::new(get("--review")?),
+            Path::new(get("--package")?),
+            out,
+            asserted,
+            approved,
+        )?;
+        println!("Saved profile: {}", profile.manifest.display());
+        println!("Profile SHA-256: {}", profile.manifest_sha256);
+        println!("Setup SHA-256: {}", profile.setup_sha256);
+    } else {
+        let report = portableforge_core::profile::build(
+            Path::new(input),
+            Path::new(get("--profile")?),
+            get("--profile-sha256")?,
+            Path::new(get("--installer")?),
+            out,
+        )?;
+        println!("Installer: {}", report.artifact.display());
+        println!("Size: {} bytes", report.size_bytes);
+        println!("SHA-256: {}", report.sha256);
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn profile_command(_args: &[String]) -> Result<(), String> {
+    Err("Saving or building from a Sandbox capture profile requires Windows.".into())
+}
+
 const HELP: &str = "\
 PortableForge — make a portable copy of a program, guided step by step.
 
@@ -518,6 +596,7 @@ Commands (the same steps, for scripts and testing):
                                           Build the finished package: the session's notes (or a saved review) supply the accepted fixes, the harvested program files and starting settings are copied in, and the finished tree is checked
   compile <prepared-package> --installer <tool-folder> --out <new-folder> --assert-redistribution
                                           Create a .paf.exe from a trusted, ready-to-build package on Windows
+  profile save ... | profile build ...    Save one approved test-box capture and use it for unattended builds
   validate [<details.json>] [--tree <folder>]   (with no details file, --tree reads the package's own appinfo.ini)
   session-new --id <name> --out <file.json>
   request-snapshot <session-folder> <before|after-install|after-runtime>
@@ -551,6 +630,7 @@ fn command_help(cmd: &str) -> Option<String> {
     let text = match cmd {
         "build" => "build <details.json> --out <folder> [--session <session-folder>] [--review <review.json>] [--app-files <folder>] [--default-data <folder>] [--icon <file.ico>] [--zip] [--force] [--json] [--quiet]\n  Make the finished package folder from the details file. --session takes the accepted fixes, name tags, and first-run files from a finished capture. --zip also leaves a zip copy beside the folder. --force allows building into a non-empty folder that is not an earlier package. Ends with exit code 2 when the package has problems to fix.",
         "compile" => "compile <prepared-package> --installer <tool-folder> --out <new-folder> --assert-redistribution\n  Make an offline .paf.exe using a trusted, prepared package with a launcher and icons. On Windows, give the trusted installation folder for PortableApps.com Installer 3.9.19. The new folder receives the installer and build record under result. Only assert redistribution when you may share everything included.",
+        "profile" => PROFILE_HELP,
         "generate" => "generate <details.json> --out <folder> [--review <review.json>]\n  Write only the text files of a package (no program files copied). Without --review the starter rules carry no fixes, and it says so.",
         "validate" => "validate [<details.json>] [--tree <package-folder>]\n  Check package details, and with --tree also a built package folder. With no details file, --tree reads the package's own appinfo.ini. Exit code 2 when there are problems.",
         "preflight" => "preflight [--json] [--force-sandbox]\n  Check this computer: Windows edition, the test box feature, memory, disk, and which testing way is available. --force-sandbox shows the report as it looks when the person vouches for the test box (the wizard's 'use it anyway' choice).",
@@ -1244,6 +1324,7 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "compile" => compile_command(&args[1..]),
+        "profile" => profile_command(&args[1..]),
         "tools" => {
             // `tools run-installer|run-launcher <package-folder>
             // --cache <folder> [--generator <program>]`: run one of

@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- Save a reviewed Windows Sandbox capture and prepared package with
+  `portableforge profile save`. Rebuild its installer unattended with
+  `portableforge profile build` when the setup file and saved profile
+  fingerprints match.
 - On Windows, `portableforge compile` turns a trusted, prepared offline
   PortableApps.com package into a `.paf.exe` using the official installer
   tool. PortableForge checks the embedded icons against the package ICO
