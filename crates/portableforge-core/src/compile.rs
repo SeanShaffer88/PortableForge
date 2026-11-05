@@ -40,6 +40,7 @@ const INSTALLER_FIELDS: &[(&str, &[&str])] = &[
 #[derive(Debug)]
 struct Package {
     app_id: String,
+    base_app_name: String,
     launcher: String,
     extract_icon: Option<String>,
     appinfo: String,
@@ -98,7 +99,7 @@ fn value<'a>(fields: &'a Ini, section: &str, key: &str) -> &'a str {
         .map_or("", String::as_str)
 }
 
-fn safe_name(name: &str) -> bool {
+pub(crate) fn safe_name(name: &str) -> bool {
     if name.is_empty()
         || name.starts_with([' ', '.'])
         || name.ends_with([' ', '.'])
@@ -189,6 +190,7 @@ fn package_settings(text: &str) -> Result<Package, String> {
     }
     Ok(Package {
         app_id: app_id.into(),
+        base_app_name: field("details", "baseappname").into(),
         launcher: launcher.into(),
         extract_icon: (!icon.is_empty()).then(|| icon.into()),
         appinfo: render_appinfo(&fields),
@@ -232,7 +234,7 @@ fn installer_settings(text: &str) -> Result<String, String> {
 mod icons;
 
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 
 #[cfg(windows)]
 pub use windows::{compile_installer, CompileReport};

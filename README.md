@@ -66,7 +66,9 @@ Your answer is written into the package's notes, so anyone can see which kind of
 
 ## Command line (optional)
 
-You never need this — the window does everything. For scripts and testing, every step is also a command: `portableforge guide`, `snapshot`, `diff`, `wsb`, `generate`, `validate`, plus the end-to-end ones — `launch`, `request-snapshot`, `post-capture`, and `build` (session notes + package details → a finished, checked package folder). Run `portableforge help` for the list.
+The window guides the capture and review. For scripts and testing, each
+step is also a command. The commands below finish installers and reuse
+approved captures. Run `portableforge help` for the list.
 
 ### Build an installer without clicking through the maker
 
@@ -98,6 +100,49 @@ retrying in a fresh directory.
 
 The command builds the installer. Installation, upgrades, and the
 portable program's behavior are separate checks.
+
+### Review one Windows Sandbox capture, then rebuild by setup fingerprint
+
+1. Finish the capture in Windows Sandbox on a machine that supports it.
+   In the review step, save your choices to a file. Finish preparing the
+   package with the launcher, original icons and settings rules you
+   reviewed. Keep the captured program files unchanged under
+   `App\<BaseAppName>`.
+2. Close the test box. Keep the review and package outside the folders
+   shared with the box, and leave the session and package files stable.
+   Save the profile once, with both approvals.
+
+   ```powershell
+   portableforge profile save "D:\Captures\Widget" --review "D:\Review\widget.json" --package "D:\Packages\WidgetPortable" --out "D:\Profiles\Widget" --approve-reviewed-package --assert-redistribution
+   ```
+
+   The session must have the three capture notes, the harvested program
+   files and one setup file in its `input` folder. The exported choices
+   must match the findings in those notes. Use
+   `--approve-reviewed-package` to confirm that the finished package
+   implements those choices. Captures with red flags need a separate
+   packaging review.
+3. Save the printed **Profile SHA-256** separately from the profile, for
+   example in your build command. To rebuild, pass that saved fingerprint
+   and any copy of the same setup file.
+
+   ```powershell
+   portableforge profile build "D:\Setups\widget-setup.exe" --profile "D:\Profiles\Widget" --profile-sha256 "<saved profile SHA-256>" --installer "D:\PortableApps\PortableApps.comInstaller" --out "D:\Builds\widget-run-2"
+   ```
+
+   The setup file can be renamed or moved. The command reads its bytes to
+   match the approved fingerprint and compiles the saved package on
+   Windows. The test box is only needed for the first capture. A changed
+   setup file, saved review or package requires a new approval. The
+   installer and the build record appear under `result` after the same
+   compiler and icon checks as `compile`.
+
+The profile contains a copy of the approved package and review. Keep it
+private if those contain private data. The saved fingerprint is the
+approval record and must come from the trusted save run. Profile checks
+bind the recorded capture, exported decisions and copied package
+bytes. Capture coverage and runtime portability require their own
+verification.
 
 ## Screenshots
 

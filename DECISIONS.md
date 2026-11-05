@@ -1,5 +1,18 @@
 # Decisions — PortableForge
 
+## 2026-11-05 — Unattended builds reuse a sealed capture profile
+
+Review and prepare the package once from a completed Windows Sandbox
+session. Save with an explicit approval of the prepared package and a
+redistribution assertion. The profile records the captured setup and
+notes, preserves the exported decisions, and seals the exact package
+tree under a separately retained SHA-256. Replay checks the caller's
+setup bytes and the approval record before reserving a build folder.
+It checks the staged tree again before invoking the existing compiler.
+The launcher and settings behavior are the operator's one-time
+approval. A matching fingerprint identifies the approved bytes and
+does not establish capture coverage or runtime portability.
+
 ## 2026-11-05 — Unattended compilation starts from a prepared package
 
 `portableforge compile` takes a trusted Format 3.9 package, an explicit

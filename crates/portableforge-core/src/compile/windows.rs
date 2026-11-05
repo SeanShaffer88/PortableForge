@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::{installer_settings, package_settings, safe_name};
+use super::{installer_settings, package_settings, safe_name, Package};
 use crate::paf::Distribution;
 use crate::snapshot::pe_arch;
 
@@ -50,7 +50,21 @@ pub struct CompileReport {
     pub source_package: PathBuf,
     pub tool_root: PathBuf,
     pub redistribution_asserted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProfileBuildEvidence>,
     pub steps: Vec<BuildStep>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProfileBuildEvidence {
+    pub manifest_sha256: String,
+    pub setup_sha256: String,
+    pub session_id: String,
+}
+
+pub(crate) struct CompileApproval<'a> {
+    pub evidence: ProfileBuildEvidence,
+    pub verify_staged: &'a dyn Fn(&Path) -> Result<(), String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +86,16 @@ pub fn compile_installer(
     output: &Path,
     redistribution_asserted: bool,
 ) -> Result<CompileReport, String> {
+    compile_installer_checked(package, tool_root, output, redistribution_asserted, None)
+}
+
+pub(crate) fn compile_installer_checked(
+    package: &Path,
+    tool_root: &Path,
+    output: &Path,
+    redistribution_asserted: bool,
+    approval: Option<CompileApproval<'_>>,
+) -> Result<CompileReport, String> {
     Distribution::Bundled {
         redistribution_asserted,
     }
@@ -79,16 +103,7 @@ pub fn compile_installer(
 
     let package = local_directory(package)?;
     let tool_root = local_directory(tool_root)?;
-    let output_name = output
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| safe_name(name))
-        .ok_or("Choose a plain name for the new output folder.")?;
-    let parent = output
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let output = local_directory(parent)?.join(output_name);
+    let output = new_output_path(output)?;
     if within(&output, &package)
         || within(&output, &tool_root)
         || within(&package, &tool_root)
@@ -106,7 +121,14 @@ pub fn compile_installer(
             output.display()
         )
     })?;
-    compile_in(&package, &tool_root, &output, redistribution_asserted).map_err(|e| {
+    compile_in(
+        &package,
+        &tool_root,
+        &output,
+        redistribution_asserted,
+        approval,
+    )
+    .map_err(|e| {
         format!(
             "{e}\nBuild files, if any, are in {}.",
             output.join("work").display()
@@ -114,11 +136,25 @@ pub fn compile_installer(
     })
 }
 
+pub(crate) fn new_output_path(output: &Path) -> Result<PathBuf, String> {
+    let output_name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| safe_name(name))
+        .ok_or("Choose a plain name for the new output folder.")?;
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    Ok(local_directory(parent)?.join(output_name))
+}
+
 fn compile_in(
     package: &Path,
     tool_root: &Path,
     output: &Path,
     redistribution_asserted: bool,
+    approval: Option<CompileApproval<'_>>,
 ) -> Result<CompileReport, String> {
     let work = output.join("work");
     create_dir(&work)?;
@@ -131,46 +167,21 @@ fn compile_in(
     let initial = package_settings(&ini_text(&initial_appinfo)?)?;
     let stage = package_work.join(&initial.app_id);
     copy_tree(package, &stage)?;
+    if let Some(approval) = &approval {
+        (approval.verify_staged)(&stage)?;
+    }
     let appinfo = stage.join("App/AppInfo");
-    let metadata = package_settings(&ini_text(&appinfo.join("appinfo.ini"))?)?;
+    let (metadata, installer_ini) = preflight_package(&stage)?;
     if metadata.app_id != initial.app_id {
         return Err("The package changed while it was being copied.".into());
     }
     fs::write(appinfo.join("appinfo.ini"), metadata.appinfo)
         .map_err(|e| format!("Could not normalize the staged appinfo.ini: {e}"))?;
-    require_signature(&stage.join(&metadata.launcher), is_pe, "a Windows launcher")?;
-    require_signature(&stage.join("help.html"), |_| true, "a help file")?;
-    if let Some(icon_exe) = metadata.extract_icon {
-        require_signature(&stage.join(icon_exe), is_pe, "a Windows icon source")?;
-    }
     let app_icon = appinfo.join("appicon.ico");
-    require_signature(
-        &app_icon,
-        |bytes| {
-            bytes.len() > 22 && bytes.starts_with(&[0, 0, 1, 0]) && (bytes[4] != 0 || bytes[5] != 0)
-        },
-        "an ICO icon",
-    )?;
-    for file in ["appicon_16.png", "appicon_32.png"] {
-        require_signature(
-            &appinfo.join(file),
-            |bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
-            "a PNG icon",
-        )?;
-    }
     let icon_hash = sha256(&app_icon)?;
     let source = stage.join("Other/Source");
-    reject_installer_hooks(&source)?;
-    if appinfo.join("plugininstaller.ini").exists() {
-        return Err("This command supports full application packages.".into());
-    }
     let config = appinfo.join("installer.ini");
-    let original = if config.exists() {
-        ini_text(&config)?
-    } else {
-        String::new()
-    };
-    fs::write(&config, installer_settings(&original)?)
+    fs::write(&config, installer_ini)
         .map_err(|e| format!("Could not write {}: {e}", config.display()))?;
 
     // Copy only the maker's inputs. Its mutable Data folder is private to this run.
@@ -231,6 +242,7 @@ fn compile_in(
         source_package: package.into(),
         tool_root: tool_root.into(),
         redistribution_asserted,
+        profile: approval.map(|approval| approval.evidence),
         steps: vec![maker, compiler],
     };
     let manifest = delivery.join("build-manifest.json");
@@ -247,7 +259,54 @@ fn compile_in(
     Ok(report)
 }
 
-fn within(path: &Path, root: &Path) -> bool {
+fn preflight_package(stage: &Path) -> Result<(Package, String), String> {
+    let appinfo = stage.join("App/AppInfo");
+    let metadata = package_settings(&ini_text(&appinfo.join("appinfo.ini"))?)?;
+    require_signature(&stage.join(&metadata.launcher), is_pe, "a Windows launcher")?;
+    require_signature(&stage.join("help.html"), |_| true, "a help file")?;
+    if let Some(icon_exe) = &metadata.extract_icon {
+        require_signature(&stage.join(icon_exe), is_pe, "a Windows icon source")?;
+    }
+    require_signature(
+        &appinfo.join("appicon.ico"),
+        |bytes| {
+            bytes.len() > 22 && bytes.starts_with(&[0, 0, 1, 0]) && (bytes[4] != 0 || bytes[5] != 0)
+        },
+        "an ICO icon",
+    )?;
+    for file in ["appicon_16.png", "appicon_32.png"] {
+        require_signature(
+            &appinfo.join(file),
+            |bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "a PNG icon",
+        )?;
+    }
+    reject_installer_hooks(&stage.join("Other/Source"))?;
+    if appinfo.join("plugininstaller.ini").exists() {
+        return Err("This command supports full application packages.".into());
+    }
+    let config = appinfo.join("installer.ini");
+    let original = if config.exists() {
+        ini_text(&config)?
+    } else {
+        String::new()
+    };
+    Ok((metadata, installer_settings(&original)?))
+}
+
+pub(crate) fn preflight_profile_package(stage: &Path) -> Result<String, String> {
+    let (package, _) = preflight_package(stage)?;
+    if !safe_name(&package.base_app_name)
+        || ["AppInfo", "DefaultData"]
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&package.base_app_name))
+    {
+        return Err("Give the prepared package a safe BaseAppName for its captured files.".into());
+    }
+    Ok(package.base_app_name)
+}
+
+pub(crate) fn within(path: &Path, root: &Path) -> bool {
     path.components().zip(root.components()).all(|(a, b)| {
         a.as_os_str()
             .to_string_lossy()
@@ -255,7 +314,7 @@ fn within(path: &Path, root: &Path) -> bool {
     }) && path.components().count() >= root.components().count()
 }
 
-fn local_directory(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn local_directory(path: &Path) -> Result<PathBuf, String> {
     let absolute = std::path::absolute(path).map_err(|e| e.to_string())?;
     for part in absolute.ancestors() {
         if !metadata_at(part)?.is_dir() {
@@ -272,7 +331,7 @@ fn local_directory(path: &Path) -> Result<PathBuf, String> {
     Ok(ordinary.into())
 }
 
-fn metadata_at(path: &Path) -> Result<Metadata, String> {
+pub(crate) fn metadata_at(path: &Path) -> Result<Metadata, String> {
     let meta = fs::symlink_metadata(path)
         .map_err(|e| format!("Could not read {}: {e}", path.display()))?;
     if meta.file_attributes() & REPARSE_POINT != 0 {
@@ -284,7 +343,7 @@ fn metadata_at(path: &Path) -> Result<Metadata, String> {
     Ok(meta)
 }
 
-fn require_regular_path(path: &Path, root: &Path) -> Result<(), String> {
+pub(crate) fn require_regular_path(path: &Path, root: &Path) -> Result<(), String> {
     if !metadata_at(path)?.is_file() {
         return Err(format!("Expected a regular file at {}.", path.display()));
     }
@@ -328,7 +387,7 @@ fn copy_new_file(source: &Path, destination: &Path) -> Result<(), String> {
     })
 }
 
-fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     if !metadata_at(source)?.is_dir() {
         return Err(format!("Expected a directory at {}.", source.display()));
     }
@@ -422,12 +481,16 @@ fn require_signature(
 }
 
 fn sha256(path: &Path) -> Result<String, String> {
+    file_digest(path).map(|(sha256, _)| sha256)
+}
+
+pub(crate) fn file_digest(path: &Path) -> Result<(String, u64), String> {
     let mut reader =
         File::open(path).map_err(|e| format!("Could not open {}: {e}", path.display()))?;
     let mut digest = Sha256::new();
-    io::copy(&mut reader, &mut digest)
+    let size = io::copy(&mut reader, &mut digest)
         .map_err(|e| format!("Could not hash {}: {e}", path.display()))?;
-    Ok(format!("{:x}", digest.finalize()))
+    Ok((format!("{:x}", digest.finalize()), size))
 }
 
 fn check_tools(root: &Path) -> Result<(), String> {
