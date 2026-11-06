@@ -36,10 +36,12 @@ const TOOLS: &[(&str, &str)] = &[
 const DRIVER_VERSION: &str = "5.73.8";
 const DRIVER_ABI: u32 = 0x57230;
 const STATUS_RESOURCE_NAME_NOT_FOUND: i32 = 0xc000008b_u32 as i32;
+const CONF_NO_EXPAND: u32 = 0x20000000;
 const DIRECT_CONF: u32 = 0x70000000; // NO_GLOBAL | NO_EXPAND | NO_TEMPLS
 const BOX_CHARS: usize = 40; // v1.18.8 common/defines.h
 const PATH_CHARS: usize = 4096;
 const OWNER_KEY: &str = "PortableForgeOwner";
+const CONFIG_LEVEL: (&str, &str) = ("ConfigLevel", "10");
 const POLICY: &[(&str, &str)] = &[
     ("DropAdminRights", "y"),
     ("NoSecurityIsolation", "n"),
@@ -351,7 +353,12 @@ impl Sandboxie {
             return Err("The proposed Sandboxie box already exists.".into());
         }
         self.verify_global()?;
+        let mut config_level_written = false;
         let configured = (|| {
+            // SandMan migrates boxes with an older or absent ConfigLevel,
+            // which can add recovery folders and compatibility templates.
+            self.set(name, CONFIG_LEVEL.0, Some(CONFIG_LEVEL.1))?;
+            config_level_written = true;
             self.set(name, OWNER_KEY, Some(root_text))?;
             self.assert_owner(name, root)?;
             self.set(name, "FileRootPath", Some(root_text))?;
@@ -366,7 +373,12 @@ impl Sandboxie {
             if self.setting(Some(name), None, DIRECT_CONF).ok() == Some(None) {
                 return Err(error);
             }
-            return match self.remove_config(name, root) {
+            let cleanup = if config_level_written {
+                self.rollback_provision(name, root)
+            } else {
+                self.remove_config(name, root)
+            };
+            return match cleanup {
                 Ok(()) => Err(error),
                 Err(cleanup) => Err(format!(
                     "{error}\nCould not roll back the owned box {name}: {cleanup}"
@@ -530,6 +542,33 @@ impl Sandboxie {
 
     fn remove_config(&self, name: &str, root: &Path) -> Result<(), String> {
         self.assert_owner(name, root)?;
+        self.delete_idle_config(name)
+    }
+
+    fn rollback_provision(&self, name: &str, root: &Path) -> Result<(), String> {
+        // The first write prevents SandMan from migrating the fresh section.
+        // If recording ownership then failed, accept only that exact partial
+        // state, with no enabled box and no storage to remove.
+        let settings = self.setting_names(Some(name))?;
+        if matches!(settings.as_slice(), [key] if key == CONFIG_LEVEL.0)
+            && self
+                .setting(Some(name), Some(CONFIG_LEVEL.0), DIRECT_CONF)?
+                .as_deref()
+                == Some(CONFIG_LEVEL.1)
+            && self
+                .setting(Some(name), Some(CONFIG_LEVEL.0), DIRECT_CONF + 1)?
+                .is_none()
+            && self
+                .setting(Some(name), Some("Enabled"), CONF_NO_EXPAND)?
+                .is_none()
+            && matches!(root.symlink_metadata(), Err(error) if error.kind() == io::ErrorKind::NotFound)
+        {
+            return self.delete_idle_config(name);
+        }
+        self.remove_config(name, root)
+    }
+
+    fn delete_idle_config(&self, name: &str) -> Result<(), String> {
         self.quiescent(name, Duration::ZERO)?;
         self.set(name, "*", None)?;
         if self.setting(Some(name), None, DIRECT_CONF)?.is_some() {
@@ -543,16 +582,26 @@ impl Sandboxie {
     fn verify_box(&self, name: &str, root: &Path) -> Result<Paths, String> {
         self.assert_owner(name, root)?;
         self.verify_global()?;
-        for (key, value) in POLICY
-            .iter()
-            .copied()
-            .chain([("Enabled", "y"), ("FileRootPath", validate_root(root)?)])
-        {
+        for (key, value) in POLICY.iter().copied().chain([
+            CONFIG_LEVEL,
+            ("Enabled", "y"),
+            ("FileRootPath", validate_root(root)?),
+        ]) {
+            // QueryConf expands DOS paths into NT paths by default. Read the
+            // effective literal here, then verify its resolved box root below.
+            let effective_index = if key == "FileRootPath" {
+                CONF_NO_EXPAND
+            } else {
+                0
+            };
             if self.setting(Some(name), Some(key), DIRECT_CONF)?.as_deref() != Some(value)
                 || self
                     .setting(Some(name), Some(key), DIRECT_CONF + 1)?
                     .is_some()
-                || self.setting(Some(name), Some(key), 0)?.as_deref() != Some(value)
+                || self
+                    .setting(Some(name), Some(key), effective_index)?
+                    .as_deref()
+                    != Some(value)
             {
                 return Err(format!(
                     "Sandboxie did not apply the required box setting {key}."
@@ -563,7 +612,7 @@ impl Sandboxie {
             if !POLICY
                 .iter()
                 .any(|(known, _)| key.eq_ignore_ascii_case(known))
-                && ![OWNER_KEY, "Enabled", "FileRootPath"]
+                && ![OWNER_KEY, CONFIG_LEVEL.0, "Enabled", "FileRootPath"]
                     .iter()
                     .any(|known| key.eq_ignore_ascii_case(known))
             {

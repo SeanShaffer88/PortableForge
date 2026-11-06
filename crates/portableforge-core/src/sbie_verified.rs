@@ -411,7 +411,7 @@ impl ActiveCapture<'_> {
             expect_absent(&physical)?;
             // The caller creates only the verified redirected parent. An
             // ordinary unboxed reg.exe would not have this logical folder.
-            let logical = logical_notes.join(filename);
+            let logical = logical_notes.join(&filename);
             let args = [
                 OsString::from("export"),
                 OsString::from(hive),
@@ -441,7 +441,9 @@ impl ActiveCapture<'_> {
             }
             let (entries, skipped) = parse_reg_with_report(&decoded);
             if skipped != 0 {
-                return Err("A boxed registry export could not be read completely.".into());
+                return Err(format!(
+                    "A boxed registry export could not be read completely ({hive}, {filename}, {skipped} skipped)."
+                ));
             }
             if index == 2 {
                 const PREFIX: &str = r"hkey_local_machine\system\currentcontrolset\services\";
