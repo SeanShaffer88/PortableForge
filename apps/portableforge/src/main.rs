@@ -507,6 +507,84 @@ profile save <session-folder> --review <exported-review> --package <prepared-pac
 profile build <setup-file> --profile <profile-folder> --profile-sha256 <saved-sha256> --installer <tool-folder> --out <new-build-folder>\n\
   Check the setup file and approved profile, then build the installer without reopening the test box.";
 
+const SANDBOXIE_CAPTURE_HELP: &str = "\
+sandboxie-capture <setup.exe> --installed-exe <absolute installed app.exe> --out <new-session> --trust-setup [--timeout-seconds <seconds>] [-- <setup arguments>]\n\
+  Capture a trusted local setup with Sandboxie-Plus 1.18.8 on Windows x64. Finish setup and try the app in their windows. PortableForge checks the dedicated box and cleans it up before recording a reusable capture.";
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+fn sandboxie_capture_command(args: &[String]) -> Result<(), String> {
+    let setup = args
+        .first()
+        .filter(|value| !value.starts_with("--"))
+        .ok_or(SANDBOXIE_CAPTURE_HELP)?;
+    let mut installed = None;
+    let mut out = None;
+    let mut timeout = None;
+    let mut trusted = false;
+    let mut extra = Vec::new();
+    let mut rest = args[1..].iter();
+    while let Some(option) = rest.next() {
+        match option.as_str() {
+            "--" => {
+                extra.extend(rest.map(std::ffi::OsString::from));
+                break;
+            }
+            "--trust-setup" if !trusted => trusted = true,
+            "--installed-exe" if installed.is_none() => {
+                installed = Some(
+                    rest.next()
+                        .filter(|value| !value.starts_with("--"))
+                        .ok_or(SANDBOXIE_CAPTURE_HELP)?,
+                );
+            }
+            "--out" if out.is_none() => {
+                out = Some(
+                    rest.next()
+                        .filter(|value| !value.starts_with("--"))
+                        .ok_or(SANDBOXIE_CAPTURE_HELP)?,
+                );
+            }
+            "--timeout-seconds" if timeout.is_none() => {
+                timeout = Some(
+                    rest.next()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .filter(|value| (1..=900).contains(value))
+                        .ok_or("The time limit must be between 1 and 900 seconds.")?,
+                );
+            }
+            _ => return Err(SANDBOXIE_CAPTURE_HELP.into()),
+        }
+    }
+    if !trusted {
+        return Err(
+            "Use --trust-setup to confirm you trust the setup and installed app for this capture."
+                .into(),
+        );
+    }
+    let result = portableforge_core::sbie_verified::capture(
+        Path::new(setup),
+        Path::new(installed.ok_or(SANDBOXIE_CAPTURE_HELP)?),
+        Path::new(out.ok_or(SANDBOXIE_CAPTURE_HELP)?),
+        &extra,
+        std::time::Duration::from_secs(timeout.unwrap_or(600)),
+    )?;
+    println!("Saved a verified capture in {}.", result.display());
+    Ok(())
+}
+
+#[cfg(not(all(windows, target_arch = "x86_64")))]
+fn sandboxie_capture_command(_args: &[String]) -> Result<(), String> {
+    Err("Verified Sandboxie-Plus capture requires Windows x64.".into())
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+fn sandboxie_exercise_command(args: &[String]) -> Result<(), String> {
+    let [name, root, program] = args else {
+        return Err("Invalid internal Sandboxie exercise command.".into());
+    };
+    portableforge_core::sbie_verified::exercise_boxed(name, Path::new(root), Path::new(program))
+}
+
 #[cfg(windows)]
 fn profile_command(args: &[String]) -> Result<(), String> {
     use std::collections::BTreeMap;
@@ -597,6 +675,7 @@ Commands (the same steps, for scripts and testing):
   compile <prepared-package> --installer <tool-folder> --out <new-folder> --assert-redistribution
                                           Create a .paf.exe from a trusted, ready-to-build package on Windows
   profile save ... | profile build ...    Save one approved test-box capture and use it for unattended builds
+  sandboxie-capture ...                   Capture a trusted setup in a verified dedicated box on Windows x64
   validate [<details.json>] [--tree <folder>]   (with no details file, --tree reads the package's own appinfo.ini)
   session-new --id <name> --out <file.json>
   request-snapshot <session-folder> <before|after-install|after-runtime>
@@ -631,6 +710,7 @@ fn command_help(cmd: &str) -> Option<String> {
         "build" => "build <details.json> --out <folder> [--session <session-folder>] [--review <review.json>] [--app-files <folder>] [--default-data <folder>] [--icon <file.ico>] [--zip] [--force] [--json] [--quiet]\n  Make the finished package folder from the details file. --session takes the accepted fixes, name tags, and first-run files from a finished capture. --zip also leaves a zip copy beside the folder. --force allows building into a non-empty folder that is not an earlier package. Ends with exit code 2 when the package has problems to fix.",
         "compile" => "compile <prepared-package> --installer <tool-folder> --out <new-folder> --assert-redistribution\n  Make an offline .paf.exe using a trusted, prepared package with a launcher and icons. On Windows, give the trusted installation folder for PortableApps.com Installer 3.9.19. The new folder receives the installer and build record under result. Only assert redistribution when you may share everything included.",
         "profile" => PROFILE_HELP,
+        "sandboxie-capture" => SANDBOXIE_CAPTURE_HELP,
         "generate" => "generate <details.json> --out <folder> [--review <review.json>]\n  Write only the text files of a package (no program files copied). Without --review the starter rules carry no fixes, and it says so.",
         "validate" => "validate [<details.json>] [--tree <package-folder>]\n  Check package details, and with --tree also a built package folder. With no details file, --tree reads the package's own appinfo.ini. Exit code 2 when there are problems.",
         "preflight" => "preflight [--json] [--force-sandbox]\n  Check this computer: Windows edition, the test box feature, memory, disk, and which testing way is available. --force-sandbox shows the report as it looks when the person vouches for the test box (the wizard's 'use it anyway' choice).",
@@ -1325,6 +1405,9 @@ fn run_cli(args: &[String]) -> Result<(), String> {
         }
         "compile" => compile_command(&args[1..]),
         "profile" => profile_command(&args[1..]),
+        "sandboxie-capture" => sandboxie_capture_command(&args[1..]),
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        "__sandboxie-exercise" => sandboxie_exercise_command(&args[1..]),
         "tools" => {
             // `tools run-installer|run-launcher <package-folder>
             // --cache <folder> [--generator <program>]`: run one of

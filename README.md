@@ -101,10 +101,43 @@ retrying in a fresh directory.
 The command builds the installer. Installation, upgrades, and the
 portable program's behavior are separate checks.
 
+### Capture on Windows Home with Sandboxie-Plus
+
+Use the official Sandboxie-Plus 1.18.8 x64 installation and a trusted
+local setup EXE that can install without elevation or a restart. Give
+the full path where setup will install the app inside the box, and
+choose a new session folder on a local drive.
+
+```powershell
+portableforge sandboxie-capture "D:\Setups\widget-setup.exe" --installed-exe "C:\Users\Me\AppData\Local\Widget\Widget.exe" --out "D:\Captures\Widget" --trust-setup
+```
+
+Complete setup, try the app when its window opens, and close it. The
+optional `--timeout-seconds` sets the time allowed for each of those
+two steps. To pass arguments to setup, put them after `--`.
+PortableForge verifies the setup process in the new dedicated box
+before it starts executing. It uses the exact installed path you chose
+to capture the app's folder. The session becomes eligible for
+`profile save` after the box's processes, definition and data directory
+are confirmed gone. A capture or cleanup error prevents profile save
+and identifies the session or box to inspect.
+
+Sandboxie redirects activity on the host. Use a trusted installer and
+an installation with configuration permissions for your account.
+Capture includes supported redirected local files, current-user
+software keys, the machine uninstall keys and service names.
+Registry exports stay inside the box temporarily. Session notes retain
+only registry entries and service names that changed between stages.
+Use `portableforge review "D:\Captures\Widget"` to see the choices
+before preparing the package. Save the approved review outside the
+box folders. A forced stop can leave the box and its ownership record
+for inspection. First-time capture and application
+compatibility depend on the host and its Sandboxie configuration.
+
 ### Review one Windows Sandbox capture, then rebuild by setup fingerprint
 
-1. Finish the capture in Windows Sandbox on a machine that supports it.
-   In the review step, save your choices to a file. Finish preparing the
+1. Finish the capture in Windows Sandbox or use the verified Sandboxie-Plus
+   session above. Save your reviewed choices to a file. Finish preparing the
    package with the launcher, original icons and settings rules you
    reviewed. Keep the captured program files unchanged under
    `App\<BaseAppName>`.

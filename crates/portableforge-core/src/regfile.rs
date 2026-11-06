@@ -36,25 +36,43 @@ pub fn parse_reg_with_report(text: &str) -> (Vec<RegEntry>, usize) {
     let mut skipped = 0usize;
     let mut current_key: Option<String> = None;
 
-    // Join continuation lines first: in a `.reg` export only hex values
-    // wrap, and a wrapped line ends with a backslash.
+    // reg.exe emits both wrapped hex and literal newlines in quoted strings.
     let mut logical: Vec<String> = Vec::new();
     let mut pending = String::new();
-    for raw in text.lines() {
-        let line = raw.trim_end_matches('\r');
-        if pending.is_empty() {
-            pending = line.to_string();
-        } else {
+    let mut in_quoted_value = false;
+    let mut in_hex_value = false;
+    for raw in text.split_inclusive('\n') {
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if in_quoted_value {
+            pending.push_str(line);
+            in_quoted_value = closing_quote(line).is_none();
+        } else if in_hex_value {
             pending.push_str(line.trim());
+            in_hex_value = pending.ends_with('\\');
+        } else {
+            pending.push_str(line);
+            if let Some(data) = value_data(line.trim_start()) {
+                let data = data.trim_start();
+                in_quoted_value = data
+                    .strip_prefix('"')
+                    .is_some_and(|rest| closing_quote(rest).is_none());
+                in_hex_value = (data.starts_with("hex:") || data.starts_with("hex("))
+                    && pending.ends_with('\\');
+            }
         }
-        if pending.contains("=hex") && line.ends_with('\\') {
-            pending.pop(); // drop the continuation backslash, keep joining
+        if in_quoted_value {
+            pending.push_str(&raw[line.len()..]);
+            continue;
+        }
+        if in_hex_value {
+            pending.pop();
             continue;
         }
         logical.push(std::mem::take(&mut pending));
     }
-    if !pending.is_empty() {
-        logical.push(pending);
+    if in_quoted_value || in_hex_value {
+        skipped += 1;
     }
 
     for line in &logical {
@@ -113,28 +131,38 @@ pub fn parse_reg_with_report(text: &str) -> (Vec<RegEntry>, usize) {
 }
 
 fn split_value_line(line: &str) -> Option<(String, String)> {
-    // `"na\"me"=data` — find the closing quote honouring `\"` escapes.
-    let bytes = line.as_bytes();
-    let mut i = 1usize;
+    let (escaped_name, data) = named_value_parts(line)?;
     let mut name = String::new();
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' if i + 1 < bytes.len() => {
-                name.push(bytes[i + 1] as char);
-                i += 2;
+    let mut chars = escaped_name.chars();
+    while let Some(ch) = chars.next() {
+        name.push(if ch == '\\' { chars.next()? } else { ch });
+    }
+    Some((name, data.trim().to_string()))
+}
+
+fn value_data(line: &str) -> Option<&str> {
+    line.strip_prefix("@=")
+        .or_else(|| named_value_parts(line).map(|(_, data)| data))
+}
+
+fn named_value_parts(line: &str) -> Option<(&str, &str)> {
+    let quoted = line.strip_prefix('"')?;
+    let end = closing_quote(quoted)?;
+    Some((&quoted[..end], quoted[end + 1..].strip_prefix('=')?))
+}
+
+fn closing_quote(text: &str) -> Option<usize> {
+    let mut chars = text.char_indices();
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '\\' => {
+                chars.next();
             }
-            b'"' => {
-                i += 1;
-                break;
-            }
-            b => {
-                name.push(b as char);
-                i += 1;
-            }
+            '"' => return Some(index),
+            _ => {}
         }
     }
-    let rest = line.get(i..)?.strip_prefix('=')?;
-    Some((name, rest.trim().to_string()))
+    None
 }
 
 /// Render data canonically so equivalent exports diff cleanly:
@@ -251,5 +279,36 @@ mod tests {
     fn deleted_keys_produce_no_entries() {
         let entries = parse_reg(SAMPLE);
         assert!(entries.iter().all(|e| !e.key.contains("Gone")));
+    }
+
+    #[test]
+    fn preserves_multiline_strings_and_unicode_value_names() {
+        let input = concat!(
+            "[HKEY_CURRENT_USER\\Software\\Fixture]\r\n",
+            "\"Résumé\"=\"first line with \\\"quotation\\\"\r\n",
+            "  second line\r\n",
+            "[literal brackets] and =hex\"\r\n",
+            "\"Blob\"=hex:01,02,\\\r\n",
+            "  ff\r\n",
+        );
+        let (entries, skipped) = parse_reg_with_report(input);
+        assert_eq!(skipped, 0);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "Résumé");
+        assert_eq!(
+            entries[0].data,
+            "\"first line with \\\"quotation\\\"\r\n  second line\r\n[literal brackets] and =hex\""
+        );
+        assert_eq!(entries[1].data, "hex:0102ff");
+    }
+
+    #[test]
+    fn reports_incomplete_continued_values() {
+        for value in ["\"x\"=\"unfinished\r\n", "\"x\"=hex:01,\\\r\n"] {
+            let input = format!("[HKEY_CURRENT_USER\\Software\\Fixture]\r\n{value}");
+            let (entries, skipped) = parse_reg_with_report(&input);
+            assert!(entries.is_empty());
+            assert_eq!(skipped, 1);
+        }
     }
 }
