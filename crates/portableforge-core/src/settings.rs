@@ -22,6 +22,8 @@ pub struct WizardDraft {
     pub app_name: String,
     pub description: String,
     pub publisher: String,
+    #[serde(default)]
+    pub homepage: String,
     pub main_exe: String,
     pub package_version: String,
     pub online_url: String,
@@ -41,6 +43,13 @@ impl WizardDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedProfileApproval {
+    pub folder: PathBuf,
+    pub label: String,
+    pub manifest_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WizardSettings {
     #[serde(default)]
     pub recent_installers: Vec<String>,
@@ -51,6 +60,9 @@ pub struct WizardSettings {
     /// Whether the first-run welcome has been read and dismissed.
     #[serde(default)]
     pub welcomed: bool,
+    /// Approvals are stored separately from the profile folders they cover.
+    #[serde(default)]
+    pub saved_profiles: Vec<SavedProfileApproval>,
 }
 
 fn default_text_scale() -> f32 {
@@ -64,11 +76,19 @@ impl Default for WizardSettings {
             text_scale: 1.0,
             draft: None,
             welcomed: false,
+            saved_profiles: Vec::new(),
         }
     }
 }
 
 impl WizardSettings {
+    /// Remember an approval returned by a successful profile save.
+    pub fn remember_profile(&mut self, approval: SavedProfileApproval) {
+        self.saved_profiles
+            .retain(|old| old.folder != approval.folder);
+        self.saved_profiles.insert(0, approval);
+    }
+
     /// Remember a setup file at the front of the list, without
     /// duplicates, keeping only the most recent [`RECENT_LIMIT`].
     pub fn remember_installer(&mut self, path: &str) {
@@ -116,25 +136,130 @@ pub fn load(path: &Path) -> WizardSettings {
         .unwrap_or_default()
 }
 
-/// Write the settings, replacing the file in one move so a crash
-/// mid-save cannot leave a half-written file behind.
+/// Save draft and display settings, preserving approvals from disk.
 pub fn save(path: &Path, settings: &WizardSettings) -> Result<(), String> {
+    write_settings(path, settings, None).map(|_| ())
+}
+
+/// Add an approval explicitly, then refresh the caller's approval list.
+pub fn save_approval(
+    path: &Path,
+    settings: &mut WizardSettings,
+    approval: SavedProfileApproval,
+) -> Result<(), String> {
+    settings.saved_profiles = write_settings(path, settings, Some(approval))?;
+    Ok(())
+}
+
+fn write_settings(
+    path: &Path,
+    settings: &WizardSettings,
+    approval: Option<SavedProfileApproval>,
+) -> Result<Vec<SavedProfileApproval>, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("We could not make {}: {e}", parent.display()))?;
     }
-    let text = serde_json::to_string_pretty(settings)
+    // Hold the lock through the read, merge and atomic replacement.
+    #[cfg(windows)]
+    let _lock = {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(path.with_extension("lock"))
+            .map_err(|error| format!("We could not lock the wizard settings: {error}"))?
+    };
+    #[cfg(not(windows))]
+    let _lock = {
+        static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        SETTINGS_LOCK.lock().map_err(|error| error.to_string())?
+    };
+    let mut updated = settings.clone();
+    updated.saved_profiles = match std::fs::read_to_string(path) {
+        Ok(text) => {
+            serde_json::from_str::<WizardSettings>(&text)
+                .map_err(|error| format!("We could not read the wizard settings: {error}"))?
+                .saved_profiles
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(format!("We could not read the wizard settings: {error}")),
+    };
+    if let Some(approval) = approval {
+        updated.remember_profile(approval);
+    }
+    let text = serde_json::to_string_pretty(&updated)
         .map_err(|e| format!("We could not write the settings: {e}"))?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text).map_err(|e| format!("We could not write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path)
         .map_err(|e| format!("We could not save {}: {e}", path.display()))?;
-    Ok(())
+    Ok(updated.saved_profiles)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn older_settings_load_without_profile_approvals() {
+        let settings: WizardSettings = serde_json::from_str(
+            r#"{"recent_installers":[],"text_scale":1.25,"draft":null,"welcomed":true}"#,
+        )
+        .unwrap();
+        assert!(settings.saved_profiles.is_empty());
+        assert_eq!(settings.text_scale, 1.25);
+    }
+
+    #[test]
+    fn saved_profiles_keep_the_approval_from_the_save_result() {
+        let mut settings = WizardSettings::default();
+        let folder = PathBuf::from("profile");
+        settings.remember_profile(SavedProfileApproval {
+            folder: folder.clone(),
+            label: "Example".into(),
+            manifest_sha256: "a".repeat(64),
+        });
+        settings.remember_profile(SavedProfileApproval {
+            folder,
+            label: "Example updated".into(),
+            manifest_sha256: "b".repeat(64),
+        });
+        assert_eq!(settings.saved_profiles.len(), 1);
+        let serialized = serde_json::to_string(&settings).unwrap();
+        let restored: WizardSettings = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.saved_profiles[0].manifest_sha256, "b".repeat(64));
+    }
+
+    #[test]
+    fn stale_settings_preserve_saved_approvals() {
+        let dir = std::env::temp_dir().join(format!("pf-approvals-{}", std::process::id()));
+        let path = dir.join("wizard-settings.json");
+        let mut first = WizardSettings::default();
+        let mut second = WizardSettings::default();
+        for (settings, label) in [(&mut first, "First"), (&mut second, "Second")] {
+            save_approval(
+                &path,
+                settings,
+                SavedProfileApproval {
+                    folder: dir.join(label),
+                    label: label.into(),
+                    manifest_sha256: "a".repeat(64),
+                },
+            )
+            .unwrap();
+        }
+        first.text_scale = 1.25;
+        save(&path, &first).unwrap();
+        let restored = load(&path);
+        assert_eq!(restored.saved_profiles, second.saved_profiles);
+        assert_eq!(restored.saved_profiles.len(), 2);
+        assert_eq!(restored.text_scale, 1.25);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn recent_list_dedupes_caps_and_ignores_blanks() {

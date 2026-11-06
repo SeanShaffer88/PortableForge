@@ -835,7 +835,7 @@ mod tests {
         let meta = crate::paf::tests::sample(Distribution::Bundled {
             redistribution_asserted: true,
         });
-        let mut manifests = Vec::new();
+        let mut builds = Vec::new();
         for name in ["one", "two"] {
             let root = base.join(name);
             build_package(
@@ -848,13 +848,29 @@ mod tests {
                 false,
             )
             .unwrap();
-            manifests.push(
-                std::fs::read_to_string(root.join("Other").join("Source").join("SHA256SUMS.txt"))
-                    .unwrap(),
+            let source = root.join("Other").join("Source");
+            let report_bytes = std::fs::read(source.join("build-report.json")).unwrap();
+            let mut report: serde_json::Value = serde_json::from_slice(&report_bytes).unwrap();
+            assert!(report
+                .as_object_mut()
+                .unwrap()
+                .remove("built_at_utc")
+                .is_some());
+            let manifest = std::fs::read_to_string(source.join("SHA256SUMS.txt")).unwrap();
+            let report_line = format!(
+                "{}  Other\\Source\\build-report.json",
+                crate::snapshot::sha256_hex(&report_bytes)
             );
+            assert!(manifest.lines().any(|line| line == report_line));
+            let stable_manifest = manifest
+                .lines()
+                .filter(|line| *line != report_line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            builds.push((stable_manifest, report));
         }
-        assert_eq!(manifests[0], manifests[1]);
-        assert!(manifests[0].contains("widget.exe"));
+        assert_eq!(builds[0], builds[1]);
+        assert!(builds[0].0.contains("widget.exe"));
         let _ = std::fs::remove_dir_all(&base);
     }
 

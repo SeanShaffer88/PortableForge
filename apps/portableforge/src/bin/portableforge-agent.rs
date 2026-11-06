@@ -422,10 +422,8 @@ fn cmd_snapshot_reg(args: &[String]) -> Result<(), String> {
 fn read_reg_export(path: &Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
     if bytes.starts_with(&[0xFF, 0xFE]) {
-        let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        let (pairs, _) = bytes[2..].as_chunks::<2>();
+        let units: Vec<u16> = pairs.iter().copied().map(u16::from_le_bytes).collect();
         return String::from_utf16(&units).map_err(|e| format!("Bad UTF-16 export: {e}"));
     }
     String::from_utf8(bytes).map_err(|e| format!("Bad export text: {e}"))

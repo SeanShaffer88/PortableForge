@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- Compact VaporGrid wizard with a subtle tread-plate background, full-width
+  paths, and paged findings and details. Standard, Large, and Extra large
+  text sizes retain the primary controls at the minimum logical window size.
+- In the wizard, capture a trusted setup in the verified quick test
+  box, save the reviewed profile and rebuild its `.paf.exe` with a
+  matching setup file. The wizard remembers the approval separately
+  from the profile.
 - Capture trusted setups on Windows Home x64 with a dedicated
   Sandboxie-Plus box. The verified setup process, completed capture and
   confirmed cleanup are recorded before the session can be saved as a

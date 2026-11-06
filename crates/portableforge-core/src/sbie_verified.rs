@@ -468,6 +468,14 @@ impl ActiveCapture<'_> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureStage {
+    Preparing,
+    Installing,
+    Exercising,
+    CleaningUp,
+}
+
 /// Run a trusted setup in a new dedicated box and save a review-ready session.
 pub fn capture(
     setup: &Path,
@@ -476,6 +484,40 @@ pub fn capture(
     setup_args: &[OsString],
     timeout: Duration,
 ) -> Result<PathBuf, String> {
+    capture_with_progress(
+        setup,
+        installed,
+        output,
+        setup_args,
+        timeout,
+        |stage| match stage {
+            CaptureStage::Installing => {
+                eprintln!("The verified box is ready. Finish the setup in its own window.");
+            }
+            CaptureStage::Exercising => {
+                eprintln!("Try the installed app, then close it to finish the capture.");
+            }
+            CaptureStage::Preparing | CaptureStage::CleaningUp => {}
+        },
+    )
+}
+
+/// Run the same verified capture while reporting major stages to a host UI.
+/// The progress callback should return promptly. A callback panic aborts
+/// the capture and still cleans up the dedicated box.
+pub fn capture_with_progress(
+    setup: &Path,
+    installed: &Path,
+    output: &Path,
+    setup_args: &[OsString],
+    timeout: Duration,
+    mut progress: impl FnMut(CaptureStage),
+) -> Result<PathBuf, String> {
+    let mut notify = |stage| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| progress(stage)))
+            .map_err(|_| format!("Could not report Sandboxie capture stage {stage:?}."))
+    };
+    notify(CaptureStage::Preparing)?;
     let setup = local_file(setup)?;
     logical_executable(&setup)?;
     let installed = logical_executable(installed)?;
@@ -545,7 +587,7 @@ pub fn capture(
         if fingerprint(&setup_copy)? != setup_fp {
             return Err("Setup bytes changed before launch.".into());
         }
-        eprintln!("The verified box is ready. Finish the setup in its own window.");
+        notify(CaptureStage::Installing)?;
         let setup_exit = checked_exit(
             sbie.run(
                 &name,
@@ -559,7 +601,7 @@ pub fn capture(
         )?;
         let after_install = active.snapshot(1)?;
         active.roots.logical_file(&root, &installed)?;
-        eprintln!("Try the installed app, then close it to finish the capture.");
+        notify(CaptureStage::Exercising)?;
         let app_args = [
             OsString::from("__sandboxie-exercise"),
             OsString::from(&name),
@@ -600,8 +642,12 @@ pub fn capture(
             exercise,
         ))
     })();
+    let notified = notify(CaptureStage::CleaningUp);
     let cleaned = cleanup(&active);
-    let (mut snapshots, harvest_sha256, setup_exit, exercise) = match (captured, cleaned) {
+    let (mut snapshots, harvest_sha256, setup_exit, exercise) = match (
+        captured.and_then(|result| notified.map(|()| result)),
+        cleaned,
+    ) {
         (Ok(captured), Ok(())) => captured,
         (Err(error), Ok(())) => return Err(format!("{error} The dedicated box was cleaned up.")),
         (result, Err(cleanup_error)) => {

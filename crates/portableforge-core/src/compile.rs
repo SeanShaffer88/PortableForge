@@ -234,6 +234,9 @@ fn installer_settings(text: &str) -> Result<String, String> {
 mod icons;
 
 #[cfg(windows)]
+pub(crate) use icons::extract_application_icons;
+
+#[cfg(windows)]
 pub(crate) mod windows;
 
 #[cfg(windows)]
