@@ -13,13 +13,27 @@ use portableforge_core::review::Review;
 use portableforge_core::session::Phase;
 use portableforge_core::settings::{self, WizardDraft, WizardSettings};
 
+mod dense;
+mod profiles;
+mod texture;
+
+const ALERT_TEXT: &str = guide::theme::TEXT;
+const CRIMSON: &str = "#76172A";
+
 pub struct WizardApp {
+    profile_flow: profiles::ProfileFlow,
     step: usize,
     show_details: bool,
+    detail_page: usize,
+    review_page: usize,
+    safety_page: usize,
+    recent_page: usize,
+    applied_layout_zoom: f32,
     installer_path: String,
     app_name: String,
     description: String,
     publisher: String,
+    homepage: String,
     main_exe: String,
     package_version: String,
     online_url: String,
@@ -63,7 +77,9 @@ pub struct WizardApp {
 
 impl Default for WizardApp {
     fn default() -> Self {
-        let settings_path = settings::settings_path();
+        let settings_path = test_state_root()
+            .map(|root| root.join("wizard-settings.json"))
+            .unwrap_or_else(settings::settings_path);
         let settings = settings::load(&settings_path);
         let resume_offer = settings
             .draft
@@ -71,12 +87,19 @@ impl Default for WizardApp {
             .map(|d| d.has_progress())
             .unwrap_or(false);
         Self {
+            profile_flow: profiles::ProfileFlow::default(),
             step: 0,
             show_details: false,
+            detail_page: 0,
+            review_page: 0,
+            safety_page: 0,
+            recent_page: 0,
+            applied_layout_zoom: 0.0,
             installer_path: String::new(),
             app_name: String::new(),
             description: String::new(),
             publisher: String::new(),
+            homepage: String::new(),
             main_exe: String::new(),
             package_version: "1.0.0.0".to_string(),
             online_url: String::new(),
@@ -157,10 +180,26 @@ fn open_folder(path: &std::path::Path) -> Result<(), String> {
 /// Where session folders live: a `PortableForge Sessions` folder in
 /// the person's home folder (current directory as a last resort).
 fn sessions_base() -> std::path::PathBuf {
+    if let Some(root) = test_state_root() {
+        return root.join("sessions");
+    }
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".to_string());
     std::path::PathBuf::from(home).join("PortableForge Sessions")
+}
+
+fn test_state_root() -> Option<std::path::PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var_os("PORTABLEFORGE_TEST_STATE_ROOT")
+            .map(std::path::PathBuf::from)
+            .filter(|root| root.is_absolute())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        None
+    }
 }
 
 fn color(hex: &str) -> egui::Color32 {
@@ -170,19 +209,19 @@ fn color(hex: &str) -> egui::Color32 {
 
 pub fn dark_visuals() -> egui::Visuals {
     let mut v = egui::Visuals::dark();
-    v.panel_fill = color(guide::theme::BG);
-    v.window_fill = color(guide::theme::BG);
-    v.extreme_bg_color = color(guide::theme::PANEL);
-    v.faint_bg_color = color(guide::theme::PANEL);
+    v.panel_fill = color("#12141A");
+    v.window_fill = color("#12141A");
+    v.extreme_bg_color = color("#23252D");
+    v.faint_bg_color = color("#1C1E25");
     v.override_text_color = Some(color(guide::theme::TEXT));
-    v.hyperlink_color = color(guide::theme::ACCENT_RED);
-    v.selection.bg_fill = color(guide::theme::PRIMARY_RED);
+    v.hyperlink_color = color(ALERT_TEXT);
+    v.selection.bg_fill = color(CRIMSON);
     v.selection.stroke = egui::Stroke::new(1.0_f32, color(guide::theme::ACCENT_RED));
-    v.widgets.active.bg_fill = color(guide::theme::PRIMARY_RED);
-    v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::ACCENT_RED));
+    v.widgets.active.bg_fill = color(CRIMSON);
+    v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, color("#E5E5E8"));
     v.widgets.hovered.bg_fill = color(guide::theme::HAIRLINE);
     v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::TEXT_FAINT));
-    v.widgets.inactive.bg_fill = color(guide::theme::PANEL);
+    v.widgets.inactive.bg_fill = color("#242630");
     v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::HAIRLINE));
     v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::HAIRLINE));
     let radius = egui::CornerRadius::same(6);
@@ -208,10 +247,10 @@ pub fn polished_style() -> egui::Style {
         ..Default::default()
     };
     style.animation_time = 0.15;
-    style.spacing.item_spacing = egui::vec2(10.0, 9.0);
-    style.spacing.button_padding = egui::vec2(14.0, 7.0);
+    style.spacing.item_spacing = egui::vec2(8.0, 4.0);
+    style.spacing.button_padding = egui::vec2(12.0, 5.0);
     style.spacing.indent = 20.0;
-    style.spacing.interact_size = egui::vec2(42.0, 28.0);
+    style.spacing.interact_size = egui::vec2(42.0, 26.0);
     style.spacing.slider_width = 180.0;
     style.text_styles = [
         (
@@ -244,10 +283,10 @@ pub fn polished_style() -> egui::Style {
 /// reads as grouped panels instead of text floating on black.
 pub fn card() -> egui::Frame {
     egui::Frame::new()
-        .fill(color(guide::theme::PANEL))
+        .fill(color("#1C1E25"))
         .stroke(egui::Stroke::new(1.0_f32, color(guide::theme::HAIRLINE)))
         .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(16))
+        .inner_margin(egui::Margin::same(9))
 }
 
 impl WizardApp {
@@ -256,6 +295,9 @@ impl WizardApp {
     /// box (on Windows). Safe to press again — an existing session is
     /// kept and only the box start is retried.
     fn start_test_box(&mut self) {
+        if self.use_verified_capture() {
+            return;
+        }
         if self.layout.is_none() {
             let stem = std::path::Path::new(self.installer_path.trim())
                 .file_stem()
@@ -312,12 +354,10 @@ impl WizardApp {
                     if let Some(name) = src.file_name() {
                         let _ = std::fs::copy(src, layout.input.join(name));
                     }
-                    if mode != portableforge_core::wsb::SandboxMode::Sandboxie {
-                        let _ = portableforge_core::orchestrate::request_snapshot(
-                            &layout,
-                            CapturePoint::Before,
-                        );
-                    }
+                    let _ = portableforge_core::orchestrate::request_snapshot(
+                        &layout,
+                        CapturePoint::Before,
+                    );
                     self.log.push(format!(
                         "Your work folder is ready: {}",
                         layout.root.display()
@@ -332,21 +372,9 @@ impl WizardApp {
             }
         }
         if let Some(layout) = &self.layout {
-            if self.session_mode == Some(portableforge_core::wsb::SandboxMode::Sandboxie) {
-                // The quick box has no window of its own to open:
-                // starting means asking it for the clean note.
-                match crate::sbie_ask_point(layout, "before") {
-                    Ok(()) => self.log.push(
-                        "The quick test box is getting ready — press Check on the test box in a few seconds."
-                            .to_string(),
-                    ),
-                    Err(e) => self.log.push(e),
-                }
-            } else {
-                match crate::launch_sandbox(layout) {
-                    Ok(()) => self.log.push("The test box is starting.".to_string()),
-                    Err(e) => self.log.push(e),
-                }
+            match crate::launch_sandbox(layout) {
+                Ok(()) => self.log.push("The test box is starting.".to_string()),
+                Err(e) => self.log.push(e),
             }
         }
     }
@@ -452,10 +480,6 @@ impl WizardApp {
             );
             return;
         };
-        if self.session_mode == Some(portableforge_core::wsb::SandboxMode::Sandboxie) {
-            self.check_quick_box(&layout);
-            return;
-        }
         // On the try/close steps, make sure the later notes are asked
         // for in order: after-install once its note is missing and the
         // clean note exists, after-runtime likewise.
@@ -498,7 +522,7 @@ impl WizardApp {
         match portableforge_core::orchestrate::next_host_action(state.as_ref()) {
             portableforge_core::orchestrate::HostAction::Wait => {
                 self.log.push(
-                    "The test box is still working. Finish inside it, close it, then check again."
+                    "The test box is still working. Leave it open and check again after closing the app."
                         .to_string(),
                 );
             }
@@ -509,47 +533,6 @@ impl WizardApp {
                 self.finish_capture(&layout);
             }
         }
-    }
-
-    /// The quick box's check: its notes are asked for and then
-    /// assembled here on the host, one press apart — ask, give it
-    /// a few seconds, press again to read the note in. Same shape
-    /// as the safe test box's helper notes, no window to watch.
-    fn check_quick_box(&mut self, layout: &portableforge_core::orchestrate::SessionLayout) {
-        let exchange = &layout.exchange;
-        let points = ["before", "after-install", "after-runtime"];
-        for point in points {
-            if exchange.join(format!("{point}.json")).is_file() {
-                continue;
-            }
-            if !exchange.join(format!("sbie-asked-{point}.txt")).is_file() {
-                match crate::sbie_ask_point(layout, point) {
-                    Ok(()) => self.log.push(format!(
-                        "Asking the quick test box for the {} note — press Check again in a few seconds.",
-                        point.replace('-', " ")
-                    )),
-                    Err(e) => self.log.push(e),
-                }
-                return;
-            }
-            match crate::sbie_collect_point(layout, point) {
-                Ok(Some(line)) => {
-                    self.log.push(line);
-                    if point == "after-runtime" {
-                        let layout = layout.clone();
-                        self.finish_capture(&layout);
-                    }
-                }
-                Ok(None) => self.log.push(
-                    "The quick test box is still writing that note — give it a few seconds and check again."
-                        .to_string(),
-                ),
-                Err(e) => self.log.push(e),
-            }
-            return;
-        }
-        self.log
-            .push("All three notes are in — the list on the next step is filled in.".to_string());
     }
 
     /// Where the bundled quick box installer sits, if this copy of
@@ -579,169 +562,80 @@ impl WizardApp {
         }
     }
 
-    /// Open the setup file inside the quick box (install step).
-    fn sbie_launch_installer(&mut self) {
-        let Some(layout) = &self.layout else {
-            self.log.push(
-                "Start the quick test box first — the button is on the clean test computer step."
-                    .to_string(),
-            );
-            return;
-        };
-        let Some(start) = crate::sbie_start_exe() else {
-            self.log
-                .push("The quick test box was not found on this computer.".to_string());
-            return;
-        };
-        let Some(name) = std::path::Path::new(self.installer_path.trim())
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-        else {
-            return;
-        };
-        let program = layout.input.join(&name).to_string_lossy().into_owned();
-        let session_id = layout
-            .root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let box_name = portableforge_core::sbie::box_name_for(&session_id);
-        match crate::sbie_run(portableforge_core::sbie::boxed_command(
-            &start,
-            &box_name,
-            &program,
-            &[],
-        )) {
-            Ok(()) => self
-                .log
-                .push("The setup is opening in the quick test box.".to_string()),
-            Err(e) => self.log.push(e),
-        }
-    }
-
-    /// Run a program the person picks inside the quick box
-    /// (try-it-out step: the program they just installed).
-    fn sbie_launch_program(&mut self) {
-        let Some(layout) = &self.layout else {
-            self.log.push(
-                "Start the quick test box first — the button is on the clean test computer step."
-                    .to_string(),
-            );
-            return;
-        };
-        let Some(start) = crate::sbie_start_exe() else {
-            self.log
-                .push("The quick test box was not found on this computer.".to_string());
-            return;
-        };
-        let picked = rfd::FileDialog::new()
-            .set_title("Pick the program to run in the quick test box")
-            .add_filter("Programs", &["exe"])
-            .pick_file();
-        let Some(path) = picked else {
-            return;
-        };
-        let session_id = layout
-            .root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let box_name = portableforge_core::sbie::box_name_for(&session_id);
-        match crate::sbie_run(portableforge_core::sbie::boxed_command(
-            &start,
-            &box_name,
-            &path.to_string_lossy(),
-            &[],
-        )) {
-            Ok(()) => self.log.push(format!(
-                "Opening {} in the quick test box.",
-                path.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "the program".to_string())
-            )),
-            Err(e) => self.log.push(e),
-        }
-    }
-
-    /// Read the three notes in and fill the review — the shared
-    /// ending of every capture, however the notes were made (the
-    /// helper in the safe test box, or the quick box here on the
-    /// host).
     fn finish_capture(&mut self, layout: &portableforge_core::orchestrate::SessionLayout) {
         match portableforge_core::orchestrate::post_capture(layout) {
-            Ok(outcome) => {
-                self.log
-                    .push(format!("Notes read in. {}", outcome.review.summary()));
-                self.review = outcome.review;
-                // Pre-fill the naming step from the program's
-                // own tags — once per capture, and only into
-                // fields the person has not filled themselves.
-                if !self.hints_applied {
-                    let hints = &outcome.hints;
-                    let mut filled: Vec<&str> = Vec::new();
-                    if self.app_name.trim().is_empty() {
-                        if let Some(name) = &hints.display_name {
-                            self.app_name = name.clone();
-                            filled.push("the name");
-                        }
-                    }
-                    if self.publisher.trim().is_empty() {
-                        if let Some(publisher) = &hints.publisher {
-                            self.publisher = publisher.clone();
-                            filled.push("who makes it");
-                        }
-                    }
-                    if self.package_version == "1.0.0.0" {
-                        if let Some(version) = hints
-                            .display_version
-                            .as_deref()
-                            .and_then(portableforge_core::paf::pad_package_version)
-                        {
-                            self.package_version = version;
-                            filled.push("the version");
-                        }
-                    }
-                    if !filled.is_empty() {
-                        self.log.push(format!(
+            Ok(outcome) => self.apply_capture(outcome),
+            Err(error) => self.log.push(error),
+        }
+    }
+
+    fn apply_capture(&mut self, outcome: portableforge_core::orchestrate::CaptureOutcome) {
+        self.log
+            .push(format!("Notes read in. {}", outcome.review.summary()));
+        self.review = outcome.review;
+        // Pre-fill the naming step from the program's
+        // own tags — once per capture, and only into
+        // fields the person has not filled themselves.
+        if !self.hints_applied {
+            let hints = &outcome.hints;
+            let mut filled: Vec<&str> = Vec::new();
+            if self.app_name.trim().is_empty() {
+                if let Some(name) = &hints.display_name {
+                    self.app_name = name.clone();
+                    filled.push("the name");
+                }
+            }
+            if self.publisher.trim().is_empty() {
+                if let Some(publisher) = &hints.publisher {
+                    self.publisher = publisher.clone();
+                    filled.push("who makes it");
+                }
+            }
+            if self.package_version == "1.0.0.0" {
+                if let Some(version) = hints
+                    .display_version
+                    .as_deref()
+                    .and_then(portableforge_core::paf::pad_package_version)
+                {
+                    self.package_version = version;
+                    filled.push("the version");
+                }
+            }
+            if !filled.is_empty() {
+                self.log.push(format!(
                                     "Filled in {} from the program's own tags — you can check and change them on the naming step.",
                                     filled.join(", ")
                                 ));
-                        self.mark_dirty();
-                    }
-                    self.hints_applied = true;
-                }
-                // Start Menu shortcuts are the honest guess
-                // for the main file: the shortcut's name is
-                // usually the program's name.
-                if !outcome.shortcut_candidates.is_empty() {
-                    self.log.push(format!(
+                self.mark_dirty();
+            }
+            self.hints_applied = true;
+        }
+        // Start Menu shortcuts are the honest guess
+        // for the main file: the shortcut's name is
+        // usually the program's name.
+        if !outcome.shortcut_candidates.is_empty() {
+            self.log.push(format!(
                                 "Shortcut found for: {}. The main file is often the same name with .exe on the end.",
                                 outcome.shortcut_candidates.join(", ")
                             ));
-                    if self.main_exe.trim().is_empty() {
-                        self.main_exe = format!("{}.exe", outcome.shortcut_candidates[0]);
-                        self.mark_dirty();
-                    }
-                }
+            if self.main_exe.trim().is_empty() {
+                self.main_exe = format!("{}.exe", outcome.shortcut_candidates[0]);
+                self.mark_dirty();
             }
-            Err(e) => self.log.push(e),
         }
     }
 
-    /// Assemble the package details from the name/sharing steps and
-    /// run the build pipeline into the session's output folder.
-    fn build_now(&mut self) {
+    fn package_metadata(&self) -> Result<portableforge_core::paf::PafMetadata, String> {
+        if let Some(error) = self.verified_metadata_error() {
+            return Err(error.into());
+        }
         let Some(sharing) = self.sharing else {
-            self.log
-                .push("Answer the sharing question first (step 9).".to_string());
-            return;
+            return Err("Answer the sharing question first (step 9).".into());
         };
         if self.main_exe.trim().is_empty() {
-            self.log.push(
-                "Tell us the program's main file name on the naming step (step 8) first."
-                    .to_string(),
+            return Err(
+                "Tell us the program's main file name on the naming step (step 8) first.".into(),
             );
-            return;
         }
         let online = if sharing == SharingAnswer::NotSure {
             let filename = self
@@ -759,22 +653,14 @@ impl WizardApp {
         } else {
             None
         };
-        let distribution = match guide::distribution_for(sharing, online) {
-            Ok(d) => d,
-            Err(e) => {
-                self.log.push(e);
-                return;
-            }
-        };
+        let distribution = guide::distribution_for(sharing, online)?;
         let compact: String = self
             .app_name
             .chars()
             .filter(|c| c.is_ascii_alphanumeric())
             .collect();
         if compact.is_empty() {
-            self.log
-                .push("Give your portable copy a name first (step 8).".to_string());
-            return;
+            return Err("Give your portable copy a name first (step 8).".into());
         }
         let base = compact
             .strip_suffix("Portable")
@@ -785,12 +671,12 @@ impl WizardApp {
         } else {
             format!("{compact}Portable")
         };
-        let meta = portableforge_core::paf::PafMetadata {
+        Ok(portableforge_core::paf::PafMetadata {
             name: self.app_name.trim().to_string(),
-            app_id: app_id.clone(),
+            app_id,
             base_app_name: base,
             publisher: self.publisher.trim().to_string(),
-            homepage: String::new(),
+            homepage: self.homepage.trim().to_string(),
             category: "Utilities".to_string(),
             description: self.description.trim().to_string(),
             language: "English".to_string(),
@@ -807,10 +693,20 @@ impl WizardApp {
             main_exe: self.main_exe.trim().to_string(),
             main_exe_64bit: None,
             distribution,
+        })
+    }
+
+    fn build_now(&mut self) {
+        let meta = match self.package_metadata() {
+            Ok(meta) => meta,
+            Err(error) => {
+                self.log.push(error);
+                return;
+            }
         };
         let out_root = match &self.layout {
-            Some(layout) => layout.output.join(&app_id),
-            None => sessions_base().join(&app_id),
+            Some(layout) => layout.output.join(&meta.app_id),
+            None => sessions_base().join(&meta.app_id),
         };
         let harvest = self
             .layout
@@ -863,11 +759,17 @@ impl WizardApp {
     /// The run so far, as a draft for the settings file.
     fn current_draft(&self) -> WizardDraft {
         WizardDraft {
-            step: STEPS[self.step.min(STEPS.len() - 1)].id.to_string(),
+            step: if self.use_verified_capture() {
+                "pick"
+            } else {
+                STEPS[self.step].id
+            }
+            .to_string(),
             installer_path: self.installer_path.clone(),
             app_name: self.app_name.clone(),
             description: self.description.clone(),
             publisher: self.publisher.clone(),
+            homepage: self.homepage.clone(),
             main_exe: self.main_exe.clone(),
             package_version: self.package_version.clone(),
             online_url: self.online_url.clone(),
@@ -897,9 +799,9 @@ impl WizardApp {
         // changed the run snapshot the draft first (see mark_dirty);
         // callers clearing the draft (Finish, Start fresh) rely on
         // this not putting it back.
+        self.last_save = std::time::Instant::now();
         if settings::save(&self.settings_path, &self.settings).is_ok() {
             self.settings_dirty = false;
-            self.last_save = std::time::Instant::now();
         }
     }
 
@@ -912,6 +814,7 @@ impl WizardApp {
         self.app_name = draft.app_name;
         self.description = draft.description;
         self.publisher = draft.publisher;
+        self.homepage = draft.homepage;
         self.main_exe = draft.main_exe;
         if !draft.package_version.trim().is_empty() {
             self.package_version = draft.package_version;
@@ -940,9 +843,35 @@ impl WizardApp {
 
     /// One step back. Nothing is lost.
     fn go_back(&mut self) {
-        if self.step > 0 {
-            self.step -= 1;
-            self.mark_dirty();
+        if !self.can_go_back() {
+            return;
+        }
+        self.step = match (self.use_verified_capture(), self.step) {
+            (true, 2) if self.profile_flow.selected_capture => {
+                self.profile_flow.selected_capture = false;
+                0
+            }
+            (true, 6) => 2,
+            (_, step) => step - 1,
+        };
+        self.mark_dirty();
+    }
+
+    fn can_go_back(&self) -> bool {
+        self.step > 0
+            && !self.profile_flow.busy()
+            && !self.profile_flow.profile_saved()
+            && !(self.use_verified_capture() && self.step == 2 && self.profile_flow.captured)
+    }
+
+    fn can_advance(&self) -> bool {
+        if self.profile_flow.busy() {
+            return false;
+        }
+        match (self.use_verified_capture(), self.step) {
+            (true, 2) => self.profile_flow.captured,
+            (true, 9) => self.profile_flow.profile_saved(),
+            _ => true,
         }
     }
 
@@ -951,6 +880,18 @@ impl WizardApp {
     /// the log, never a trap). Returns true when the step moved or
     /// the run finished.
     fn advance(&mut self) -> bool {
+        if !self.can_advance() {
+            return false;
+        }
+        if self.use_verified_capture() && self.step == 2 {
+            self.step = 6;
+            self.mark_dirty();
+            return true;
+        }
+        if self.use_verified_capture() && self.step == 9 {
+            self.step = 11;
+            return true;
+        }
         let blocked = match STEPS[self.step].id {
             "pick" => {
                 if self.installer_path.trim().is_empty() {
@@ -983,6 +924,9 @@ impl WizardApp {
                             .to_string(),
                     );
                     true
+                } else if let Some(error) = self.verified_metadata_error() {
+                    self.log.push(error.into());
+                    true
                 } else {
                     false
                 }
@@ -999,7 +943,13 @@ impl WizardApp {
                 }
             }
             "sharing" => {
-                if self.sharing.is_none() {
+                if self.use_verified_capture()
+                    && matches!(self.sharing, None | Some(SharingAnswer::NotSure))
+                {
+                    self.log
+                        .push("Confirm redistribution rights before saving a profile.".into());
+                    true
+                } else if self.sharing.is_none() {
                     self.log.push(
                         "Pick one answer above — 'I am not sure' is a good, safe answer."
                             .to_string(),
@@ -1047,17 +997,25 @@ impl WizardApp {
 impl eframe::App for WizardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.set_style(polished_style());
-        ctx.set_zoom_factor(self.settings.text_scale());
+        self.apply_layout_zoom(ctx);
         if self.finished {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        self.poll_profile_work();
+        if self.profile_flow.busy() && ctx.input(|input| input.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
         self.persist_if_due();
+        if self.profile_flow.replay_open {
+            self.show_profile_replay(ctx);
+            return;
+        }
 
         // Keyboard: Enter continues and Escape goes back — but never
         // while the person is typing in a box, where those keys are
         // theirs.
-        let typing = ctx.memory(|m| m.focused().is_some());
-        if !typing {
+        let typing = ctx.memory(|m| m.focused().is_some() || m.top_modal_layer().is_some());
+        if !typing && !self.show_details {
             if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.advance();
             } else if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1081,124 +1039,64 @@ impl eframe::App for WizardApp {
             }
         }
 
-        let step = &STEPS[self.step.min(STEPS.len() - 1)];
-        egui::TopBottomPanel::top("progress").show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Step {} of {} · {}%",
-                        self.step + 1,
-                        STEPS.len(),
-                        (((self.step as f32 + 1.0) / STEPS.len() as f32) * 100.0).round() as u32
-                    ))
-                    .color(color(guide::theme::TEXT_MUTED)),
-                );
-                ui.label(
-                    egui::RichText::new("PortableForge")
-                        .color(color(guide::theme::ACCENT_RED))
-                        .strong(),
-                );
-                ui.label(
-                    egui::RichText::new(format!("version {}", env!("CARGO_PKG_VERSION")))
-                        .color(color(guide::theme::TEXT_FAINT)),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let scale = self.settings.text_scale();
-                    for (label, value) in [
-                        ("Extra large", 1.5f32),
-                        ("Large", 1.25),
-                        ("Standard", 1.0),
-                    ] {
-                        if ui
-                            .selectable_label(scale == value, label)
-                            .on_hover_text("Make all the text in this window bigger or smaller. Your choice is remembered.")
-                            .clicked()
-                        {
-                            self.settings.text_scale = value;
-                            self.settings_dirty = true;
-                        }
-                    }
-                    ui.label(
-                        egui::RichText::new("Text size:")
-                            .color(color(guide::theme::TEXT_MUTED)),
-                    );
-                });
-            });
-            // A slim progress track whose fill glides to the new
-            // step instead of jumping — small, but it makes the
-            // whole window feel calmer.
-            let frac = (self.step as f32 + 1.0) / STEPS.len() as f32;
-            let shown = ctx.animate_value_with_time(egui::Id::new("pf-progress"), frac, 0.35);
-            ui.add_space(8.0);
-            let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::hover());
-            let painter = ui.painter_at(rect);
-            painter.rect_filled(
-                rect,
-                egui::CornerRadius::same(3),
-                color(guide::theme::PANEL),
-            );
-            let fill_w = rect.width() * shown.clamp(0.0, 1.0);
-            if fill_w > 0.5 {
-                let mut fill = rect;
-                fill.max.x = rect.min.x + fill_w;
-                painter.rect_filled(
-                    fill,
-                    egui::CornerRadius::same(3),
-                    color(guide::theme::ACCENT_RED),
-                );
-            }
-            ui.add_space(8.0);
-            ui.separator();
-        });
-
+        let step = &STEPS[self.step];
+        let verified = self.use_verified_capture();
+        let (title, what_happens, what_you_do) = match (verified, step.id) {
+            (_, "pick") => (
+                "Choose a setup file",
+                "Browse, paste a path, or drag in a setup file.",
+                "",
+            ),
+            (true, "clean") => (
+                "Capture with Sandboxie-Plus",
+                "Run setup and the installed app in a dedicated Sandboxie-Plus box.",
+                "Review opens after cleanup is confirmed.",
+            ),
+            (true, "changes") => (
+                "Review captured changes",
+                "Review the location and suggested fix for each change.",
+                "Select the settings the portable copy should keep.",
+            ),
+            (true, "name") => (
+                "Name your portable copy",
+                "Review the app details that appear in the installer.",
+                "Enter a publisher, homepage and short description.",
+            ),
+            (true, "sharing") => (
+                "Confirm redistribution rights",
+                "Confirm that you have permission to include the app files.",
+                "A saved profile contains a copy of the app.",
+            ),
+            (true, "build") => (
+                "Save a reusable profile",
+                "Save the app files and fixes you approved.",
+                "Use the saved profile to build again from the same setup file.",
+            ),
+            (true, "done") => (
+                "Your profile is ready",
+                "The reviewed profile is saved.",
+                "Build installer becomes available when the approval is saved.",
+            ),
+            _ => (step.title, step.what_happens, step.what_you_do),
+        };
+        self.show_header(ctx, step.title, Some((self.step + 1, STEPS.len())));
+        self.show_navigation(ctx, step.id, verified);
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin {
-                    left: 26,
-                    right: 26,
-                    top: 18,
-                    bottom: 14,
-                }),
-            )
+            .frame(dense::content_frame(ctx))
             .show(ctx, |ui| {
-            ui.heading(egui::RichText::new(step.title).size(30.0));
-            ui.add_space(6.0);
-            let (rule, _) =
-                ui.allocate_exact_size(egui::vec2(46.0, 3.0), egui::Sense::hover());
-            ui.painter_at(rule).rect_filled(
-                rule,
-                egui::CornerRadius::same(2),
-                color(guide::theme::ACCENT_RED),
-            );
-            ui.add_space(10.0);
-            ui.label(egui::RichText::new(step.what_happens).size(16.0));
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(step.what_you_do)
-                    .size(16.0)
-                    .color(color(guide::theme::TEXT_MUTED)),
-            );
-            ui.add_space(12.0);
-
-            // The step body scrolls: a tall step (the safety check
-            // with several fixes, a long changes list) used to run
-            // past the bottom of the window with no way to reach
-            // its end (field run, 2026-10-25 — the mode line and
-            // the use-it-anyway choice were below the fold).
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
+            texture::paint(ui);
+            if self.show_details {
+                self.show_step_details(ui, step);
+                return;
+            }
+            dense::heading(ui, title, what_happens);
+            if !what_you_do.is_empty() {
+                ui.label(egui::RichText::new(what_you_do).color(color(guide::theme::TEXT_MUTED)));
+            }
             // An unfinished run from last time is offered, never forced.
-            if self.resume_offer {
-                ui.label(
-                    egui::RichText::new(
-                        "You have an unfinished run from last time. You can pick it up where you left it, or start again.",
-                    )
-                    .color(color(guide::theme::ACCENT_RED)),
-                );
+            if self.resume_offer && step.id == "pick" {
                 ui.horizontal(|ui| {
+                    ui.colored_label(color(ALERT_TEXT), "Unfinished run");
                     if ui
                         .button("Pick up where I left off")
                         .on_hover_text("Fill the steps back in with what you had entered.")
@@ -1214,7 +1112,6 @@ impl eframe::App for WizardApp {
                         self.discard_draft();
                     }
                 });
-                ui.add_space(10.0);
             }
 
             // Compute the safety report the first time its step shows.
@@ -1231,11 +1128,12 @@ impl eframe::App for WizardApp {
                     let mut override_change: Option<bool> = None;
                     if let Some(report) = &self.preflight {
                         card().show(ui, |ui| {
-                        for check in &report.checks {
+                        for index in dense::page(ui, &mut self.safety_page, report.checks.len(), 1, "Check") {
+                            let check = &report.checks[index];
                             let col = if check.ok {
                                 color(guide::theme::TEXT)
                             } else {
-                                color(guide::theme::ACCENT_RED)
+                                color(ALERT_TEXT)
                             };
                             // The tick / cross is DRAWN, not a
                             // character: the bundled font has no
@@ -1381,25 +1279,49 @@ impl eframe::App for WizardApp {
                             .color(color(guide::theme::TEXT_MUTED)),
                         );
                     } else {
-                        ui.label(self.review.summary());
+                        ui.label(dense::review_counts(&self.review));
                         let mut items = std::mem::take(&mut self.review.items);
-                        for item in items.iter_mut() {
+                        let per_page = ((ui.available_height() - 62.0) / 132.0).floor().max(1.0) as usize;
+                        let range = dense::page(ui, &mut self.review_page, items.len(), per_page, "Finding");
+                        for index in range {
+                            let item = &mut items[index];
+                            card().show(ui, |ui| {
                             let (title, body) = guide::plain_card(&item.classification.finding);
                             ui.label(egui::RichText::new(title).strong());
                             ui.label(
                                 egui::RichText::new(body)
                                     .color(color(guide::theme::TEXT_MUTED)),
                             );
+                            if verified {
+                                use portableforge_core::classify::Finding;
+
+                                match &item.classification.finding {
+                                    Finding::DirectoriesMove { host_pattern, .. } => ui.label(host_pattern),
+                                    Finding::FilesMove { host_pattern, data_target } => {
+                                        ui.label(format!("{host_pattern}\\{data_target}"))
+                                    }
+                                    Finding::RegistryKey { key }
+                                    | Finding::AssociationCandidate { key }
+                                    | Finding::UninstallMetadata { key } => ui.label(key),
+                                    Finding::AppFile { path }
+                                    | Finding::FileWriteRewrite { path, .. } => ui.label(path),
+                                    Finding::RedFlag { detail, .. } => ui.label(detail),
+                                };
+                            }
                             match &mut item.decision {
                                 portableforge_core::review::Decision::Fix { on } => {
-                                    ui.checkbox(on, "Use this fix");
+                                    if verified && !self.profile_flow.review_fix_supported(&item.classification.finding) {
+                                        ui.label("This change will be excluded.");
+                                    } else {
+                                        ui.checkbox(on, "Apply this fix");
+                                    }
                                 }
                                 portableforge_core::review::Decision::Acknowledge { seen } => {
-                                    ui.checkbox(seen, "I understand — continue anyway");
+                                    ui.checkbox(seen, "Acknowledge warning");
                                 }
                                 portableforge_core::review::Decision::Info => {}
                             }
-                            ui.add_space(4.0);
+                            });
                         }
                         self.review.items = items;
                         ui.add_space(4.0);
@@ -1426,7 +1348,7 @@ impl eframe::App for WizardApp {
                                     }
                                 }
                             }
-                            if ui
+                            if !verified && ui
                                 .button("Load choices from a file")
                                 .on_hover_text("Bring back choices saved earlier and apply them to this list.")
                                 .clicked()
@@ -1458,26 +1380,24 @@ impl eframe::App for WizardApp {
                 }
                 "pick" => {
                     if !self.settings.welcomed {
-                        for line in portableforge_core::guide::WELCOME {
-                            ui.label(*line);
-                        }
-                        if ui
-                            .button("Got it")
-                            .on_hover_text("Hide this welcome. It only shows the first time.")
-                            .clicked()
-                        {
-                            self.settings.welcomed = true;
-                            self.settings_dirty = true;
-                            self.persist_now();
-                        }
-                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Got it").on_hover_text("Dismiss the welcome.").clicked() {
+                                self.settings.welcomed = true;
+                                self.settings_dirty = true;
+                                self.persist_now();
+                            }
+                            dense::view_text(ui, "About this wizard", "Welcome to PortableForge",
+                                &guide::WELCOME.join("\n"), true);
+                        });
                     }
-                    ui.label("Where is the program's setup file?");
+                    let setup_label = ui.label("Where is the program's setup file?");
                     ui.horizontal(|ui| {
-                        if ui
-                            .text_edit_singleline(&mut self.installer_path)
+                        let width = dense::width_with_button(ui, "Browse…");
+                        let (response, view) = dense::path_edit(ui, &mut self.installer_path, width);
+                        if response
+                            .labelled_by(setup_label.id)
                             .on_hover_text(
-                                "Type or paste the full path of the setup file you downloaded, or use Browse.",
+                                "Type or paste the path, use Browse, or drag the setup file here.",
                             )
                             .changed()
                         {
@@ -1502,11 +1422,8 @@ impl eframe::App for WizardApp {
                                 self.mark_dirty();
                             }
                         }
+                        dense::view_text(ui, "View path", "Setup path", &self.installer_path, view);
                     });
-                    ui.label(
-                        egui::RichText::new("You can also drag the setup file onto this window.")
-                            .color(color(guide::theme::TEXT_MUTED)),
-                    );
                     // Say plainly what the typed path points at.
                     let typed = self.installer_path.trim().to_string();
                     if !typed.is_empty() {
@@ -1527,7 +1444,7 @@ impl eframe::App for WizardApp {
                                     egui::RichText::new(
                                         "That path is a folder — pick the setup file inside it.",
                                     )
-                                    .color(color(guide::theme::ACCENT_RED)),
+                                    .color(color(ALERT_TEXT)),
                                 );
                             }
                             Err(_) => {
@@ -1540,6 +1457,15 @@ impl eframe::App for WizardApp {
                             }
                         }
                     }
+                    ui.add_space(8.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Capture with Sandboxie-Plus").clicked() {
+                            self.enter_verified_capture();
+                        }
+                        if ui.button("Rebuild from a saved profile").clicked() {
+                            self.open_profile_replay(false);
+                        }
+                    });
                     // Files this wizard has packaged lately, one tap away.
                     let recents = self.settings.recent_installers.clone();
                     let others: Vec<&String> =
@@ -1550,7 +1476,8 @@ impl eframe::App for WizardApp {
                             egui::RichText::new("Setup files you used lately:")
                                 .color(color(guide::theme::TEXT_MUTED)),
                         );
-                        for path in others {
+                        for index in dense::page(ui, &mut self.recent_page, others.len(), 1, "File") {
+                            let path = others[index];
                             let name = std::path::Path::new(path)
                                 .file_name()
                                 .map(|n| n.to_string_lossy().into_owned())
@@ -1567,15 +1494,8 @@ impl eframe::App for WizardApp {
                     }
                 }
                 "clean" => {
-                    let quick = self.session_mode
-                        == Some(portableforge_core::wsb::SandboxMode::Sandboxie)
-                        || self
-                            .preflight
-                            .as_ref()
-                            .map(|r| r.best_mode)
-                            == Some(portableforge_core::wsb::SandboxMode::Sandboxie);
-                    if quick {
-                        ui.label("The quick test box runs on this computer and needs nothing set here — it starts in seconds and keeps everything the program writes in one sealed folder.");
+                    if verified {
+                        self.show_verified_capture(ui);
                     } else {
                         ui.label("How much memory should the test box get?");
                         ui.horizontal(|ui| {
@@ -1600,51 +1520,17 @@ impl eframe::App for WizardApp {
                                 "Share the clipboard with the test box (off is safer)",
                             );
                         });
-                    }
-                    ui.add_space(4.0);
-                    if ui
-                        .button(if quick {
-                            "Start the quick test box"
-                        } else {
-                            "Start the test box"
-                        })
-                        .on_hover_text("Make the work folder and open the test box. The setup file and our helper go inside; nothing touches your real computer.")
-                        .clicked()
-                    {
-                        self.start_test_box();
-                    }
-                    ui.add_space(4.0);
-                    if ui
-                        .button("Check on the test box")
-                        .on_hover_text("Look at what the test box has done so far.")
-                        .clicked()
-                    {
-                        self.check_test_box();
+                        ui.add_space(4.0);
+                        if ui.button("Start the test box").clicked() {
+                            self.start_test_box();
+                        }
+                        ui.add_space(4.0);
+                        if ui.button("Check on the test box").clicked() {
+                            self.check_test_box();
+                        }
                     }
                 }
                 "install" | "try" | "close" => {
-                    let quick =
-                        self.session_mode == Some(portableforge_core::wsb::SandboxMode::Sandboxie);
-                    if quick && step.id == "install" {
-                        if ui
-                            .button("Open the setup in the quick test box")
-                            .on_hover_text("Run the setup file inside the quick test box. Click through it there, the way you normally would — everything it writes is caught in the sealed folder.")
-                            .clicked()
-                        {
-                            self.sbie_launch_installer();
-                        }
-                        ui.add_space(4.0);
-                    }
-                    if quick && step.id == "try" {
-                        if ui
-                            .button("Run a program in the quick test box")
-                            .on_hover_text("Pick the program you just installed (its main file) and it opens inside the quick test box, so trying it is captured too.")
-                            .clicked()
-                        {
-                            self.sbie_launch_program();
-                        }
-                        ui.add_space(4.0);
-                    }
                     if ui
                         .button("Check on the test box")
                         .on_hover_text("Ask the test box for its next note and look at what it has done so far. When all three notes are in, the list on the next steps fills itself in.")
@@ -1653,6 +1539,8 @@ impl eframe::App for WizardApp {
                         self.check_test_box();
                     }
                 }
+                "build" if verified => self.show_profile_save(ui),
+                "done" if verified => self.show_saved_profile(ui),
                 "build" => {
                     if ui
                         .button("Build my portable copy now")
@@ -1662,13 +1550,12 @@ impl eframe::App for WizardApp {
                         self.build_now();
                     }
                     if let Some(text) = &self.build_summary {
-                        ui.add_space(4.0);
-                        ui.label(text.clone());
+                        dense::view_text(ui, "Show build report", "Build report", text, true);
                     }
                 }
                 "test" | "done" => {
                     if let Some(text) = &self.build_summary {
-                        ui.label(text.clone());
+                        dense::view_text(ui, "Show build report", "Build report", text, true);
                     }
                     if step.id == "test" {
                         ui.add_space(4.0);
@@ -1680,8 +1567,7 @@ impl eframe::App for WizardApp {
                             self.check_leak_result();
                         }
                         if let Some(text) = &self.leak_result {
-                            ui.add_space(4.0);
-                            ui.label(text.clone());
+                            dense::view_text(ui, "Show test result", "Test result", text, true);
                         }
                     }
                     if step.id == "done" {
@@ -1719,91 +1605,39 @@ impl eframe::App for WizardApp {
                     }
                 }
                 "name" => {
-                    ui.label("Name for your portable copy");
-                    if ui.text_edit_singleline(&mut self.app_name).changed() {
-                        self.mark_dirty();
-                    }
-                    if self.app_name.trim().is_empty() {
-                        ui.label(
-                            egui::RichText::new("A name is needed before you can continue.")
-                                .color(color(guide::theme::TEXT_MUTED)),
-                        );
-                    }
-                    ui.label("Who makes the program");
-                    if ui.text_edit_singleline(&mut self.publisher).changed() {
-                        self.mark_dirty();
-                    }
-                    ui.label("The program's main file name (ends in .exe)");
-                    if ui.text_edit_singleline(&mut self.main_exe)
-                        .on_hover_text("The file that starts the program, as it appears inside its folder — for example widget.exe. It was in the list of things the program installed.")
-                        .changed()
-                    {
-                        self.mark_dirty();
-                    }
-                    let exe = self.main_exe.trim();
-                    if exe.is_empty() {
-                        ui.label(
-                            egui::RichText::new("The main file name is needed before you can continue.")
-                                .color(color(guide::theme::TEXT_MUTED)),
-                        );
-                    } else if exe.contains('\\') || exe.contains('/') {
-                        ui.label(
-                            egui::RichText::new("Just the file name — not a whole path.")
-                                .color(color(guide::theme::ACCENT_RED)),
-                        );
-                    } else if !exe.to_ascii_lowercase().ends_with(".exe") {
-                        ui.label(
-                            egui::RichText::new("That doesn't end in .exe — the main file nearly always does.")
-                                .color(color(guide::theme::ACCENT_RED)),
-                        );
-                    }
-                    ui.label("Version, as four numbers (like 1.0.0.0)");
-                    if ui.text_edit_singleline(&mut self.package_version).changed() {
-                        self.mark_dirty();
-                    }
-                    if !portableforge_core::paf::valid_package_version(
-                        self.package_version.trim(),
-                    ) {
-                        ui.label(
-                            egui::RichText::new("Use four numbers with dots between them, like 1.0.0.0.")
-                                .color(color(guide::theme::ACCENT_RED)),
-                        );
-                    }
-                    ui.label("A short description");
-                    if ui.text_edit_multiline(&mut self.description).changed() {
-                        self.mark_dirty();
-                    }
-                    ui.label("Program picture (not required — a picture file ending in .ico)");
-                    ui.horizontal(|ui| {
-                        if ui.text_edit_singleline(&mut self.icon_path).changed() {
-                            self.mark_dirty();
-                        }
-                        if ui.button("Browse…").clicked() {
-                            let mut dialog = rfd::FileDialog::new()
-                                .set_title("Pick the program's picture file")
-                                .add_filter("Picture files", &["ico"]);
-                            if let Some(dir) = picker_start_dir(&self.icon_path) {
-                                dialog = dialog.set_directory(dir);
-                            }
-                            if let Some(path) = dialog.pick_file() {
-                                self.icon_path = path.display().to_string();
-                                self.mark_dirty();
-                            }
-                        }
+                    let mut changed = false;
+                    ui.columns(2, |columns| {
+                        changed |= dense::text_field(&mut columns[0], "Portable app name", &mut self.app_name);
+                        changed |= dense::text_field(&mut columns[1], "Publisher", &mut self.publisher);
                     });
-                    if !self.icon_path.trim().is_empty()
-                        && !std::path::Path::new(self.icon_path.trim()).is_file()
-                    {
-                        ui.label(
-                            egui::RichText::new(
-                                "That picture file can't be found — check the name, or leave it blank.",
-                            )
-                            .color(color(guide::theme::ACCENT_RED)),
-                        );
+                    ui.columns(2, |columns| {
+                        changed |= dense::text_field(&mut columns[0], "Main app file (.exe)", &mut self.main_exe);
+                        changed |= dense::text_field(&mut columns[1], "Package version (e.g. 1.0.0.0)", &mut self.package_version);
+                    });
+                    if verified {
+                        changed |= dense::text_field(ui, "App homepage (HTTP or HTTPS)", &mut self.homepage);
+                    }
+                    let description = ui.label("App description");
+                    changed |= ui.add(egui::TextEdit::multiline(&mut self.description)
+                        .desired_width(f32::INFINITY).desired_rows(2))
+                        .labelled_by(description.id).changed();
+                    if changed {
+                        self.mark_dirty();
+                    }
+                    if let Some(error) = self.verified_metadata_error() {
+                        ui.colored_label(color(ALERT_TEXT), error);
+                    } else if !portableforge_core::paf::valid_package_version(self.package_version.trim()) {
+                        ui.colored_label(color(ALERT_TEXT), "Use four numbers with dots between them, like 1.0.0.0.");
+                    }
+                    if !verified && self.show_icon_field(ui) {
+                        self.mark_dirty();
                     }
                 }
                 "sharing" => {
                     for option in SHARING_ANSWERS {
+                        if verified && option.answer == SharingAnswer::NotSure {
+                            continue;
+                        }
                         let selected = self.sharing == Some(option.answer);
                         if ui
                             .radio(selected, option.label)
@@ -1818,7 +1652,7 @@ impl eframe::App for WizardApp {
                         );
                         ui.add_space(4.0);
                     }
-                    if self.sharing == Some(SharingAnswer::NotSure) {
+                    if !verified && self.sharing == Some(SharingAnswer::NotSure) {
                         ui.add_space(4.0);
                         ui.label("Where the maker offers the original program (a web address starting https://)");
                         if ui.text_edit_singleline(&mut self.online_url).changed() {
@@ -1826,7 +1660,7 @@ impl eframe::App for WizardApp {
                         }
                         ui.label("That file's fingerprint — 64 letters and numbers given by the maker, if they publish one");
                         if ui.text_edit_singleline(&mut self.online_sha)
-                            .on_hover_text("This is how the finished copy checks the download is genuine. It is called a SHA-256 fingerprint.")
+                            .on_hover_text("The finished copy checks this fingerprint against the file it downloads.")
                             .changed()
                         {
                             self.mark_dirty();
@@ -1836,72 +1670,7 @@ impl eframe::App for WizardApp {
                 _ => {}
             }
 
-            ui.add_space(8.0);
-            ui.checkbox(&mut self.show_details, "Show details")
-                .on_hover_text(
-                    "Technical details, for people who want them. You never need these to finish.",
-                );
-            if self.show_details {
-                ui.label(
-                    egui::RichText::new(step.expert_detail)
-                        .color(color(guide::theme::TEXT_FAINT))
-                        .monospace(),
-                );
-            }
-
-                });
             let _ = self.phase();
-            });
-
-        // Pinned footer: navigation always in the same place,
-        // Continue as the one filled accent button, and the latest
-        // plain status line under it.
-        egui::TopBottomPanel::bottom("log").show(ctx, |ui| {
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if self.step > 0
-                    && ui
-                        .add(egui::Button::new("Back").min_size(egui::vec2(110.0, 38.0)))
-                        .on_hover_text("Go back one step. Nothing is lost.")
-                        .clicked()
-                {
-                    self.go_back();
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let next_label = if self.step + 1 >= STEPS.len() {
-                        "Finish"
-                    } else {
-                        "Continue"
-                    };
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(next_label)
-                                    .strong()
-                                    .color(color(guide::theme::TEXT)),
-                            )
-                            .fill(color(guide::theme::PRIMARY_RED))
-                            .min_size(egui::vec2(160.0, 38.0)),
-                        )
-                        .on_hover_text("Go to the next step.")
-                        .clicked()
-                    {
-                        // Each step checks its own promise before letting
-                        // the person continue — a plain refusal, never a
-                        // trap. Enter on the keyboard takes this same path.
-                        self.advance();
-                    }
-                });
-            });
-            if let Some(last) = self.log.last() {
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(last.clone())
-                        .size(12.5)
-                        .color(color(guide::theme::TEXT_FAINT)),
-                );
-            }
-            ui.add_space(8.0);
         });
     }
 }
@@ -1909,8 +1678,8 @@ impl eframe::App for WizardApp {
 pub fn run_gui() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([880.0, 640.0])
-            .with_min_inner_size([640.0, 480.0])
+            .with_inner_size([680.0, 480.0])
+            .with_min_inner_size(dense::MIN_CONTENT)
             .with_title("PortableForge"),
         ..Default::default()
     };
@@ -1948,10 +1717,15 @@ mod tests {
         let src = src.split("fn wizard_strings_stay_plain").next().unwrap();
         // Strip // line comments.
         let mut cleaned = String::new();
-        for line in src.lines() {
-            let cut = line.find("//").map(|i| &line[..i]).unwrap_or(line);
-            cleaned.push_str(cut);
-            cleaned.push('\n');
+        for line in src
+            .lines()
+            .chain(include_str!("wizard/profiles.rs").lines())
+            .chain(include_str!("wizard/dense.rs").lines())
+        {
+            if !line.trim_start().starts_with("//") {
+                cleaned.push_str(line);
+                cleaned.push('\n');
+            }
         }
         // Extract string literals (plain and raw).
         let bytes = cleaned.as_bytes();
@@ -2012,7 +1786,11 @@ mod tests {
             if allow.iter().any(|a| lit.contains(a)) {
                 continue;
             }
-            let lower = lit.to_ascii_lowercase();
+            let lower = lit
+                .to_ascii_lowercase()
+                .replace("sandboxie-plus", "")
+                .replace("launcher generator", "")
+                .replace("sha-256", "");
             for banned in portableforge_core::guide::BANNED_IN_PRIMARY {
                 if lower.contains(banned) {
                     failures.push(format!("'{banned}' in: {lit}"));

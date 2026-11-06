@@ -65,7 +65,10 @@ pub struct ProfileBuildEvidence {
 pub(crate) struct CompileApproval<'a> {
     pub evidence: ProfileBuildEvidence,
     pub verify_staged: &'a dyn Fn(&Path) -> Result<(), String>,
+    pub verify_tool_support: Option<VerifyToolSupport>,
 }
+
+pub(crate) type VerifyToolSupport = fn(&Path) -> Result<(), String>;
 
 #[derive(Debug, Serialize)]
 pub struct BuildStep {
@@ -113,6 +116,12 @@ pub(crate) fn compile_installer_checked(
     }
 
     check_tools(&tool_root)?;
+    if let Some(verify_support) = approval
+        .as_ref()
+        .and_then(|approval| approval.verify_tool_support)
+    {
+        verify_support(&tool_root)?;
+    }
     // Reserve the entire run directory with a single exclusive create. A failed
     // attempt retains its work and cannot be mistaken for a fresh attempt.
     fs::create_dir(&output).map_err(|e| {
@@ -172,6 +181,15 @@ fn compile_in(
     }
     let appinfo = stage.join("App/AppInfo");
     let (metadata, installer_ini) = preflight_package(&stage)?;
+    let verify_support = approval
+        .as_ref()
+        .and_then(|approval| approval.verify_tool_support);
+    #[cfg(target_arch = "x86_64")]
+    if verify_support.is_some() {
+        preflight_wizard_details(&metadata.appinfo).map_err(|error| {
+            format!("{error} Save a new reviewed profile with these details before rebuilding.")
+        })?;
+    }
     if metadata.app_id != initial.app_id {
         return Err("The package changed while it was being copied.".into());
     }
@@ -190,6 +208,9 @@ fn compile_in(
     copy_new_file(&tool_root.join(MAKER), &staged_tools.join(MAKER))?;
     copy_tree(&tool_root.join("App"), &staged_tools.join("App"))?;
     check_tools(&staged_tools)?;
+    if let Some(verify_support) = verify_support {
+        verify_support(&staged_tools)?;
+    }
     let maker = run_step(
         &staged_tools.join(MAKER),
         vec![stage.clone()],
@@ -213,6 +234,9 @@ fn compile_in(
         format!("Could not remove the first installer from the working folder: {e}")
     })?;
     check_tools(&staged_tools)?;
+    if let Some(verify_support) = verify_support {
+        verify_support(&staged_tools)?;
+    }
     let compiler = run_step(
         &staged_tools.join(COMPILER),
         vec![PathBuf::from("/NOCONFIG"), script],
@@ -306,6 +330,71 @@ pub(crate) fn preflight_profile_package(stage: &Path) -> Result<String, String> 
     Ok(package.base_app_name)
 }
 
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn preflight_generated_settings(appinfo: &str, installer: &str) -> Result<(), String> {
+    package_settings(appinfo)?;
+    preflight_wizard_details(appinfo)?;
+    installer_settings(installer)?;
+    Ok(())
+}
+
+// Installer 3.9.19 can prompt for these fields even in a positional build.
+// The package parser already validates all other prompted app fields.
+#[cfg(target_arch = "x86_64")]
+fn preflight_wizard_details(appinfo: &str) -> Result<(), String> {
+    use super::{read_ini, value, APPINFO_FIELDS};
+
+    let fields = read_ini(appinfo, APPINFO_FIELDS)?;
+    if value(&fields, "details", "publisher").is_empty() {
+        return Err("Enter the application's Publisher for an unattended build.".into());
+    }
+    if !valid_homepage(value(&fields, "details", "homepage")) {
+        return Err("Enter the application's Homepage as an HTTP(S) address or a domain with an optional path.".into());
+    }
+    if value(&fields, "details", "description").is_empty() {
+        return Err("Enter the application's Description for an unattended build.".into());
+    }
+    Ok(())
+}
+
+/// Accept a website address in the form used by PortableApps.com metadata.
+#[cfg(target_arch = "x86_64")]
+pub fn valid_homepage(homepage: &str) -> bool {
+    let homepage = homepage.trim();
+    if !homepage
+        .bytes()
+        .all(|c| c.is_ascii_graphic() && !b"\\\"'$`<>".contains(&c))
+    {
+        return false;
+    }
+    let address = if let Some((scheme, rest)) = homepage.split_once("://") {
+        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+            return false;
+        }
+        rest
+    } else {
+        homepage
+    };
+    let authority = address.split(['/', '?', '#']).next().unwrap_or_default();
+    let domain = if let Some((domain, port)) = authority.split_once(':') {
+        if !port.parse::<u16>().is_ok_and(|port| port > 0) {
+            return false;
+        }
+        domain
+    } else {
+        authority
+    };
+    domain.len() <= 253
+        && domain.contains('.')
+        && domain.split('.').all(|part| {
+            !part.is_empty()
+                && part.len() <= 63
+                && !part.starts_with('-')
+                && !part.ends_with('-')
+                && part.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        })
+}
+
 pub(crate) fn within(path: &Path, root: &Path) -> bool {
     path.components().zip(root.components()).all(|(a, b)| {
         a.as_os_str()
@@ -363,7 +452,7 @@ fn entries(path: &Path) -> Result<fs::ReadDir, String> {
     fs::read_dir(path).map_err(|e| format!("Could not list {}: {e}", path.display()))
 }
 
-fn copy_new_file(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn copy_new_file(source: &Path, destination: &Path) -> Result<(), String> {
     fn copy(source: &Path, destination: &Path) -> io::Result<()> {
         let mut input = File::open(source)?;
         // Fail closed when a case-sensitive source contains names that collide
@@ -521,7 +610,7 @@ fn find_artifact(work: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn run_step(
+pub(crate) fn run_step(
     executable: &Path,
     arguments: Vec<PathBuf>,
     cwd: &Path,

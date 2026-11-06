@@ -1,53 +1,46 @@
 ## TL;DR
 
-PortableForge turns a normal Windows program into a **portable** one — a single file you can put on a USB stick, run on any computer, and take your settings with you. It does the whole job for you, step by step, in plain language. You never write code, never edit settings files, and the program you are converting is only ever installed inside a **throwaway test box on your computer that is deleted afterwards — your real computer is never touched by it.**
-
-Pick a program → install it inside the safe box → try it → close it → PortableForge spots everything it left behind and fixes it → you get the finished portable copy. That is the whole experience.
+PortableForge helps turn a Windows app into a PortableApps.com package. Capture a trusted setup in an isolated test box, review the observed files and settings, and save the approved package as a reusable profile. The wizard can build a `.paf.exe` from that profile whenever the selected setup matches the original SHA-256.
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
 ## Who it is for
 
-Anyone. The whole program is one guided path with twelve plain steps, one decision at a time, with sensible choices already made for you. Technical details exist, but they hide behind a "Show details" switch you never need to open. Dark window, large clear text, every button explains itself.
+The desktop wizard guides capture, review, and packaging. Use **Status and details** for diagnostics and choose one of three text sizes.
 
 ## What you need
 
-- A Windows 10 (build 18342 or newer) or Windows 11 computer. The safe test box needs the Pro, Enterprise, or Education edition. On Home, if you have Sandboxie-Plus installed (a free program), PortableForge can use its quick test box instead; otherwise it offers Careful mode and says plainly that it is watched-and-reverted, not sealed off.
+- Windows 10 (build 18342 or newer) or Windows 11. Windows Sandbox is available on Pro, Enterprise, and Education. The verified Sandboxie-Plus workflow supports Windows x64, including Home, with Sandboxie-Plus 1.18.8 x64. Careful mode runs on the host and attempts to restore monitored changes.
 - About 2 GB of free disk space and 2 GB of free memory while it works.
 - A program whose installer you have, and — only if you plan to share the finished portable copy — the right to share it. PortableForge asks, and builds differently depending on your answer.
 - Nothing else. No coding, no accounts, no internet needed after the one-time download of the two official builder programs (PortableForge checks their fingerprints before trusting them).
 
 ## What it does for you
 
-- Walks you through twelve plain-language steps, start to finish, with a progress bar and a Back button that always works.
-- Tests the program inside a throwaway test box, so a bad installer cannot hurt your real computer.
-- Works out where the program keeps its settings and files, and shows you each finding as a plain card you can accept or question.
-- Builds the portable package to the current PortableApps.com Format (3.9). The official builder programs can then make the final single file from it, when you ask (`portableforge tools run-installer`).
-- Tests the finished copy in a fresh box and tells you honestly whether it left anything behind.
+- Captures supported changes from a trusted setup and app exercise.
+- Shows the exact location and suggested handling for each captured finding.
+- Prepares a PortableApps.com Format 3.9 package, or uses a verified profile and the official tools to build a `.paf.exe`.
 
 ## How it works
 
-1. **Pick your program** — its setup file, a download link, or a program already installed.
-2. **Safety check** — PortableForge confirms your computer can run the safe test box.
-3. **A clean test computer** — it notes everything in the clean box.
-4. **Install the program** — inside the box, never on your real computer.
-5. **Try it out** — use it for a moment and change a setting, so we can see where it keeps them.
-6. **Close the program** — we watch until it has fully closed.
-7. **What it left behind** — a short plain-language list of what the program added, with the fix we suggest for each.
-8. **Name your portable copy** — mostly filled in for you.
-9. **Sharing your portable copy** — one honest question about whether you may pass the program on. Not sure is a perfectly good answer and picks the safest way automatically.
-10. **We build it for you** — the finished package, made to the PortableApps.com Format (version 3.9).
-11. **Testing the finished copy** — a brand-new test box tries your copy and reports anything it leaves behind.
-12. **Done** — take your file.
+In the standard package flow, select a setup file and review the system checks. Install and try the app in the selected test environment. Close the app and collect the final capture before closing Windows Sandbox. Review the findings, enter the app details and sharing choice, and prepare the package folder. The wizard displays recorded test results when available.
+
+## Reuse a reviewed capture in the wizard
+
+1. On the first page choose **Capture with Sandboxie-Plus**. This needs Windows x64 and Sandboxie-Plus 1.18.8 x64. Choose a trusted, self-contained setup `.exe` that runs with its default invocation and needs no separate files, extra arguments, network access, elevation, or restart. Enter the full path where it will install the app's main `.exe`.
+2. Confirm that you trust both files and choose **Start capture**. Finish setup inside the box, try the installed app, then close it. The review opens after PortableForge confirms cleanup.
+3. Review the suggested fixes. Enter the portable copy's name, publisher, full HTTP or HTTPS homepage, and a short description. Confirm that you have permission to bundle the app. Select the official PortableApps.com Launcher Generator 2.2.9 folder and a new profile folder, then choose **Save profile**.
+4. Choose **Build installer**, or open **Rebuild from a saved profile** from the first page later. Select the same setup file, the official PortableApps.com Installer 3.9.19 folder, and a new build folder. The wizard checks the setup SHA-256 against the saved capture and checks the profile against the approval it stored separately. A successful build shows the `.paf.exe` and can open its folder.
+
+Use printable ASCII for the capture and build paths. Leave out `$`, `%`, single and double quotes, and backticks. Use **Capture location** if your default path contains one of these characters.
 
 ## Safety, in plain words
 
-- The conversion install happens **only** inside Windows Sandbox, a throwaway mini-PC built into Windows 10/11 (Pro, Enterprise, or Education editions). Closing it deletes everything in it.
-- On any edition — including Home — the **quick test box** works too, if Sandboxie-Plus is installed: the program runs on your computer, but Sandboxie catches everything it writes in a sealed folder that is thrown away afterwards. It starts in seconds. It is not a separate computer, and programs that install deep system parts may not install properly in it; PortableForge flags those when it sees them. Sandboxie is a separate free program you install yourself; PortableForge only detects it and drives it.
-- Only three folders are shared with the box: where the setup file lives (read-only), PortableForge's own tools (read-only), and one work folder where the results come out.
-- No internet inside the box unless you turn it on for that run.
+- Windows Sandbox is a throwaway mini-PC built into Windows 10/11 Pro, Enterprise, and Education. Closing it deletes its contents.
+- **Capture with Sandboxie-Plus** checks containment, captures supported redirected writes and scoped settings, and confirms cleanup of the dedicated box before opening the review. Use setups you trust.
+- The Windows Sandbox path shares three folders with the box: setup files (read-only), PortableForge's tools (read-only), and the work folder for results. Its internet access is off by default.
 - PortableForge itself is offline, collects nothing, and phones nothing home.
-- On Windows Home, where the test box is not available, PortableForge offers a careful mode that works on your real computer and puts everything back afterwards. It tells you plainly that this mode is **not** sealed off, and it never pretends otherwise.
+- Careful mode runs on the host, monitors supported changes, and attempts to restore them afterward.
 
 ## One honest question
 
@@ -62,7 +55,7 @@ Your answer is written into the package's notes, so anyone can see which kind of
 
 - **100% Rust** for everything PortableForge itself is made of — the window, the helper that works inside the test box, and all the thinking in between. No scripts, no second languages to install.
 - The official PortableApps.com Launcher and Installer tools are used at the building step (they are separate programs, kept under their own licenses — see the notes inside any package PortableForge makes). They are checked by fingerprint before every use.
-- Dark theme in PortableForge's black-and-red family colours.
+- Compact VaporGrid layout with deep crimson controls, a subtle square tread-plate background, and pages for long reviews.
 
 ## Command line (optional)
 

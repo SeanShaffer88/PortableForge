@@ -35,6 +35,8 @@ pub mod snapshot;
 pub mod timeutil;
 pub mod tools;
 pub mod validate;
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub mod wizard_package;
 pub mod wsb;
 
 pub use classify::{classify, Classification, Finding, Severity};

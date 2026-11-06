@@ -777,7 +777,7 @@ impl Sandboxie {
             .strip_prefix(r"\Sandbox\")
             .and_then(|suffix| suffix.strip_suffix(&ipc_suffix));
         if !same_file_root(&paths.file, validate_root(root)?)?
-            || key_user.map_or(true, |user| user.is_empty() || user.contains('\\'))
+            || key_user.is_none_or(|user| user.is_empty() || user.contains('\\'))
             || key_user != ipc_user
         {
             return Err(
@@ -976,11 +976,11 @@ fn command_line(image: &OsStr, args: &[OsString]) -> Result<Vec<u16>, String> {
             } else {
                 pending
             };
-            out.extend(std::iter::repeat(slash).take(escaped));
+            out.extend(std::iter::repeat_n(slash, escaped));
             pending = 0;
             out.push(ch);
         }
-        out.extend(std::iter::repeat(slash).take(pending * 2));
+        out.extend(std::iter::repeat_n(slash, pending * 2));
         out.push(quote);
         Ok(())
     }

@@ -18,10 +18,8 @@ use crate::snapshot::RegEntry;
 /// exports identically.
 pub fn decode_reg_export(bytes: &[u8]) -> Result<String, String> {
     if bytes.starts_with(&[0xFF, 0xFE]) {
-        let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        let (pairs, _) = bytes[2..].as_chunks::<2>();
+        let units: Vec<u16> = pairs.iter().copied().map(u16::from_le_bytes).collect();
         return String::from_utf16(&units).map_err(|e| format!("Bad UTF-16 export: {e}"));
     }
     String::from_utf8(bytes.to_vec()).map_err(|e| format!("Bad export text: {e}"))

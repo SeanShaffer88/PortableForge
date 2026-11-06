@@ -11,7 +11,7 @@ use crate::compile::safe_name;
 use crate::compile::windows::{
     compile_installer_checked, copy_tree, file_digest, local_directory, metadata_at,
     new_output_path, preflight_profile_package, require_regular_path, within, CompileApproval,
-    CompileReport, ProfileBuildEvidence,
+    CompileReport, ProfileBuildEvidence, VerifyToolSupport,
 };
 use crate::orchestrate::{read_capture, session_layout};
 use crate::paf::Distribution;
@@ -106,12 +106,7 @@ pub fn save(
             "Keep the new profile folder separate from the capture, review and package.".into(),
         );
     }
-    let parent = session.parent().ok_or("Choose a capture session folder.")?;
-    let folder = session
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or("Choose a capture session folder.")?;
-    let layout = session_layout(parent, folder);
+    let layout = capture_layout(&session)?;
     if [&layout.input, &layout.exchange, &layout.tools]
         .into_iter()
         .any(|root| within(&review, root) || within(&package, root) || within(root, &package))
@@ -121,28 +116,6 @@ pub fn save(
                 .into(),
         );
     }
-    let session_file = read_small(&layout.session_path, &session, MAX_MANIFEST)?;
-    let session_record =
-        Session::from_json(std::str::from_utf8(&session_file).map_err(|e| e.to_string())?)?;
-    if !matches!(
-        session_record.sandbox_mode,
-        SandboxMode::WindowsSandbox | SandboxMode::Sandboxie
-    ) {
-        return Err(
-            "Save a profile from Windows Sandbox or a verified Sandboxie-Plus capture.".into(),
-        );
-    }
-    if session_record.id.trim().is_empty() {
-        return Err("The capture session has no identifier.".into());
-    }
-    let input = local_directory(&layout.input)?;
-    let setup = only_setup(&input)?;
-    let harvest = local_directory(&layout.exchange.join("harvest"))?;
-    let harvest_before = inventory(&harvest)?;
-    if !harvest_before.iter().any(|entry| entry.file.is_some()) {
-        return Err("The capture has no harvested program files.".into());
-    }
-
     let review_bytes = read_small(
         &review,
         review.parent().ok_or("Choose a review file.")?,
@@ -150,49 +123,18 @@ pub fn save(
     )?;
     let approved =
         Review::from_json(std::str::from_utf8(&review_bytes).map_err(|e| e.to_string())?)?;
-    let note_hash = |name| {
-        read_small(&layout.exchange.join(name), &session, MAX_CAPTURE_NOTE)
-            .map(|bytes| sha256_hex(&bytes))
-    };
-    let capture_evidence = || -> Result<CaptureEvidence, String> {
-        let mut evidence = CaptureEvidence {
-            mode: session_record.sandbox_mode,
-            before_sha256: note_hash("before.json")?,
-            after_install_sha256: note_hash("after-install.json")?,
-            after_runtime_sha256: note_hash("after-runtime.json")?,
-            sandboxie_receipt_sha256: None,
-        };
-        if evidence.mode == SandboxMode::Sandboxie {
-            evidence.sandboxie_receipt_sha256 = Some(sandboxie_receipt_digest(
-                &session,
-                &session_record.id,
-                &setup.sha256,
-                &evidence,
-                &harvest_before,
-            )?);
-        }
-        Ok(evidence)
-    };
-    let notes_before = capture_evidence()?;
-    let observed = read_capture(&layout)?;
-    verify_review(&approved, &observed.review)?;
-    if notes_before != capture_evidence()? || harvest_before != inventory(&harvest)? {
-        return Err(
-            "The capture changed while it was being reviewed. Close the test box and try again."
-                .into(),
-        );
-    }
+    let capture = verify_capture(&session, &approved)?;
 
     let package_before = inventory(&package)?;
     let base_app_name = preflight_profile_package(&package)?;
-    if harvest_before != inventory(&package.join("App").join(base_app_name))? {
+    if capture.harvest_inventory != inventory(&package.join("App").join(base_app_name))? {
         return Err("The prepared package's program files differ from the captured files.".into());
     }
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
-        session_id: session_record.id,
-        capture: notes_before,
-        setup,
+        session_id: capture.session_id,
+        capture: capture.evidence,
+        setup: capture.setup,
         review_sha256: sha256_hex(&review_bytes),
         redistribution_asserted,
         reviewed_package_approved,
@@ -224,6 +166,93 @@ pub fn save(
     })
 }
 
+fn capture_layout(session: &Path) -> Result<crate::orchestrate::SessionLayout, String> {
+    let parent = session.parent().ok_or("Choose a capture session folder.")?;
+    let folder = session
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("Choose a capture session folder.")?;
+    Ok(session_layout(parent, folder))
+}
+
+pub(crate) struct VerifiedCapture {
+    session_id: String,
+    setup: Fingerprint,
+    evidence: CaptureEvidence,
+    pub(crate) harvest: PathBuf,
+    pub(crate) harvest_inventory: Vec<TreeEntry>,
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) install_diff: crate::diff::Diff,
+}
+
+pub(crate) fn verify_capture(session: &Path, approved: &Review) -> Result<VerifiedCapture, String> {
+    let layout = capture_layout(session)?;
+    let session_file = read_small(&layout.session_path, session, MAX_MANIFEST)?;
+    let session_record =
+        Session::from_json(std::str::from_utf8(&session_file).map_err(|e| e.to_string())?)?;
+    if !matches!(
+        session_record.sandbox_mode,
+        SandboxMode::WindowsSandbox | SandboxMode::Sandboxie
+    ) {
+        return Err(
+            "Save a profile from Windows Sandbox or a verified Sandboxie-Plus capture.".into(),
+        );
+    }
+    if session_record.id.trim().is_empty() {
+        return Err("The capture session has no identifier.".into());
+    }
+    let input = local_directory(&layout.input)?;
+    let setup = only_setup(&input)?;
+    let harvest = local_directory(&layout.exchange.join("harvest"))?;
+    let harvest_before = inventory(&harvest)?;
+    if !harvest_before.iter().any(|entry| entry.file.is_some()) {
+        return Err("The capture has no harvested program files.".into());
+    }
+
+    let note_hash = |name| {
+        read_small(&layout.exchange.join(name), session, MAX_CAPTURE_NOTE)
+            .map(|bytes| sha256_hex(&bytes))
+    };
+    let capture_evidence = || -> Result<CaptureEvidence, String> {
+        let mut evidence = CaptureEvidence {
+            mode: session_record.sandbox_mode,
+            before_sha256: note_hash("before.json")?,
+            after_install_sha256: note_hash("after-install.json")?,
+            after_runtime_sha256: note_hash("after-runtime.json")?,
+            sandboxie_receipt_sha256: None,
+        };
+        if evidence.mode == SandboxMode::Sandboxie {
+            evidence.sandboxie_receipt_sha256 = Some(sandboxie_receipt_digest(
+                session,
+                &session_record.id,
+                &setup.sha256,
+                &evidence,
+                &harvest_before,
+            )?);
+        }
+        Ok(evidence)
+    };
+    let notes_before = capture_evidence()?;
+    let observed = read_capture(&layout)?;
+    verify_review(approved, &observed.review)?;
+    if notes_before != capture_evidence()? || harvest_before != inventory(&harvest)? {
+        return Err(
+            "The capture changed while it was being reviewed. Close the test box and try again."
+                .into(),
+        );
+    }
+
+    Ok(VerifiedCapture {
+        session_id: session_record.id,
+        setup,
+        evidence: notes_before,
+        harvest,
+        harvest_inventory: harvest_before,
+        #[cfg(target_arch = "x86_64")]
+        install_diff: observed.install_diff,
+    })
+}
+
 /// Build from a saved profile. The expected manifest hash comes from the
 /// operator's record outside the profile. The setup file is only read.
 pub fn build(
@@ -232,6 +261,17 @@ pub fn build(
     manifest_sha256: &str,
     tool_root: &Path,
     output: &Path,
+) -> Result<CompileReport, String> {
+    build_with_tool_check(setup, profile, manifest_sha256, tool_root, output, None)
+}
+
+pub(crate) fn build_with_tool_check(
+    setup: &Path,
+    profile: &Path,
+    manifest_sha256: &str,
+    tool_root: &Path,
+    output: &Path,
+    verify_tool_support: Option<VerifyToolSupport>,
 ) -> Result<CompileReport, String> {
     let profile = local_directory(profile)?;
     let setup = local_file(setup)?;
@@ -275,6 +315,7 @@ pub fn build(
             session_id: manifest.session_id,
         },
         verify_staged: &|stage| verify_inventory(stage, &manifest.package),
+        verify_tool_support,
     };
     compile_installer_checked(
         &package,
