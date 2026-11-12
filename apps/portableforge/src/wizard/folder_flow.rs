@@ -1,13 +1,19 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 #[cfg(windows)]
 use portableforge_core::artwork::{default_application_icon, render_icon, Raster};
+use portableforge_core::folder::input::{
+    plan_drop_with_cancel, stage_input_with_cancel, DropPlan, StagedInput,
+};
 #[cfg(all(windows, target_arch = "x86_64"))]
 use portableforge_core::folder::FolderBuildControl;
-use portableforge_core::folder::{self, AppProperties, FolderIssue, FolderScan, IssueSeverity};
+use portableforge_core::folder::{
+    self, AppProperties, FolderIssue, FolderScan, IssueSeverity, ScanError,
+};
 use portableforge_core::guide::folder_flow as copy;
 
 use super::{artwork_ui, WizardApp};
@@ -33,10 +39,29 @@ pub(super) enum Page {
     Done,
 }
 
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+enum IntakeMode {
+    #[default]
+    Guided,
+    Autonomous,
+}
+
+#[derive(Clone, Copy)]
+enum DiscardStage {
+    Back,
+    Built,
+    Close,
+    Stopped,
+}
+
 #[derive(Default)]
 pub(super) struct Flow {
     pub(super) open: bool,
     source: PathBuf,
+    source_label: String,
+    staged: Option<Arc<StagedInput>>,
+    mode: IntakeMode,
+    build_attempted: bool,
     scan: Option<Arc<FolderScan>>,
     selected: Option<PathBuf>,
     inferred_name: bool,
@@ -60,6 +85,9 @@ pub(super) struct Flow {
     runtime: runtime::TestFlow,
     status: Option<&'static str>,
     job: Option<mpsc::Receiver<Event>>,
+    intake_stop: Option<Arc<AtomicBool>>,
+    discard_stage: Option<DiscardStage>,
+    close_ready: bool,
     #[cfg(all(windows, target_arch = "x86_64"))]
     control: Option<FolderBuildControl>,
     stop_pending: bool,
@@ -83,6 +111,10 @@ struct Selection {
 }
 
 struct Inspection {
+    staged: Option<Arc<StagedInput>>,
+    original: PathBuf,
+    source_label: String,
+    loose_files: bool,
     scan: Arc<FolderScan>,
     selection: Option<Selection>,
     issues: Vec<FolderIssue>,
@@ -91,6 +123,8 @@ struct Inspection {
 enum Outcome {
     Inspected(Inspection),
     DroppedSetup(PathBuf),
+    IntakeStopped,
+    StageDiscarded(DiscardStage, Result<(), Failure>),
     Selected(Selection, Vec<FolderIssue>),
     #[cfg(all(windows, target_arch = "x86_64"))]
     Built(Delivery),
@@ -101,7 +135,6 @@ enum Outcome {
 }
 
 enum Event {
-    #[cfg(all(windows, target_arch = "x86_64"))]
     Stage(&'static str),
     Finished(Box<Result<Outcome, Failure>>),
 }
@@ -120,9 +153,14 @@ impl Failure {
     }
 }
 
-fn inspect(path: &Path) -> Result<Outcome, Failure> {
-    let scan = folder::scan(path)
-        .map_err(|error| Failure::new("Choose a local app folder that you can open.", error))?;
+fn inspect(
+    root: &Path,
+    original: PathBuf,
+    source_label: String,
+    loose_files: bool,
+) -> Result<Inspection, Failure> {
+    let scan = folder::scan(root)
+        .map_err(|error| Failure::new("The selected app files could not be read.", error))?;
     let selection = if scan.is_prepared() {
         None
     } else {
@@ -140,16 +178,58 @@ fn inspect(path: &Path) -> Result<Outcome, Failure> {
             .as_ref()
             .map(|selection| selection.relative.as_path()),
     );
-    Ok(Outcome::Inspected(Inspection {
+    Ok(Inspection {
+        staged: None,
+        original,
+        source_label,
+        loose_files,
         scan: Arc::new(scan),
         selection,
         issues,
-    }))
+    })
+}
+
+fn dispose_stage(stage: Option<Arc<StagedInput>>) -> Result<(), Failure> {
+    if let Some(stage) = stage {
+        let stage = Arc::try_unwrap(stage)
+            .map_err(|stage| Failure::new(copy::SOURCE_CLEANUP_FAILED, stage.root().display()))?;
+        stage
+            .cleanup()
+            .map_err(|error| Failure::new(copy::SOURCE_CLEANUP_FAILED, error))?;
+    }
+    Ok(())
+}
+
+fn intake_failure(error: ScanError) -> Result<Outcome, Failure> {
+    let detail = error.to_string();
+    const CANCELLED: &str = "Input staging stopped.";
+    if detail == CANCELLED {
+        Ok(Outcome::IntakeStopped)
+    } else if detail.starts_with(CANCELLED) {
+        Err(Failure::new(copy::SOURCE_CLEANUP_FAILED, detail))
+    } else {
+        Err(Failure::new(copy::INPUT_NOT_READY, detail))
+    }
 }
 
 impl Flow {
     pub(super) fn busy(&self) -> bool {
-        self.job.is_some()
+        self.job.is_some() || self.discard_stage.is_some()
+    }
+
+    pub(super) fn defer_close(&mut self) -> bool {
+        if self.busy() {
+            return true;
+        }
+        if self.staged.is_some() {
+            self.discard(DiscardStage::Close);
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn take_close_request(&mut self) -> bool {
+        std::mem::take(&mut self.close_ready)
     }
 
     pub(super) fn page(&self) -> Page {
@@ -168,6 +248,15 @@ impl Flow {
         #[cfg(all(windows, target_arch = "x86_64"))]
         {
             self.runtime.cancellation.is_some()
+        }
+        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        false
+    }
+
+    fn test_stopping(&self) -> bool {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        {
+            self.runtime.stopping
         }
         #[cfg(not(all(windows, target_arch = "x86_64")))]
         false
@@ -219,7 +308,7 @@ impl Flow {
         if self.page == Page::Findings {
             self.page = self.findings_from;
         } else if matches!(self.page, Page::Review | Page::Done) {
-            self.open = false;
+            self.discard(DiscardStage::Back);
         } else {
             self.page = Page::Review;
         }
@@ -265,35 +354,119 @@ impl Flow {
         }
     }
 
-    fn inspect(&mut self, ctx: &egui::Context, source: PathBuf, dropped: bool) {
+    fn reset_source(&mut self, source: PathBuf) {
         let launcher_tools = std::mem::take(&mut self.launcher_tools);
         let installer_tools = std::mem::take(&mut self.installer_tools);
         *self = Self {
             open: true,
-            source: source.clone(),
+            source,
+            mode: self.mode,
             launcher_tools,
             installer_tools,
             ..Self::default()
         };
-        self.start(ctx, copy::SCANNING, move |_, _| {
-            if dropped {
-                use folder::input::{classify_drop, DroppedInput};
-                let kind = classify_drop(&source).map_err(|error| {
-                    Failure::new("Choose a local app folder or setup file.", error)
-                })?;
-                if kind == DroppedInput::Setup {
-                    return Ok(Outcome::DroppedSetup(source));
+    }
+
+    fn discard(&mut self, after: DiscardStage) {
+        if self.staged.is_some() {
+            self.discard_stage = Some(after);
+        } else {
+            self.after_discard(after);
+        }
+    }
+
+    fn after_discard(&mut self, after: DiscardStage) {
+        match after {
+            DiscardStage::Back => self.open = false,
+            DiscardStage::Built => {}
+            DiscardStage::Close => self.close_ready = true,
+            DiscardStage::Stopped => self.status = Some(copy::SOURCE_STOPPED),
+        }
+    }
+
+    fn discard_failed(&mut self) {
+        if self.page != Page::Done {
+            self.scan = None;
+            self.selected = None;
+        }
+    }
+
+    fn inspect(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, allow_setup: bool) {
+        let old_stage = self.staged.take();
+        let source = if paths.len() == 1 {
+            paths[0].clone()
+        } else {
+            PathBuf::new()
+        };
+        self.reset_source(source);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        self.start(ctx, copy::CHECKING_SELECTION, move |tx, ctx| {
+            dispose_stage(old_stage)?;
+            let show_stage = |status| {
+                let _ = tx.send(Event::Stage(status));
+                ctx.request_repaint();
+            };
+            let cancelled = || worker_stop.load(Ordering::Acquire);
+            let plan = match plan_drop_with_cancel(paths, cancelled) {
+                Ok(plan) => plan,
+                Err(error) => return intake_failure(error),
+            };
+            let plan = match plan {
+                DropPlan::Setup(path) if allow_setup => return Ok(Outcome::DroppedSetup(path)),
+                DropPlan::Setup(_) => {
+                    return Err(Failure::new(
+                        copy::INPUT_NOT_READY,
+                        "Use the setup picker for one setup file. For loose app files, select all files for the app together.",
+                    ));
+                }
+                DropPlan::Folder(path) => {
+                    show_stage(copy::SCANNING);
+                    let label = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
+                    return inspect(&path, path.clone(), label, false).map(Outcome::Inspected);
+                }
+                plan => plan,
+            };
+            let loose_files = matches!(plan, DropPlan::Files(_));
+            show_stage(copy::STAGING_SOURCE);
+            let staged = match stage_input_with_cancel(plan, cancelled) {
+                Ok(staged) => Arc::new(staged),
+                Err(error) => return intake_failure(error),
+            };
+            if cancelled() {
+                dispose_stage(Some(staged))?;
+                return Ok(Outcome::IntakeStopped);
+            }
+            show_stage(copy::SCANNING);
+            let original = staged.original().to_path_buf();
+            let label = if loose_files {
+                format!("Selected files in {}", staged.label())
+            } else {
+                original.file_name().unwrap_or(original.as_os_str()).to_string_lossy().into_owned()
+            };
+            match inspect(staged.root(), original, label, loose_files) {
+                Ok(mut inspection) => {
+                    inspection.staged = Some(staged);
+                    Ok(Outcome::Inspected(inspection))
+                }
+                Err(failure) => {
+                    dispose_stage(Some(staged))?;
+                    Err(failure)
                 }
             }
-            inspect(&source)
         });
+        if self.busy() {
+            self.intake_stop = Some(stop);
+        }
     }
 
     fn select(&mut self, ctx: &egui::Context, relative: PathBuf) {
         let Some(scan) = self.scan.clone() else {
             return;
         };
+        let staged = self.staged.clone();
         self.start(ctx, copy::READING_PROGRAM, move |_, _| {
+            let _staged = staged;
             let properties = scan.properties_for(&relative).map_err(|error| {
                 Failure::new(
                     "The selected file could not be read. Scan the folder again.",
@@ -317,9 +490,19 @@ impl Flow {
             return;
         }
         self.draft = Draft::default();
+        if self.mode == IntakeMode::Autonomous {
+            self.draft.language = Some(draft::Language::English);
+        }
         self.artwork = artwork_ui::Editor::default();
         let properties = selection.properties;
-        self.draft.name = properties.name;
+        self.draft.name = if properties.name_inferred && self.staged.is_some() {
+            selection
+                .relative
+                .file_stem()
+                .map_or(properties.name, |name| name.to_string_lossy().into_owned())
+        } else {
+            properties.name
+        };
         self.draft.id = suggested_id(&self.draft.name);
         self.draft.publisher = properties.publisher.unwrap_or_default();
         self.draft.version = properties.version.unwrap_or_default();
@@ -334,12 +517,20 @@ impl Flow {
     }
 
     pub(super) fn poll(&mut self, ctx: &egui::Context) -> Option<PathBuf> {
+        if let Some(after) = self.discard_stage.take() {
+            let stage = self.staged.take();
+            self.start(ctx, copy::CLEANING_SOURCE, move |_, _| {
+                Ok(Outcome::StageDiscarded(after, dispose_stage(stage)))
+            });
+            if !self.busy() {
+                self.discard_failed();
+            }
+        }
         let job = self.job.as_ref()?;
         let result = loop {
             match job.try_recv() {
-                #[cfg(all(windows, target_arch = "x86_64"))]
                 Ok(Event::Stage(status)) => {
-                    if !self.stop_pending && !self.runtime.stopping {
+                    if !self.stop_pending && !self.test_stopping() {
                         self.status = Some(status);
                     }
                 }
@@ -354,6 +545,10 @@ impl Flow {
             }
         };
         self.job = None;
+        let intake_cancelled = self
+            .intake_stop
+            .take()
+            .is_some_and(|stop| stop.load(Ordering::Acquire));
         #[cfg(all(windows, target_arch = "x86_64"))]
         let was_testing = self.test_in_progress();
         #[cfg(all(windows, target_arch = "x86_64"))]
@@ -364,18 +559,41 @@ impl Flow {
         }
         self.stop_pending = false;
         self.status = None;
+        if intake_cancelled {
+            match result {
+                Ok(Outcome::Inspected(inspection)) => {
+                    self.staged = inspection.staged;
+                    self.discard(DiscardStage::Stopped);
+                }
+                Ok(_) => self.status = Some(copy::SOURCE_STOPPED),
+                Err(failure) => self.error = Some(failure),
+            }
+            ctx.request_repaint();
+            return None;
+        }
         match result {
             Ok(Outcome::DroppedSetup(path)) => {
                 self.open = false;
                 return Some(path);
             }
+            Ok(Outcome::IntakeStopped) => self.status = Some(copy::SOURCE_STOPPED),
+            Ok(Outcome::StageDiscarded(after, Ok(()))) => self.after_discard(after),
+            Ok(Outcome::StageDiscarded(_, Err(failure))) => {
+                self.discard_failed();
+                self.error = Some(failure);
+            }
             Ok(Outcome::Inspected(inspection)) => {
-                self.output_parent = inspection
-                    .scan
-                    .root
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_default();
+                self.source = inspection.original;
+                self.source_label = inspection.source_label;
+                self.output_parent = if inspection.loose_files {
+                    self.source.clone()
+                } else {
+                    self.source
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_default()
+                };
+                self.staged = inspection.staged;
                 self.output_suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_or_else(
                     |_| std::process::id().to_string(),
                     |elapsed| format!("{:x}", elapsed.as_nanos() & 0x0000_ffff_ffff_ffff),
@@ -384,6 +602,12 @@ impl Flow {
                 self.scan = Some(inspection.scan);
                 if let Some(selection) = inspection.selection {
                     self.accept_selection(ctx, selection);
+                } else if self.mode == IntakeMode::Autonomous
+                    && self
+                        .blocker()
+                        .is_some_and(|(page, _)| page == Page::Program)
+                {
+                    self.page = Page::Program;
                 }
             }
             Ok(Outcome::Selected(selection, issues)) => {
@@ -394,6 +618,7 @@ impl Flow {
             Ok(Outcome::Built(delivery)) => {
                 self.result = Some(delivery);
                 self.page = Page::Done;
+                self.discard(DiscardStage::Built);
             }
             #[cfg(all(windows, target_arch = "x86_64"))]
             Ok(Outcome::Tested(result)) => {
@@ -409,6 +634,9 @@ impl Flow {
                 )));
             }
             Err(failure) => self.error = Some(failure),
+        }
+        if self.discard_stage.is_some() {
+            ctx.request_repaint();
         }
         None
     }
@@ -493,6 +721,22 @@ impl Flow {
             && !self.busy()
     }
 
+    fn autonomous_ready(&self) -> bool {
+        self.mode == IntakeMode::Autonomous
+            && !self.build_attempted
+            && self.result.is_none()
+            && self.build_ready()
+    }
+
+    pub(super) fn advance_autonomously(&mut self, ctx: &egui::Context) {
+        if self.autonomous_ready()
+            && !ctx.input(|input| input.viewport().close_requested())
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+        {
+            self.build(ctx);
+        }
+    }
+
     #[cfg(all(windows, target_arch = "x86_64"))]
     pub(super) fn build(&mut self, ctx: &egui::Context) {
         if !self.build_ready() {
@@ -508,9 +752,12 @@ impl Flow {
         let installer_tools = self.installer_tools.clone();
         let output = self.output();
         let artwork = self.artwork.artwork().cloned();
+        let staged = self.staged.clone();
         let control = FolderBuildControl::default();
         self.control = Some(control.clone());
-        self.start(ctx, "Checking the app folder…", move |tx, ctx| {
+        self.build_attempted = true;
+        self.start(ctx, "Checking the app files…", move |tx, ctx| {
+            let _staged = staged;
             use portableforge_core::folder::{build_with_artwork, FolderBuildRequest};
             let request = FolderBuildRequest {
                 scan: &scan,
@@ -563,15 +810,27 @@ impl Flow {
     pub(super) fn build(&mut self, _ctx: &egui::Context) {}
 
     pub(super) fn can_stop(&self) -> bool {
+        if self.stop_pending {
+            return false;
+        }
+        if self.intake_stop.is_some() {
+            return true;
+        }
         #[cfg(all(windows, target_arch = "x86_64"))]
         {
-            self.control.is_some() && !self.stop_pending
+            self.control.is_some()
         }
         #[cfg(not(all(windows, target_arch = "x86_64")))]
         false
     }
 
     pub(super) fn stop(&mut self) {
+        if let Some(stop) = &self.intake_stop {
+            stop.store(true, Ordering::Release);
+            self.stop_pending = true;
+            self.status = Some(copy::SOURCE_STOPPING);
+            return;
+        }
         #[cfg(all(windows, target_arch = "x86_64"))]
         if let Some(control) = &self.control {
             self.stop_pending = true;
@@ -588,11 +847,50 @@ impl WizardApp {
     pub(super) fn choose_app_folder(&mut self, ctx: &egui::Context) {
         let dialog = rfd::FileDialog::new().set_title("Choose the unpacked app folder");
         if let Some(path) = dialog.pick_folder() {
-            self.inspect_app_folder(ctx, path, false);
+            self.inspect_app_inputs(ctx, vec![path], false);
         }
     }
 
-    pub(super) fn inspect_app_folder(&mut self, ctx: &egui::Context, path: PathBuf, dropped: bool) {
+    pub(super) fn choose_app_files(&mut self, ctx: &egui::Context) {
+        let dialog = rfd::FileDialog::new().set_title("Choose a ZIP or files for one app");
+        if let Some(paths) = dialog.pick_files() {
+            self.inspect_app_inputs(ctx, paths, false);
+        }
+    }
+
+    pub(super) fn inspect_dropped_files(
+        &mut self,
+        ctx: &egui::Context,
+        files: Vec<egui::DroppedFile>,
+    ) {
+        if files.is_empty()
+            || self.folder_flow.busy()
+            || self.folder_flow.modal_open()
+            || self.profile_flow.busy()
+        {
+            return;
+        }
+        if let Some(paths) = files
+            .into_iter()
+            .map(|file| file.path)
+            .collect::<Option<Vec<_>>>()
+        {
+            self.inspect_app_inputs(ctx, paths, true);
+        } else {
+            let old_stage = self.folder_flow.staged.take();
+            self.folder_flow.reset_source(PathBuf::new());
+            self.folder_flow
+                .start(ctx, copy::CHECKING_SELECTION, move |_, _| {
+                    dispose_stage(old_stage)?;
+                    Err(Failure::new(
+                        copy::SAVE_DROPPED_FILES,
+                        "One or more dropped items did not have a local file path.",
+                    ))
+                });
+        }
+    }
+
+    fn inspect_app_inputs(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, allow_setup: bool) {
         if self.folder_flow.busy() || self.folder_flow.modal_open() || self.profile_flow.busy() {
             return;
         }
@@ -603,7 +901,7 @@ impl WizardApp {
         if self.folder_flow.installer_tools.as_os_str().is_empty() {
             self.folder_flow.installer_tools = installer;
         }
-        self.folder_flow.inspect(ctx, path, dropped);
+        self.folder_flow.inspect(ctx, paths, allow_setup);
     }
 }
 
@@ -647,6 +945,7 @@ mod tests {
         let folder_flow = Flow {
             open: true,
             source,
+            source_label: "Widget.zip".into(),
             scan: Some(Arc::new(scan)),
             selected: Some(selected),
             issues: vec![FolderIssue {
@@ -724,7 +1023,64 @@ mod tests {
     }
 
     #[test]
-    fn dropping_a_folder_or_setup_routes_to_the_correct_workflow() {
+    fn autonomous_requires_a_ready_review_and_never_retries_or_remembers_permission() {
+        let mut wizard = populated();
+        let flow = &mut wizard.folder_flow;
+        assert_eq!(flow.mode, IntakeMode::Guided);
+        assert!(!flow.autonomous_ready());
+        flow.mode = IntakeMode::Autonomous;
+        flow.draft.rights = false;
+        assert!(!flow.autonomous_ready());
+        flow.draft.rights = true;
+        let selected = flow.selected.take();
+        assert!(!flow.autonomous_ready());
+        flow.selected = selected;
+        flow.page = Page::App;
+        assert!(!flow.autonomous_ready());
+        flow.page = Page::Review;
+        assert_eq!(
+            flow.autonomous_ready(),
+            cfg!(all(windows, target_arch = "x86_64"))
+        );
+        flow.build_attempted = true;
+        assert!(!flow.autonomous_ready());
+        flow.reset_source(PathBuf::from("new source"));
+        assert_eq!(flow.mode, IntakeMode::Autonomous);
+        assert!(!flow.draft.rights);
+        assert!(!flow.autonomous_ready());
+    }
+
+    #[test]
+    fn intake_cancellation_preserves_a_cleanup_error() {
+        let failure = intake_failure(ScanError {
+            message: "Input staging stopped.\nCould not remove staging at the temporary path."
+                .into(),
+        });
+        assert!(matches!(
+            failure,
+            Err(Failure {
+                message: copy::SOURCE_CLEANUP_FAILED,
+                ..
+            })
+        ));
+    }
+
+    fn inert_desktop_pe() -> [u8; 368] {
+        let mut pe = [0; 368];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[60] = 64;
+        pe[64..68].copy_from_slice(b"PE\0\0");
+        pe[68..70].copy_from_slice(&0x8664u16.to_le_bytes());
+        pe[70] = 1;
+        pe[84] = 240;
+        pe[86] = 2;
+        pe[88..90].copy_from_slice(&0x20bu16.to_le_bytes());
+        pe[156] = 2;
+        pe
+    }
+
+    #[test]
+    fn raw_drop_routes_folder_setup_zip_and_entire_loose_selection() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -733,6 +1089,12 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let folder = root.join("Widget.exe");
         std::fs::create_dir(&folder).unwrap();
+        let application = folder.join("Widget.exe");
+        std::fs::write(&application, inert_desktop_pe()).unwrap();
+        let companion = folder.join("settings.ini");
+        std::fs::write(&companion, b"example=true").unwrap();
+        let zip = root.join("Widget.zip");
+        portableforge_core::build::write_package_zip(&folder, &zip).unwrap();
         let setup = root.join("WidgetSetup.exe");
         std::fs::write(&setup, b"inert setup fixture").unwrap();
         let mut wizard = WizardApp {
@@ -744,17 +1106,21 @@ mod tests {
         let ctx = egui::Context::default();
         super::super::theme::install_fonts(&ctx);
         let mut frame = eframe::Frame::_new_kittest();
-        let mut drive_drop = |wizard: &mut WizardApp, path: &Path| {
-            let _ = ctx.run(
-                egui::RawInput {
-                    dropped_files: vec![egui::DroppedFile {
-                        path: Some(path.to_path_buf()),
-                        ..Default::default()
-                    }],
+        let drop_input = |paths: &[Option<&Path>]| egui::RawInput {
+            dropped_files: paths
+                .iter()
+                .map(|path| egui::DroppedFile {
+                    path: path.map(Path::to_path_buf),
                     ..Default::default()
-                },
-                |ctx| eframe::App::update(wizard, ctx, &mut frame),
-            );
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut drive = |wizard: &mut WizardApp, input: egui::RawInput| {
+            let output = ctx.run(input, |ctx| eframe::App::update(wizard, ctx, &mut frame));
+            let mut commands = output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .clone();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while wizard.folder_flow.busy() {
                 assert!(
@@ -762,19 +1128,86 @@ mod tests {
                     "drop worker timed out"
                 );
                 std::thread::yield_now();
-                let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                    eframe::App::update(wizard, ctx, &mut frame);
-                });
+                commands.extend(
+                    ctx.run(egui::RawInput::default(), |ctx| {
+                        eframe::App::update(wizard, ctx, &mut frame);
+                    })
+                    .viewport_output[&egui::ViewportId::ROOT]
+                        .commands
+                        .iter()
+                        .cloned(),
+                );
             }
+            commands
         };
-        drive_drop(&mut wizard, &folder);
+        drive(&mut wizard, drop_input(&[Some(&folder)]));
         assert!(wizard.folder_flow.open);
         assert!(wizard.folder_flow.scan.is_some());
         assert!(wizard.installer_path.is_empty());
         wizard.folder_flow.back();
-        drive_drop(&mut wizard, &setup);
+        drive(&mut wizard, drop_input(&[Some(&setup)]));
         assert!(!wizard.folder_flow.open);
-        assert_eq!(Path::new(&wizard.installer_path), setup);
+        assert_eq!(Path::new(&wizard.installer_path), &setup);
+
+        drive(&mut wizard, drop_input(&[Some(&application), None]));
+        assert_eq!(Path::new(&wizard.installer_path), &setup);
+        assert!(wizard.folder_flow.scan.is_none());
+        assert_eq!(
+            wizard.folder_flow.error.as_ref().unwrap().message,
+            copy::SAVE_DROPPED_FILES
+        );
+        drive(&mut wizard, drop_input(&[Some(&zip)]));
+        assert_eq!(wizard.folder_flow.source, zip);
+        assert_eq!(wizard.folder_flow.source_label, "Widget.zip");
+        assert_eq!(wizard.folder_flow.output_parent, root);
+        assert_eq!(
+            wizard.folder_flow.selected.as_deref(),
+            Some(Path::new("Widget.exe"))
+        );
+        let stage = wizard
+            .folder_flow
+            .staged
+            .as_ref()
+            .unwrap()
+            .root()
+            .to_owned();
+        assert!(stage.join("settings.ini").is_file());
+        let mut close = egui::RawInput::default();
+        close
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .events
+            .push(egui::ViewportEvent::Close);
+        let commands = drive(&mut wizard, close);
+        assert!(commands.contains(&egui::ViewportCommand::CancelClose));
+        assert!(commands.contains(&egui::ViewportCommand::Close));
+        assert!(!stage.exists());
+
+        drive(
+            &mut wizard,
+            drop_input(&[Some(&application), Some(&companion)]),
+        );
+        assert_eq!(wizard.folder_flow.output_parent, folder);
+        let stage = wizard
+            .folder_flow
+            .staged
+            .as_ref()
+            .unwrap()
+            .root()
+            .to_owned();
+        assert_eq!(
+            std::fs::read(stage.join("settings.ini")).unwrap(),
+            b"example=true"
+        );
+        wizard.folder_flow.back();
+        drive(&mut wizard, egui::RawInput::default());
+        assert!(!stage.exists());
+        assert_eq!(std::fs::read(&companion).unwrap(), b"example=true");
+
+        std::fs::remove_file(zip).unwrap();
+        std::fs::remove_file(application).unwrap();
+        std::fs::remove_file(companion).unwrap();
         std::fs::remove_dir(folder).unwrap();
         std::fs::remove_file(setup).unwrap();
         if wizard.settings_path.is_file() {
@@ -836,7 +1269,13 @@ mod tests {
         assert!(wizard.folder_flow.modal_open());
         assert!(!wizard.folder_flow.build_ready());
         let source = wizard.folder_flow.source.clone();
-        wizard.inspect_app_folder(&ctx, source.join("Another"), true);
+        wizard.inspect_dropped_files(
+            &ctx,
+            vec![egui::DroppedFile {
+                path: Some(source.join("Another")),
+                ..Default::default()
+            }],
+        );
         assert_eq!(wizard.folder_flow.source, source);
         wizard.folder_flow.back();
         assert!(wizard.folder_flow.open);
@@ -875,11 +1314,44 @@ mod tests {
                 egui::Vec2::from(super::super::dense::MIN_CONTENT),
             );
             let mut frame = eframe::Frame::_new_kittest();
+            wizard.folder_flow.open = false;
+            wizard.resume_offer = false;
+            wizard.settings.welcomed = true;
+            {
+                let mut draw = || {
+                    ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(bounds),
+                            ..Default::default()
+                        },
+                        |ctx| eframe::App::update(&mut wizard, ctx, &mut frame),
+                    )
+                };
+                draw();
+                draw();
+                let output = draw();
+                for label in [
+                    copy::GUIDED,
+                    copy::AUTONOMOUS,
+                    copy::CHOOSE_FILES,
+                    copy::CHOOSE_FOLDER,
+                ] {
+                    let shape = output.shapes.iter().find(|shape| {
+                        matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == label)
+                    }).unwrap_or_else(|| panic!("Missing intake action {label:?} at {scale}"));
+                    assert!(bounds
+                        .intersect(shape.clip_rect)
+                        .expand(1.0)
+                        .contains_rect(shape.shape.visual_bounding_rect()));
+                }
+            }
+            wizard.folder_flow.open = true;
             for (page, labels) in [
                 (
                     Page::Review,
                     &[
                         "Review Your App",
+                        "Source · Widget.zip",
                         #[cfg(windows)]
                         "Edit Package Artwork…",
                         "Build Installer",

@@ -33,6 +33,7 @@ Source: "..\target\release\portableforge.exe"; DestDir: "{app}"; Flags: ignoreve
 Source: "..\target\release\portableforge-agent.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\third-party\THIRD-PARTY-ARCHIVE-NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
 ; The release workflow stages the verified vendor portable payload.
 ; An ISCC build without the staged files fails.
 Source: "..\bundled\Sandboxie-Plus\*"; DestDir: "{app}\bundled\Sandboxie-Plus"; Flags: ignoreversion recursesubdirs createallsubdirs

@@ -56,10 +56,16 @@ the exercised states. The fit tests cover up to 150%. Physical DPI
 transitions, 200% text scaling, Windows contrast theme switching, and
 Narrator interaction require separate live checks.
 
-## Build from a folder
+## Build from a ZIP, app folder, or selected app files
 
-**Choose App Folder** provides a keyboard alternative to dragging a folder
-onto the first screen. App details, build tools and output, and folder
+**Choose App Folder** and **Choose App Files** provide keyboard alternatives
+to dragging a source onto the first screen. **Choose App Files** accepts
+one ZIP or several files for the same app. **Guided** is the default.
+**Autonomous** checks the same information and starts the build once the
+required decisions are complete. Use **Cancel Preparation** to stop a ZIP
+or file selection while it is being prepared.
+
+App details, build tools and output, and folder
 findings use compact pages with a shared **Back** action. **F1** opens
 findings. Start-file choices and findings are paged, and **View Path**
 opens long paths in the full-value dialog. The wizard keeps **Build

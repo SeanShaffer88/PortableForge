@@ -1,6 +1,6 @@
 ## TL;DR
 
-PortableForge is a PortableApps.com development workspace. Drop an unpacked app folder to build a portable installer, or capture a trusted Windows setup in an isolated test box, review the observed files and settings, and prepare the package and its artwork in the wizard. Save the approved package as a reusable profile and build a `.paf.exe` whenever the selected setup matches the original SHA-256.
+PortableForge is a PortableApps.com development workspace. Drop a ZIP, unpacked app folder, or a group of files for one app to build a portable installer, or capture a trusted Windows setup in an isolated test box, review the observed files and settings, and prepare the package and its artwork in the wizard. Save the approved package as a reusable profile and build a `.paf.exe` whenever the selected setup matches the original SHA-256.
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
@@ -25,11 +25,13 @@ The desktop wizard guides capture, review, and packaging. GitHub Dark is the def
 
 In the standard package flow, select a setup file and review the system checks. Install and try the app in the selected test environment. Close the app and collect the final capture before closing Windows Sandbox. Review the findings, enter the app details and sharing choice, and prepare the package folder. The wizard displays recorded test results when available.
 
-## Build from an unpacked app folder
+## Build from a ZIP, app folder, or app files
 
-1. Drop an unpacked Windows app folder on the first page or choose it with the folder picker. If several programs look plausible, choose the one that starts the app.
-2. Review the detected name, version, publisher and app icon. Supply missing details, confirm permission to include the files, and review any settings that refer to a fixed location. Choose the official Launcher Generator 2.2.9 and Installer 3.9.19 folders if they have not been selected.
-3. Choose a new output folder and build. The installer and build receipt appear together there when the build succeeds.
+1. Drop one ZIP or app folder on the first page, or select the files for one app together. For loose files, include the app's executable and its companion files from the same folder. To include subfolders, drop the whole app folder or its ZIP. Setup files still use the capture workflow.
+2. In **Guided**, review the suggested program, name, version, publisher, and icon. Choose the main program if several look plausible. Fill in missing details, confirm permission to include the files, and select the official Launcher Generator 2.2.9 and Installer 3.9.19 folders.
+3. Choose a new output folder and build. In **Autonomous**, PortableForge starts the build once the required choices and checks are complete. The installer and build receipt appear together in the output folder.
+
+ZIP and loose-file staging on Windows x64 leaves your originals intact and never runs them. ZIPs use standard stored or deflated files. If PortableForge cannot open an archive format, extract it with a trusted tool and drop the resulting app folder.
 
 Choose **Test Installer** on the result page to try the new installer in a fresh Sandboxie-Plus box. Follow the prompts to finish setup and try the app twice. The result records what happened to the app’s portable data and whether the test box was removed.
 

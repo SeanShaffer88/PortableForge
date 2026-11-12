@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Drop a ZIP or select multiple files for one app in the packaging wizard. Guided mode lets you review and build; Autonomous starts when the launch choice, required details, build tools, and sharing permission are ready.
 - Test an installer built from an unpacked folder in a fresh Sandboxie-Plus box from the result page.
 - Edit the app icon and installer left pane when building from an unpacked app folder.
 - Build a portable installer from an unpacked app folder. Review the suggested executable and app details, confirm permission to bundle the files, and build from the wizard.
