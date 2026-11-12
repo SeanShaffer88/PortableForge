@@ -1,0 +1,122 @@
+name: Stage portable Sandboxie-Plus
+description: Extract and verify the pinned vendor portable bundle on a clean hosted Windows runner
+runs:
+  using: composite
+  steps:
+    - name: Extract the vendor's portable payload
+      shell: pwsh
+      run: |
+        if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
+            $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ARCH -ne 'X64') {
+          throw 'Sandboxie-Plus portable staging requires a disposable GitHub-hosted Windows x64 runner.'
+        }
+
+        function Assert-CleanSandboxieHost {
+          # sc.exe queries kernel drivers as well as Win32 services.
+          # ERROR_SERVICE_DOES_NOT_EXIST (1060) is the only accepted result.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $sc = Join-Path $env:SystemRoot 'System32\sc.exe'
+          foreach ($name in @('SbieSvc', 'SbieDrv')) {
+            $null = & $sc query $name
+            if ($LASTEXITCODE -ne 1060) {
+              throw "Sandboxie service check for $name did not prove absence (exit $LASTEXITCODE)."
+            }
+          }
+
+          # The vendor's initializer can invoke the Classic uninstaller even
+          # in portable mode. Check both registry views and both install scopes.
+          $uninstall = 'Software\Microsoft\Windows\CurrentVersion\Uninstall'
+          foreach ($hive in @('LocalMachine', 'CurrentUser')) {
+            foreach ($view in @('Registry64', 'Registry32')) {
+              $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, $view)
+              try {
+                foreach ($key in @('Sandboxie', 'Sandboxie_is1', 'Sandboxie-Plus', 'Sandboxie-Plus_is1')) {
+                  $entry = $root.OpenSubKey("$uninstall\$key")
+                  if ($null -ne $entry) {
+                    $entry.Dispose()
+                    throw "An existing Sandboxie installation entry was found in $hive/$view/$key."
+                  }
+                }
+              } finally {
+                $root.Dispose()
+              }
+            }
+          }
+
+          if (Get-Process -Name 'SandMan', 'SbieCtrl', 'SbieSvc' -ErrorAction SilentlyContinue) {
+            throw 'A Sandboxie process is already running.'
+          }
+        }
+
+        $stage = Join-Path $env:GITHUB_WORKSPACE 'bundled'
+        $destination = Join-Path $stage 'Sandboxie-Plus'
+        if (Test-Path -LiteralPath $stage) { throw 'The Sandboxie-Plus staging folder already exists.' }
+        Assert-CleanSandboxieHost
+
+        $filename = 'Sandboxie-Plus-x64-v1.18.8.exe'
+        $digest = 'f27078ff74a07906fd51476079e1a7a8f5e20c8bb75a9d2ae86169d47179ae76'
+        $toolPins = Get-Content -Raw -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'crates/portableforge-core/src/tools.rs')
+        if (!$toolPins.Contains($filename) -or !$toolPins.Contains($digest)) {
+          throw 'Sandboxie-Plus download does not match the application tool pin.'
+        }
+
+        $scratch = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $scratch, $stage | Out-Null
+        $archive = Join-Path $scratch $filename
+        $log = Join-Path $scratch 'portable-extraction.log'
+        $uri = "https://github.com/sandboxie-plus/Sandboxie/releases/download/v1.18.8/$filename"
+        Invoke-WebRequest -Uri $uri -OutFile $archive
+        if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $digest) {
+          throw 'Sandboxie-Plus source fingerprint mismatch.'
+        }
+
+        # The pinned source gates SandMan on /OPEN_AGENT=1 or interactive
+        # nonportable mode. Portable mode omits driver/service Run entries.
+        # https://github.com/sandboxie-plus/Sandboxie/blob/v1.18.8/Installer/Sandboxie-Plus.iss#L156-L178
+        Assert-CleanSandboxieHost
+        try {
+          $arguments = @(
+            '/PORTABLE=1', '/CURRENTUSER', '/VERYSILENT', '/SUPPRESSMSGBOXES',
+            '/NORESTART', '/NOCLOSEAPPLICATIONS', '/NORESTARTAPPLICATIONS', '/NOICONS',
+            '/MERGETASKS="!RefreshBuild,!InstallImDisk"', "/DIR=""$destination""", "/LOG=""$log"""
+          )
+          $extract = Start-Process -FilePath $archive -ArgumentList $arguments -WorkingDirectory $scratch -Wait -PassThru
+          if ($extract.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 30 }
+            throw "Sandboxie-Plus portable extraction failed with exit $($extract.ExitCode)."
+          }
+        } finally {
+          Assert-CleanSandboxieHost
+        }
+
+        $runtimePins = Get-Content -Raw -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'crates/portableforge-core/src/sbie_verified/windows.rs')
+        foreach ($name in @('SbieDll.dll', 'SbieSvc.exe', 'SbieDrv.sys', 'Start.exe', 'Templates.ini')) {
+          $pattern = '"' + [regex]::Escape($name) + '"\s*,\s*"([a-f0-9]{64})"'
+          $pin = [regex]::Match($runtimePins, $pattern)
+          if (!$pin.Success) { throw "No application runtime pin found for $name." }
+          $file = Join-Path $destination $name
+          if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ine $pin.Groups[1].Value) {
+            throw "Extracted Sandboxie-Plus file $name differs from the application runtime pin."
+          }
+        }
+
+        foreach ($name in @('SandMan.exe', 'KmdUtil.exe', 'Sandboxie.ini', 'Sandboxie-Plus.ini')) {
+          $file = Get-Item -LiteralPath (Join-Path $destination $name)
+          if ($file.PSIsContainer -or $file.Length -le 0) { throw "Missing portable Sandboxie-Plus file $name." }
+        }
+        $entries = @(Get-ChildItem -LiteralPath $destination -Force -Recurse)
+        if ($entries | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }) {
+          throw 'The portable Sandboxie-Plus payload contains a reparse point.'
+        }
+        if ($entries | Where-Object { $_.Name -match '^unins\d+\.' }) {
+          throw 'The portable Sandboxie-Plus payload contains an uninstaller.'
+        }
+        $files = @($entries | Where-Object { !$_.PSIsContainer } | Sort-Object FullName)
+        $hashes = foreach ($file in $files) {
+          $relative = [IO.Path]::GetRelativePath($destination, $file.FullName).Replace('\', '/')
+          $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $relative"
+        }
+        Set-Content -LiteralPath (Join-Path $stage 'SANDBOXIE-SHA256SUMS.txt') -Value $hashes -Encoding utf8
+        Write-Host "Verified $($files.Count) portable Sandboxie-Plus files. Extraction exit 0. Both Sandboxie services remain absent."
+        exit 0

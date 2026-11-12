@@ -29,3 +29,11 @@ jobs:
 
       - name: Release build
         run: cargo build --locked --release
+
+  portable-sandboxie:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify portable Sandboxie-Plus extraction
+        uses: ./.github/actions/stage-portable-sandboxie
