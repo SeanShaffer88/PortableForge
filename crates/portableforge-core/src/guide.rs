@@ -13,10 +13,12 @@
 
 use crate::paf::Distribution;
 
+pub mod folder_flow;
+
 pub const SETUP_REQUIRED: &str = "Choose a setup file to continue.";
 pub const SETUP_MISSING: &str =
     "We could not find or open that setup file. Check the path or browse to it.";
-pub const SETUP_FOLDER: &str = "That path is a folder. Choose the setup file inside it.";
+pub const SETUP_FOLDER: &str = "Use Choose App Folder to open an unpacked app.";
 pub const SETUP_UNSUPPORTED: &str = "Choose a Windows setup file ending in .exe or .msi.";
 
 /// Dark UI design tokens (SEAN's black/red family, dark only —

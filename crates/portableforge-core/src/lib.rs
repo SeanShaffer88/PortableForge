@@ -23,6 +23,7 @@ pub mod leaktest;
 pub mod noise;
 pub mod orchestrate;
 pub mod paf;
+mod path_safety;
 #[cfg(windows)]
 pub mod profile;
 pub mod progress;

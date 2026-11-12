@@ -3,14 +3,22 @@
 use eframe::egui;
 use portableforge_core::settings::{Appearance, TEXT_SCALES};
 
-use super::{theme, WizardApp};
+use super::{folder_flow, theme, WizardApp};
 
 #[derive(Default)]
 pub(super) struct State {
-    page: Option<(bool, usize, bool)>,
+    page: Option<PageKey>,
     popup: Option<Dialog>,
     recent_commands: Vec<Command>,
     return_focus: Option<egui::Id>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PageKey {
+    profile_replay: bool,
+    step: usize,
+    details: bool,
+    folder: Option<(folder_flow::Page, bool)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,6 +43,7 @@ pub(super) enum WizardAction {
     StartMsi,
     SaveProfile,
     BuildInstaller,
+    BuildFromFolder,
     Finish,
 }
 
@@ -46,6 +55,7 @@ impl WizardAction {
             Self::StartMsi => "Start Windows Sandbox",
             Self::SaveProfile => "Save profile",
             Self::BuildInstaller => "Build installer",
+            Self::BuildFromFolder => portableforge_core::guide::folder_flow::BUILD,
             Self::Finish => "Finish",
         }
     }
@@ -61,6 +71,7 @@ enum Command {
     Help,
     FocusRegion,
     CancelJob,
+    StopFolderBuild,
 }
 
 struct Entry {
@@ -107,7 +118,15 @@ pub(super) fn register_heading(ui: &egui::Ui, response: &egui::Response) {
 
 impl WizardApp {
     pub(super) fn update_heading_focus(&mut self, ctx: &egui::Context) {
-        let page = (self.profile_flow.replay_open, self.step, self.show_details);
+        let page = PageKey {
+            profile_replay: self.profile_flow.replay_open,
+            step: self.step,
+            details: self.show_details,
+            folder: self
+                .folder_flow
+                .open
+                .then(|| (self.folder_flow.page(), self.folder_flow.busy())),
+        };
         if self.shell.page != Some(page) {
             self.shell.page = Some(page);
             ctx.data_mut(|data| {
@@ -118,6 +137,14 @@ impl WizardApp {
     }
 
     pub(super) fn current_wizard_action(&self) -> Option<(WizardAction, bool)> {
+        if self.folder_flow.open {
+            return self.folder_flow.show_build_action().then(|| {
+                (
+                    WizardAction::BuildFromFolder,
+                    self.folder_flow.build_ready(),
+                )
+            });
+        }
         if self.show_details || self.profile_flow.replay_open {
             return None;
         }
@@ -150,6 +177,7 @@ impl WizardApp {
             WizardAction::StartMsi => self.start_msi_capture(ctx),
             WizardAction::SaveProfile => self.start_profile_save(ctx),
             WizardAction::BuildInstaller => self.open_profile_replay(true),
+            WizardAction::BuildFromFolder => self.folder_flow.build(ctx),
             WizardAction::Continue | WizardAction::Finish => {
                 self.advance();
             }
@@ -207,7 +235,9 @@ impl WizardApp {
     }
 
     pub(super) fn toggle_step_details(&mut self) {
-        if !self.profile_flow.replay_open && !self.profile_flow.busy() {
+        if self.folder_flow.open {
+            self.folder_flow.toggle_findings();
+        } else if !self.profile_flow.replay_open && !self.profile_flow.busy() {
             self.detail_page = 0;
             self.show_details = !self.show_details;
         }
@@ -243,7 +273,8 @@ impl WizardApp {
         } else if use_key(egui::Modifiers::COMMAND, egui::Key::Comma) {
             self.open_shell_popup(Popup::Appearance, focused);
         } else if use_key(egui::Modifiers::NONE, egui::Key::F1) {
-            if self.profile_flow.replay_open || self.profile_flow.busy() {
+            if self.profile_flow.replay_open || self.profile_flow.busy() || self.folder_flow.busy()
+            {
                 self.open_shell_popup(Popup::Help, focused);
             } else {
                 self.toggle_step_details();
@@ -274,7 +305,9 @@ impl WizardApp {
         if self.profile_flow.busy() {
             return;
         }
-        if self.profile_flow.replay_open {
+        if self.folder_flow.open {
+            self.folder_flow.back();
+        } else if self.profile_flow.replay_open {
             self.profile_flow.replay_open = false;
         } else if self.show_details {
             self.toggle_step_details();
@@ -284,7 +317,7 @@ impl WizardApp {
     }
 
     fn command_entries(&self) -> Vec<Entry> {
-        let busy = self.profile_flow.busy();
+        let busy = self.profile_flow.busy() || self.folder_flow.busy();
         let mut entries = vec![
             Entry {
                 command: Command::Back,
@@ -292,7 +325,10 @@ impl WizardApp {
                 keys: "Esc",
                 keywords: "previous close",
                 enabled: !busy
-                    && (self.can_go_back() || self.show_details || self.profile_flow.replay_open),
+                    && (self.can_go_back()
+                        || self.show_details
+                        || self.profile_flow.replay_open
+                        || self.folder_flow.open),
             },
             Entry {
                 command: Command::Details,
@@ -306,7 +342,7 @@ impl WizardApp {
                 label: "Open saved profiles",
                 keys: "",
                 keywords: "library queue build results",
-                enabled: !busy && !self.profile_flow.replay_open,
+                enabled: !busy && !self.profile_flow.replay_open && !self.folder_flow.open,
             },
             Entry {
                 command: Command::Appearance,
@@ -354,6 +390,18 @@ impl WizardApp {
                     label: "Cancel the current test box operation",
                     keys: "",
                     keywords: "stop capture test",
+                    enabled: true,
+                },
+            );
+        }
+        if self.folder_flow.can_stop() {
+            entries.insert(
+                0,
+                Entry {
+                    command: Command::StopFolderBuild,
+                    label: portableforge_core::guide::folder_flow::STOP,
+                    keys: "",
+                    keywords: "cancel stop build",
                     enabled: true,
                 },
             );
@@ -559,6 +607,7 @@ impl WizardApp {
             Command::Help => self.open_shell_popup(Popup::Help, opener),
             Command::FocusRegion => focus_next_region(ctx),
             Command::CancelJob => self.profile_flow.cancel_capture(),
+            Command::StopFolderBuild => self.folder_flow.stop(),
         }
         ctx.request_repaint();
     }

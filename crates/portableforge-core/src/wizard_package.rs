@@ -354,7 +354,7 @@ pub fn verify_installer_toolchain(root: &Path) -> Result<(), String> {
     verify_installer_support(&root)
 }
 
-fn verify_installer_support(root: &Path) -> Result<(), String> {
+pub(crate) fn verify_installer_support(root: &Path) -> Result<(), String> {
     if tree_sha256(&root.join("App"))? != INSTALLER_APP_SHA256 {
         return Err("Select the official PortableApps.com Installer 3.9.19. Its App support files differ from the verified bundle.".into());
     }
@@ -365,7 +365,7 @@ fn create_dir(path: &Path) -> Result<(), String> {
     fs::create_dir(path).map_err(|e| format!("Could not create {}: {e}", path.display()))
 }
 
-fn validate_pal_path(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_pal_path(path: &Path) -> Result<(), String> {
     if !path.to_str().is_some_and(|path| {
         path.chars()
             .all(|c| c.is_ascii() && !c.is_control() && !matches!(c, '$' | '"' | '\'' | '`' | '%'))
@@ -414,6 +414,32 @@ fn stage_launcher_tools(source: &Path, stage: &Path) -> Result<(), String> {
     }
     copy_new_file(&source.join(PAL_EXE), &stage.join(PAL_EXE))?;
     check_launcher_tools(stage)
+}
+
+/// Generate the launcher in an owned package using the pinned launcher support tree.
+pub(crate) fn compile_folder_launcher(
+    package: &Path,
+    launcher: &Path,
+    launcher_tools: &Path,
+    work: &Path,
+    tool_temp: &Path,
+    before_launch: impl FnOnce() -> Result<(), String>,
+) -> Result<crate::compile::windows::BuildStep, String> {
+    validate_pal_path(package)?;
+    validate_pal_path(work)?;
+    stage_launcher_tools(launcher_tools, work)?;
+    match fs::symlink_metadata(launcher) {
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err("The new launcher path is already in use.".into()),
+    }
+    before_launch()?;
+    crate::compile::windows::run_step_with_temp(
+        &work.join(PAL_EXE),
+        vec![package.to_path_buf()],
+        work,
+        &work.join("launcher-generator.log"),
+        Some(tool_temp),
+    )
 }
 
 fn validate_launcher_choices(accepted: &[Classification]) -> Result<(), String> {

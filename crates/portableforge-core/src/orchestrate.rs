@@ -439,7 +439,8 @@ impl GuidedMsi {
             return Err("The guided MSI record is too large.".into());
         }
         let record: Self = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-        if !crate::compile::safe_name(&record.setup_name) || !is_msi(Path::new(&record.setup_name))
+        if !crate::path_safety::safe_name(&record.setup_name)
+            || !is_msi(Path::new(&record.setup_name))
         {
             return Err("The guest setup record must name a single MSI file.".into());
         }

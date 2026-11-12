@@ -1,12 +1,12 @@
 ## TL;DR
 
-PortableForge is a PortableApps.com development workspace. Capture a trusted Windows setup in an isolated test box, review the observed files and settings, and prepare the package and its artwork in the wizard. Save the approved package as a reusable profile and build a `.paf.exe` whenever the selected setup matches the original SHA-256.
+PortableForge is a PortableApps.com development workspace. Drop an unpacked app folder to build a portable installer, or capture a trusted Windows setup in an isolated test box, review the observed files and settings, and prepare the package and its artwork in the wizard. Save the approved package as a reusable profile and build a `.paf.exe` whenever the selected setup matches the original SHA-256.
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
 ## Who it is for
 
-The desktop wizard guides capture, review, and packaging. **Appearance** offers System, GitHub Dark and GitHub Light, plus three text sizes. Use **Commands** or **Ctrl+K** to find an action and **Status and details** for diagnostics.
+The desktop wizard guides capture, review, and packaging. GitHub Dark is the default. **Appearance** also offers System and GitHub Light, plus three text sizes. Use **Commands** or **Ctrl+K** to find an action and **Status and details** for diagnostics.
 
 ## What you need
 
@@ -24,6 +24,14 @@ The desktop wizard guides capture, review, and packaging. **Appearance** offers 
 ## How it works
 
 In the standard package flow, select a setup file and review the system checks. Install and try the app in the selected test environment. Close the app and collect the final capture before closing Windows Sandbox. Review the findings, enter the app details and sharing choice, and prepare the package folder. The wizard displays recorded test results when available.
+
+## Build from an unpacked app folder
+
+1. Drop an unpacked Windows app folder on the first page or choose it with the folder picker. If several programs look plausible, choose the one that starts the app.
+2. Review the detected name, version, publisher and app icon. Supply missing details, confirm permission to include the files, and review any settings that refer to a fixed location. Choose the official Launcher Generator 2.2.9 and Installer 3.9.19 folders if they have not been selected.
+3. Choose a new output folder and build. The installer and build receipt appear together there when the build succeeds.
+
+PortableForge leaves the source folder intact and preserves its directory layout in staging. The official installer builder skips housekeeping files such as `thumbs.db`. It warns about likely fixed paths and parent-folder references in supported settings files. The folder check does not start the app, so the build result reports that portability at runtime is unverified. A prepared PortableApps.com package can use the trusted prepared-package command described below.
 
 ## Reuse a reviewed capture in the wizard
 

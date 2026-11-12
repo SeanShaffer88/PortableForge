@@ -2,10 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::{EntryKind, FolderIssue, FolderScan, IssueSeverity};
-use crate::compile::safe_name;
+use crate::path_safety::safe_name;
 
 const APPINFO: &str = "App/AppInfo/appinfo.ini";
 const INSTALLER: &str = "App/AppInfo/installer.ini";
@@ -29,13 +29,13 @@ pub fn validate(scan: &FolderScan, selected: Option<&Path>) -> Vec<FolderIssue> 
         return issues;
     }
 
-    let prepared = scan.entries.iter().any(|entry| {
-        same_path(&entry.relative_path, Path::new(APPINFO))
-            || same_path(&entry.relative_path, Path::new("App/AppInfo"))
-    });
+    let prepared = scan.is_prepared();
     let start = if prepared {
         check_prepared(scan, &mut issues)
     } else {
+        if let Some(issue) = first_unsupported_payload_path(scan) {
+            issues.push(issue);
+        }
         check_raw_configs(scan, &mut issues);
         None
     };
@@ -72,6 +72,24 @@ pub fn validate(scan: &FolderScan, selected: Option<&Path>) -> Vec<FolderIssue> 
     issues
 }
 
+fn first_unsupported_payload_path(scan: &FolderScan) -> Option<FolderIssue> {
+    let entry = scan.entries.iter().find(|entry| {
+        entry.relative_path.components().any(|component| {
+            !matches!(component, Component::Normal(name) if name.to_str().is_some_and(safe_name))
+        })
+    })?;
+    let path = &entry.relative_path;
+    Some(issue(
+        "unsupported_payload_path",
+        IssueSeverity::Error,
+        Some(path),
+        &format!(
+            "The installer builder cannot package {}. Rename or remove the entry in a working copy, then scan again.",
+            path.display()
+        ),
+    ))
+}
+
 fn issue(
     code: &'static str,
     severity: IssueSeverity,
@@ -86,7 +104,7 @@ fn issue(
     }
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
+pub(super) fn same_path(a: &Path, b: &Path) -> bool {
     let (mut a, mut b) = (a.components(), b.components());
     loop {
         match (a.next(), b.next()) {
@@ -707,6 +725,30 @@ mod tests {
             .any(|issue| issue.code == "invalid_selection"));
         scan.complete = false;
         assert_eq!(validate(&scan, None)[0].code, "scan_incomplete");
+    }
+
+    #[test]
+    fn unsupported_payload_paths_block_only_raw_builds() {
+        let fixture = Fixture::new();
+        fixture.exe("SamplePortable.exe");
+        fixture.write("bin/.data/contents.dat", b"fixture");
+        let selected = Path::new("SamplePortable.exe");
+        let raw = fixture.scan();
+        assert!(raw.complete);
+        let findings = validate(&raw, Some(selected));
+        let finding = findings
+            .iter()
+            .find(|issue| issue.code == "unsupported_payload_path")
+            .unwrap();
+        assert_eq!(finding.severity, IssueSeverity::Error);
+        assert_eq!(finding.relative_path, Some(Path::new("bin").join(".data")));
+
+        fixture.write(APPINFO, APPINFO_FIXTURE);
+        let prepared = fixture.scan();
+        assert!(prepared.is_prepared());
+        assert!(!validate(&prepared, Some(selected))
+            .iter()
+            .any(|issue| issue.code == "unsupported_payload_path"));
     }
 
     #[test]

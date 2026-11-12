@@ -1,5 +1,18 @@
 # Decisions — PortableForge
 
+## 2026-11-12 — Build from an unpacked app folder
+
+Use the folder scan to propose an entry point and read app details. Require an
+explicit decision before bundling files. Preserve the selected directory layout
+and generate launcher settings for the selected executable. Findings about
+likely fixed paths are advisory because each app interprets its settings
+differently.
+
+Run the pinned builders in private staging. Publish the verified installer and
+its receipt together to a new output folder. The wizard reports static build
+evidence separately from installation or behavior after moving the app.
+[Folder workflow](docs/FOLDER_FIRST.md)
+
 ## 2026-11-12 — Bundle the portable test box files
 
 This replaces the October 25 setup executable bundle. Release packaging
