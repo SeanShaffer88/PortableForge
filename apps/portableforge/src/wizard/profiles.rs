@@ -69,6 +69,15 @@ pub(super) struct ProfileFlow {
     error: Option<String>,
 }
 
+impl ProfileFlow {
+    pub(super) fn folder_tool_paths(&self) -> (PathBuf, PathBuf) {
+        (
+            entered(&self.launcher_tools),
+            entered(&self.installer_tools),
+        )
+    }
+}
+
 enum JobEvent {
     Stage(&'static str),
     #[cfg(all(windows, target_arch = "x86_64"))]

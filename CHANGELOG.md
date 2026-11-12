@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Build a portable installer from an unpacked app folder. Review the suggested executable and app details, confirm permission to bundle the files, and build from the wizard.
 - Bundle the extracted Sandboxie-Plus 1.18.8 x64 portable files.
   **Open bundled test box folder** and **Portable test box instructions**
   guide manual startup and cleanup through the vendor's manager.
@@ -38,6 +39,9 @@
   PortableApps.com package into a `.paf.exe` using the official installer
   tool. PortableForge checks the embedded icons against the package ICO
   and records the final file's SHA-256 and size.
+
+### Changed
+- Default to GitHub Dark. Previously saved appearance choices still apply.
 
 ## [0.2.1] — 2026-10-25
 

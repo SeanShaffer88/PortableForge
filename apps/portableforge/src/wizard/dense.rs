@@ -567,6 +567,7 @@ mod tests {
             &[
                 "Pick up where I left off",
                 "About this wizard",
+                portableforge_core::guide::folder_flow::CHOOSE_FOLDER,
                 "Capture with Sandboxie-Plus",
                 "Open saved profiles",
                 "first.exe",

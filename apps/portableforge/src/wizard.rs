@@ -5,6 +5,7 @@
 //! and the other core modules. No business rules live here.
 
 use eframe::egui;
+use portableforge_core::guide::folder_flow as folder_copy;
 use portableforge_core::guide::{self, SharingAnswer, SHARING_ANSWERS, STEPS};
 use portableforge_core::orchestrate::{
     evaluate_preflight, CapturePoint, PreflightReport, SessionLayout,
@@ -15,12 +16,14 @@ use portableforge_core::settings::{self, WizardDraft, WizardSettings};
 
 mod artwork_ui;
 mod dense;
+mod folder_flow;
 mod profiles;
 mod shell;
 mod theme;
 
 pub struct WizardApp {
     profile_flow: profiles::ProfileFlow,
+    folder_flow: folder_flow::Flow,
     artwork: artwork_ui::Editor,
     theme_state: theme::State,
     shell: shell::State,
@@ -92,6 +95,7 @@ impl Default for WizardApp {
             .unwrap_or(false);
         Self {
             profile_flow: profiles::ProfileFlow::default(),
+            folder_flow: folder_flow::Flow::default(),
             artwork: artwork_ui::Editor::default(),
             theme_state: theme::State::default(),
             shell: shell::State::default(),
@@ -1063,7 +1067,16 @@ impl eframe::App for WizardApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         self.poll_profile_work(ctx);
-        if self.profile_flow.busy() && ctx.input(|input| input.viewport().close_requested()) {
+        if let Some(path) = self.folder_flow.poll(ctx) {
+            self.installer_path = path.to_string_lossy().into_owned();
+            self.settings.remember_installer(&self.installer_path);
+            self.setup_changed();
+            self.log
+                .push(format!("Setup file chosen: {}", self.installer_path));
+        }
+        if (self.profile_flow.busy() || self.folder_flow.busy())
+            && ctx.input(|input| input.viewport().close_requested())
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         self.persist_if_due();
@@ -1077,20 +1090,25 @@ impl eframe::App for WizardApp {
             return;
         }
 
-        // Drag-and-drop: dropping the setup file anywhere on the pick
-        // step is the same as choosing it with Browse.
-        if STEPS[self.step.min(STEPS.len() - 1)].id == "pick" {
-            let dropped = ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone()));
+        let pick_step = STEPS[self.step.min(STEPS.len() - 1)].id == "pick";
+        if (pick_step || self.folder_flow.open)
+            && !self.folder_flow.busy()
+            && !ctx.memory(|memory| memory.top_modal_layer().is_some())
+        {
+            let dropped = ctx.input_mut(|i| {
+                std::mem::take(&mut i.raw.dropped_files)
+                    .into_iter()
+                    .find_map(|file| file.path)
+            });
             if let Some(path) = dropped {
-                self.installer_path = path.to_string_lossy().into_owned();
-                self.settings
-                    .remember_installer(&self.installer_path.clone());
-                self.setup_changed();
-                self.log.push(format!(
-                    "Setup file chosen: {}",
-                    self.installer_path.clone()
-                ));
+                self.inspect_app_folder(ctx, path, true);
+                self.update_heading_focus(ctx);
             }
+        }
+        if self.folder_flow.open {
+            self.show_folder_flow(ctx);
+            self.show_shell_popup(ctx);
+            return;
         }
 
         let step = &STEPS[self.step];
@@ -1123,7 +1141,11 @@ impl eframe::App for WizardApp {
                 "Tell PortableForge when the app has closed.",
             ),
             _ => match (verified, step.id) {
-                (_, "pick") => (step.title, step.what_happens, step.what_you_do),
+                (_, "pick") => (
+                    folder_copy::PICK_TITLE,
+                    folder_copy::PICK_HELP,
+                    step.what_you_do,
+                ),
                 (true, "clean") => (
                     "Check your setup",
                     "Check the dedicated box and packaging tools before starting capture.",
@@ -1486,6 +1508,9 @@ impl eframe::App for WizardApp {
                             dense::view_text(ui, "About this wizard", "Welcome to PortableForge",
                                 &guide::WELCOME.join("\n"), true);
                         });
+                    }
+                    if ui.button(folder_copy::CHOOSE_FOLDER).clicked() {
+                        self.choose_app_folder(ctx);
                     }
                     let setup_label = ui.label("Setup file (.exe or .msi)");
                     ui.horizontal(|ui| {
