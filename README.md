@@ -31,6 +31,8 @@ In the standard package flow, select a setup file and review the system checks. 
 2. Review the detected name, version, publisher and app icon. Supply missing details, confirm permission to include the files, and review any settings that refer to a fixed location. Choose the official Launcher Generator 2.2.9 and Installer 3.9.19 folders if they have not been selected.
 3. Choose a new output folder and build. The installer and build receipt appear together there when the build succeeds.
 
+Use **Edit Package Artwork** to change the app icon or the image shown on the left side of the installer. Preview your changes and choose **Apply Artwork** before building.
+
 PortableForge leaves the source folder intact and preserves its directory layout in staging. The official installer builder skips housekeeping files such as `thumbs.db`. It warns about likely fixed paths and parent-folder references in supported settings files. The folder check does not start the app, so the build result reports that portability at runtime is unverified. A prepared PortableApps.com package can use the trusted prepared-package command described below.
 
 ## Reuse a reviewed capture in the wizard
