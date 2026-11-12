@@ -76,7 +76,7 @@ runs:
         Assert-CleanSandboxieHost
         try {
           $arguments = @(
-            '/PORTABLE=1', '/CURRENTUSER', '/VERYSILENT', '/SUPPRESSMSGBOXES',
+            '/PORTABLE=1', '/CURRENTUSER', '/LANG=english', '/VERYSILENT', '/SUPPRESSMSGBOXES',
             '/NORESTART', '/NOCLOSEAPPLICATIONS', '/NORESTARTAPPLICATIONS', '/NOICONS',
             '/MERGETASKS="!RefreshBuild,!InstallImDisk"', "/DIR=""$destination""", "/LOG=""$log"""
           )
@@ -104,12 +104,25 @@ runs:
           $file = Get-Item -LiteralPath (Join-Path $destination $name)
           if ($file.PSIsContainer -or $file.Length -le 0) { throw "Missing portable Sandboxie-Plus file $name." }
         }
-        # The pinned vendor payload supplies two empty portable mode markers.
+        # The vendor ships empty markers, then writes only the selected UI language
+        # to Sandboxie-Plus.ini during the pinned portable extraction.
+        # https://github.com/sandboxie-plus/Sandboxie/blob/v1.18.8/Installer/Sandboxie-Plus.iss
         foreach ($name in @('Sandboxie.ini', 'Sandboxie-Plus.ini')) {
           $file = Get-Item -LiteralPath (Join-Path $destination $name)
           if ($file -isnot [IO.FileInfo] -or
-              ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $file.Length -ne 0) {
-            throw "Invalid portable Sandboxie-Plus marker $name. Expected an empty regular file."
+              ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Invalid portable Sandboxie-Plus marker $name. Expected a regular file."
+          }
+          if ($name -eq 'Sandboxie.ini') {
+            if ($file.Length -ne 0) { throw 'Expected an empty Sandboxie.ini portable marker.' }
+            continue
+          }
+          if ($file.Length -le 0 -or $file.Length -gt 4096) {
+            throw 'Sandboxie-Plus.ini is outside the expected vendor configuration size.'
+          }
+          $ini = (Get-Content -LiteralPath $file.FullName -Raw).TrimStart([char]0xFEFF)
+          if ($ini -cnotmatch '\A\s*\[Options\][ \t]*(?:\r\n|\n|\r)\s*UiLanguage[ \t]*=[ \t]*en\s*\z') {
+            throw 'Expected only the vendor English UI language in Sandboxie-Plus.ini.'
           }
         }
         $entries = @(Get-ChildItem -LiteralPath $destination -Force -Recurse)
