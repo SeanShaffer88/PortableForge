@@ -189,11 +189,11 @@ pub fn save_reviewed_profile_with_artwork(
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| format!("Could not read the build clock: {e}"))?;
-    let work = output.join(format!(
-        "profile-preparation-{}-{}",
-        std::process::id(),
-        time.as_nanos()
-    ));
+    // Keep the private staging name short enough for the package's payload
+    // paths. The exclusive directory create below still rejects collisions.
+    let stamp = format!("{}:{}", std::process::id(), time.as_nanos());
+    let suffix = crate::snapshot::sha256_hex(stamp.as_bytes());
+    let work = output.join(format!("pf-{}", &suffix[..16]));
     let package = work.join(&meta.app_id);
     validate_pal_path(&work)?;
     validate_pal_path(&package)?;
@@ -263,10 +263,14 @@ pub fn save_reviewed_profile_with_artwork(
                 Ok(())
             },
         )?;
-        if built.has_errors() || !built.skipped.is_empty() {
-            return Err(
-                "The capture could not be packaged without errors or skipped files.".into(),
-            );
+        if let Some(reason) = built.skipped.first() {
+            return Err(format!("Could not copy the captured files. {reason}"));
+        }
+        if let Some(issue) = built.issues.iter().find(|issue| issue.error) {
+            return Err(format!(
+                "The package did not pass validation. {}: {}",
+                issue.field, issue.message
+            ));
         }
         let payload = package.join("App").join(&meta.base_app_name);
         for directory in capture
