@@ -476,17 +476,24 @@ mod build_paths {
         directory: &File,
         destination: &Path,
     ) -> io::Result<()> {
-        let name: Vec<u16> = destination.as_os_str().encode_wide().collect();
+        let name = wide(destination);
+        let name_bytes = std::mem::size_of_val(&name[..name.len() - 1]);
         let offset = std::mem::offset_of!(RenameInfo, first_name_unit);
-        let size = (offset + 2 * name.len()).max(std::mem::size_of::<RenameInfo>());
-        let mut buffer = vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
+        let size = offset
+            .checked_add(std::mem::size_of_val(name.as_slice()))
+            .map(|size| size.max(std::mem::size_of::<RenameInfo>()))
+            .and_then(|size| u32::try_from(size).ok())
+            .ok_or_else(|| io::Error::other("The destination path is too long."))?;
+        let name_bytes = u32::try_from(name_bytes)
+            .map_err(|_| io::Error::other("The destination name is too long."))?;
+        let mut buffer = vec![0usize; (size as usize).div_ceil(std::mem::size_of::<usize>())];
         let header = buffer.as_mut_ptr().cast::<RenameInfo>();
         // SAFETY: usize alignment is adequate for RenameInfo; the allocation
-        // covers the fixed fields and complete UTF-16 path without a NUL.
+        // covers the fixed fields and complete NUL-terminated UTF-16 path.
         unsafe {
             (*header).replace = 0;
             (*header).root = ptr::null_mut();
-            (*header).name_bytes = (name.len() * 2) as u32;
+            (*header).name_bytes = name_bytes;
             ptr::copy_nonoverlapping(
                 name.as_ptr(),
                 buffer.as_mut_ptr().cast::<u8>().add(offset).cast::<u16>(),
@@ -496,12 +503,7 @@ mod build_paths {
         // SAFETY: directory is the originally opened DELETE-access handle;
         // FileRenameInfo with ReplaceIfExists false cannot overwrite output.
         if unsafe {
-            SetFileInformationByHandle(
-                directory.as_raw_handle(),
-                3,
-                buffer.as_ptr().cast(),
-                size as u32,
-            )
+            SetFileInformationByHandle(directory.as_raw_handle(), 3, buffer.as_ptr().cast(), size)
         } == 0
         {
             return Err(io::Error::last_os_error());

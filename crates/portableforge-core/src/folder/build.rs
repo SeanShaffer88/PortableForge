@@ -904,4 +904,59 @@ mod tests {
         published.unwrap();
         assert_eq!(bytes.unwrap(), b"owned");
     }
+
+    #[test]
+    fn published_directory_keeps_exact_utf16_name_and_identity() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let parent = owned_path(&std::env::temp_dir()).unwrap();
+        fs::create_dir(&parent).unwrap();
+        let parent_guard = super::super::windows::open_writable_ancestor(&parent).unwrap();
+        let mut residues = Vec::new();
+        let mut results = Vec::new();
+        for suffix in ["", "a", "ab", "abc"] {
+            let source = parent.join("stage");
+            let name = format!("Ready-Å-𐐀{suffix}");
+            let destination = parent.join(&name);
+            residues.push(destination.as_os_str().encode_wide().count() % 4);
+            fs::create_dir(&source).unwrap();
+            fs::write(source.join("Sample.paf.exe"), b"fixture").unwrap();
+            fs::write(source.join("build-manifest.json"), b"receipt").unwrap();
+            let handle = super::super::windows::own_delivery(&source).unwrap();
+            let identity = super::super::windows::file_identity(&handle).unwrap();
+            let published = super::super::windows::publish_directory(&handle, &destination);
+            drop(handle);
+            let actual: Vec<_> = fs::read_dir(&parent)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .collect();
+            let exact_name = actual.len() == 1 && actual[0].file_name() == name.as_str();
+            let actual_identity = super::super::windows::own_delivery(&destination)
+                .and_then(|file| super::super::windows::file_identity(&file));
+            let artifact = fs::read(destination.join("Sample.paf.exe"));
+            let manifest = fs::read(destination.join("build-manifest.json"));
+            for entry in actual {
+                fs::remove_dir_all(entry.path()).unwrap();
+            }
+            results.push((
+                published,
+                exact_name,
+                actual_identity,
+                identity,
+                artifact,
+                manifest,
+            ));
+        }
+        drop(parent_guard);
+        fs::remove_dir(&parent).unwrap();
+        residues.sort_unstable();
+        assert_eq!(residues, [0, 1, 2, 3]);
+        for (published, exact_name, actual_identity, identity, artifact, manifest) in results {
+            published.unwrap();
+            assert!(exact_name);
+            assert_eq!(actual_identity.unwrap(), identity);
+            assert_eq!(artifact.unwrap(), b"fixture");
+            assert_eq!(manifest.unwrap(), b"receipt");
+        }
+    }
 }
