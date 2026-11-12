@@ -19,3 +19,7 @@ The wizard collects the relative entry point, app details, pinned tool locations
 The installer and receipt are published together through a same-volume directory rename. An existing destination is preserved. Stop requests are cooperative and checked before publication. Temporary files are cleaned up on success, failure, or a completed stop. If Windows prevents cleanup, the error identifies the affected path.
 
 The receipt records the build evidence and final installer hash. Fixed-path and parent-folder findings are advisory. Runtime portability and host-state restoration require an isolated app test. Settings values are preserved as supplied.
+
+## Try the installer
+
+From the build result, choose **Test Installer** and confirm to start. PortableForge checks the installer and receipt against their hashes from publication before starting the existing Sandboxie-Plus test. Complete setup in the dedicated box and close the app after each of the two launches. The test records observed data changes and box cleanup separately from the build receipt.

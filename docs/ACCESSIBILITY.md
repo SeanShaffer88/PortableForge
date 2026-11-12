@@ -72,3 +72,11 @@ Standard, Large, and Extra large text.
 from folder review. **Apply Artwork** keeps edits for the current review,
 and **Cancel** or Escape discards unapplied edits. Closing the editor
 returns focus to **Edit Package Artwork**.
+
+**Test Installer** opens a confirmation from the built result. **Cancel**
+has initial focus, and **Start Test** opens the installer in a fresh
+Sandboxie-Plus box after checking the original build receipt. The running
+screen shows the setup and two-launch instructions. **Cancel Test**
+requests cancellation, and the wizard waits for the cleanup result.
+**Show Test Details** opens a paged report. The built installer remains
+available after the test.

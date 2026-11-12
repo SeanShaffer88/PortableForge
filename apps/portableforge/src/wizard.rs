@@ -17,6 +17,8 @@ use portableforge_core::settings::{self, WizardDraft, WizardSettings};
 mod artwork_ui;
 mod dense;
 mod folder_flow;
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod installer_test;
 mod profiles;
 mod shell;
 mod theme;
@@ -270,6 +272,15 @@ fn sessions_base() -> std::path::PathBuf {
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".to_string());
     std::path::PathBuf::from(home).join("PortableForge Sessions")
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+fn unique_folder(parent: &std::path::Path, prefix: &str) -> Result<std::path::PathBuf, String> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    Ok(parent.join(format!("{prefix}-{stamp}")))
 }
 
 fn test_state_root() -> Option<std::path::PathBuf> {
@@ -1080,8 +1091,8 @@ impl eframe::App for WizardApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         self.persist_if_due();
-        let editing_artwork = self.artwork.is_open() || self.folder_flow.artwork_open();
-        if !editing_artwork {
+        let modal_open = self.artwork.is_open() || self.folder_flow.modal_open();
+        if !modal_open {
             self.handle_shell_keys(ctx);
         }
         self.update_heading_focus(ctx);
@@ -1094,7 +1105,7 @@ impl eframe::App for WizardApp {
         let pick_step = STEPS[self.step.min(STEPS.len() - 1)].id == "pick";
         if (pick_step || self.folder_flow.open)
             && !self.folder_flow.busy()
-            && !editing_artwork
+            && !modal_open
             && !ctx.memory(|memory| memory.top_modal_layer().is_some())
         {
             let dropped = ctx.input_mut(|i| {
@@ -1111,6 +1122,8 @@ impl eframe::App for WizardApp {
             self.show_folder_flow(ctx);
             self.show_shell_popup(ctx);
             self.folder_flow.show_artwork(ctx);
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            self.folder_flow.show_test_confirmation(ctx);
             return;
         }
 

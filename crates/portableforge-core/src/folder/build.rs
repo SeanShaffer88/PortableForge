@@ -95,6 +95,8 @@ impl FolderBuildControl {
 pub struct FolderBuildReport {
     pub artifact: PathBuf,
     pub manifest: PathBuf,
+    /// SHA-256 of the receipt verified immediately before atomic publication.
+    pub manifest_sha256: String,
     pub sha256: String,
     pub size_bytes: u64,
 }
@@ -417,6 +419,7 @@ fn build_inner(
         Ok(FolderBuildReport {
             artifact,
             manifest,
+            manifest_sha256: receipt_sha256,
             sha256: compiler.sha256,
             size_bytes: compiler.size_bytes,
         })
