@@ -13,6 +13,8 @@ use portableforge_core::guide::folder_flow as copy;
 use super::{artwork_ui, WizardApp};
 
 mod draft;
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod runtime;
 mod view;
 
 use draft::{suggested_id, Draft};
@@ -54,6 +56,8 @@ pub(super) struct Flow {
     findings_from: Page,
     error: Option<Failure>,
     result: Option<Delivery>,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    runtime: runtime::TestFlow,
     status: Option<&'static str>,
     job: Option<mpsc::Receiver<Event>>,
     #[cfg(all(windows, target_arch = "x86_64"))]
@@ -61,9 +65,16 @@ pub(super) struct Flow {
     stop_pending: bool,
 }
 
+#[derive(Clone)]
 struct Delivery {
     artifact: PathBuf,
     manifest: PathBuf,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    manifest_sha256: String,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    artifact_sha256: String,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    app_id: String,
 }
 
 struct Selection {
@@ -83,6 +94,8 @@ enum Outcome {
     Selected(Selection, Vec<FolderIssue>),
     #[cfg(all(windows, target_arch = "x86_64"))]
     Built(Delivery),
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    Tested(Result<super::installer_test::InstallerTest, super::installer_test::TestFailure>),
     #[cfg(all(windows, target_arch = "x86_64"))]
     Stopped,
 }
@@ -143,8 +156,21 @@ impl Flow {
         self.page
     }
 
-    pub(super) fn artwork_open(&self) -> bool {
+    pub(super) fn modal_open(&self) -> bool {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if self.runtime.prompt.is_some() {
+            return true;
+        }
         self.artwork.is_open()
+    }
+
+    fn test_in_progress(&self) -> bool {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        {
+            self.runtime.cancellation.is_some()
+        }
+        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        false
     }
 
     #[cfg(windows)]
@@ -187,7 +213,7 @@ impl Flow {
     }
 
     pub(super) fn back(&mut self) {
-        if self.busy() || self.artwork_open() {
+        if self.busy() || self.modal_open() {
             return;
         }
         if self.page == Page::Findings {
@@ -200,7 +226,7 @@ impl Flow {
     }
 
     pub(super) fn toggle_findings(&mut self) {
-        if !self.busy() && !self.artwork_open() {
+        if !self.busy() && !self.modal_open() {
             if self.page == Page::Findings {
                 self.page = self.findings_from;
             } else {
@@ -313,7 +339,7 @@ impl Flow {
             match job.try_recv() {
                 #[cfg(all(windows, target_arch = "x86_64"))]
                 Ok(Event::Stage(status)) => {
-                    if !self.stop_pending {
+                    if !self.stop_pending && !self.runtime.stopping {
                         self.status = Some(status);
                     }
                 }
@@ -329,8 +355,12 @@ impl Flow {
         };
         self.job = None;
         #[cfg(all(windows, target_arch = "x86_64"))]
+        let was_testing = self.test_in_progress();
+        #[cfg(all(windows, target_arch = "x86_64"))]
         {
             self.control = None;
+            self.runtime.cancellation = None;
+            self.runtime.stopping = false;
         }
         self.stop_pending = false;
         self.status = None;
@@ -366,7 +396,18 @@ impl Flow {
                 self.page = Page::Done;
             }
             #[cfg(all(windows, target_arch = "x86_64"))]
+            Ok(Outcome::Tested(result)) => {
+                self.error = None;
+                self.runtime.outcome = Some(result);
+            }
+            #[cfg(all(windows, target_arch = "x86_64"))]
             Ok(Outcome::Stopped) => self.status = Some(copy::STOPPED),
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            Err(failure) if was_testing => {
+                self.runtime.outcome = Some(Err(super::installer_test::TestFailure::Failed(
+                    failure.detail,
+                )));
+            }
             Err(failure) => self.error = Some(failure),
         }
         None
@@ -441,7 +482,7 @@ impl Flow {
     pub(super) fn build_ready(&self) -> bool {
         self.page == Page::Review
             && !self.busy()
-            && !self.artwork_open()
+            && !self.modal_open()
             && self.scan.is_some()
             && self.blocker().is_none()
     }
@@ -488,6 +529,9 @@ impl Flow {
                 Ok(report) => Ok(Outcome::Built(Delivery {
                     artifact: report.artifact,
                     manifest: report.manifest,
+                    manifest_sha256: report.manifest_sha256,
+                    artifact_sha256: report.sha256,
+                    app_id: metadata.app_id,
                 })),
                 Err(error) if error == "Build stopped. No installer was published." => {
                     Ok(Outcome::Stopped)
@@ -549,7 +593,7 @@ impl WizardApp {
     }
 
     pub(super) fn inspect_app_folder(&mut self, ctx: &egui::Context, path: PathBuf, dropped: bool) {
-        if self.folder_flow.busy() || self.folder_flow.artwork_open() || self.profile_flow.busy() {
+        if self.folder_flow.busy() || self.folder_flow.modal_open() || self.profile_flow.busy() {
             return;
         }
         let (launcher, installer) = self.profile_flow.folder_tool_paths();
@@ -789,7 +833,7 @@ mod tests {
         };
 
         click(&mut wizard, "Edit Package Artwork…");
-        assert!(wizard.folder_flow.artwork_open());
+        assert!(wizard.folder_flow.modal_open());
         assert!(!wizard.folder_flow.build_ready());
         let source = wizard.folder_flow.source.clone();
         wizard.inspect_app_folder(&ctx, source.join("Another"), true);
@@ -806,7 +850,7 @@ mod tests {
         click(&mut wizard, "Use default left pane");
         click(&mut wizard, "Cancel");
         let flow = &mut wizard.folder_flow;
-        assert!(!flow.artwork_open());
+        assert!(!flow.modal_open());
         assert!(flow.artwork.artwork().unwrap().sidebar.is_some());
         assert!(wizard.artwork.artwork().is_none());
 
@@ -870,7 +914,13 @@ mod tests {
                 ),
                 (
                     Page::Done,
-                    &["Installer Built", "Build Receipt", "Open Output Folder"][..],
+                    &[
+                        "Installer Built",
+                        "Build Receipt",
+                        "Open Output Folder",
+                        #[cfg(all(windows, target_arch = "x86_64"))]
+                        copy::TEST_INSTALLER,
+                    ][..],
                 ),
             ] {
                 wizard.folder_flow.page = page;
@@ -881,6 +931,12 @@ mod tests {
                             .output()
                             .join("WidgetPortable_2.4.1.paf.exe"),
                         manifest: wizard.folder_flow.output().join("build-manifest.json"),
+                        #[cfg(all(windows, target_arch = "x86_64"))]
+                        manifest_sha256: "a".repeat(64),
+                        #[cfg(all(windows, target_arch = "x86_64"))]
+                        artifact_sha256: "b".repeat(64),
+                        #[cfg(all(windows, target_arch = "x86_64"))]
+                        app_id: "WidgetPortable".into(),
                     });
                 }
                 let mut draw = || {

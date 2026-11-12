@@ -19,3 +19,31 @@ pub const STOPPING: &str = "Stopping after the current step…";
 pub const STOPPED: &str = "Build stopped before the installer was saved.";
 pub const RIGHTS: &str = "I have permission to include these app files.";
 pub const UNVERIFIED: &str = "App behavior after moving it is unverified.";
+pub const TEST_INSTALLER: &str = "Test Installer…";
+pub const TEST_CONFIRM: &str = "Test the Built Installer";
+pub const TEST_TRUST_HELP: &str = "Continue only if you trust the app and its files.";
+pub const TEST_SETUP_HELP: &str =
+    "Complete setup in a fresh Sandboxie-Plus box. Leave any option to open the app unchecked.";
+pub const TEST_LAUNCH_HELP: &str =
+    "Change a setting on the first launch, check it on the second, and close the app each time.";
+pub const TEST_START: &str = "Start Test";
+pub const TEST_RUNNING: &str = "Testing Your Installer";
+pub const TEST_CHECKING: &str = "Checking the installer and build receipt…";
+pub const TEST_USE_WINDOWS: &str = "Follow the installer and app windows.";
+pub const TEST_CANCEL: &str = "Cancel Test";
+pub const TEST_STOPPING: &str = "Stopping the test and cleaning up the box…";
+pub const TEST_FINISHED: &str = "Installer Test Finished";
+pub const TEST_FINISHED_HELP: &str =
+    "Setup and both app launches completed. The test box was removed.";
+pub const TEST_CANCELLED: &str = "Installer Test Cancelled";
+pub const TEST_CANCELLED_HELP: &str = "The built installer is still available.";
+pub const TEST_FAILED: &str = "Installer Test Could Not Finish";
+pub const TEST_IDENTITY_HELP: &str =
+    "The installer or receipt could not be verified. Build a new installer to test it.";
+pub const TEST_STARTUP_HELP: &str =
+    "The Sandboxie-Plus test could not start. The built installer is still available.";
+pub const TEST_FAILURE_HELP: &str =
+    "Open Show Test Details to see what happened. The built installer is still available.";
+pub const TEST_CLEANUP_HELP: &str =
+    "Could not confirm test box cleanup. Open Show Test Details for recovery information.";
+pub const TEST_DETAILS: &str = "Show Test Details";

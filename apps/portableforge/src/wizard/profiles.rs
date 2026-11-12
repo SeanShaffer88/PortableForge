@@ -2,8 +2,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-#[cfg(all(windows, target_arch = "x86_64"))]
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -13,11 +11,11 @@ use portableforge_core::sbie_verified::CancellationToken;
 use portableforge_core::settings::{self, CleanedCapture, SavedBuild, SavedProfileApproval};
 use portableforge_core::SandboxMode;
 
-#[cfg(all(windows, target_arch = "x86_64"))]
-use super::sessions_base;
 use super::{
     dense, open_folder, picker_start_dir, setup_input, theme, SetupInput, SetupKind, WizardApp,
 };
+#[cfg(all(windows, target_arch = "x86_64"))]
+use super::{installer_test, sessions_base, unique_folder};
 
 #[derive(Default)]
 pub(super) struct ProfileFlow {
@@ -2402,15 +2400,6 @@ struct CaptureInputs {
 }
 
 #[cfg(all(windows, target_arch = "x86_64"))]
-fn unique_folder(parent: &Path, prefix: &str) -> Result<PathBuf, String> {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    Ok(parent.join(format!("{prefix}-{stamp}")))
-}
-
-#[cfg(all(windows, target_arch = "x86_64"))]
 fn capture_job(
     inputs: CaptureInputs,
     tx: &mpsc::Sender<JobEvent>,
@@ -2736,26 +2725,10 @@ fn change(same: bool) -> &'static str {
     }
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
-fn check_build_identity(
-    approval: &SavedBuild,
-    verified: &portableforge_core::compile::VerifiedBuild,
-) -> Result<(), String> {
-    if verified.manifest_sha256 != approval.manifest_sha256
-        || verified.sha256 != approval.artifact_sha256
-        || verified.app_id.as_deref() != Some(approval.app_id.as_str())
-        || verified.artifact != approval.artifact
-    {
-        return Err("This installer or its build receipt changed since the build.".into());
-    }
-    Ok(())
-}
-
 fn build_details_job(build: &SavedBuild) -> Result<JobResult, String> {
     #[cfg(all(windows, target_arch = "x86_64"))]
     {
-        let result = portableforge_core::compile::verify_build_result(&build.directory)?;
-        check_build_identity(build, &result)?;
+        let result = installer_test::BuildIdentity::from(build).verify()?;
         let details = serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?;
         Ok(JobResult::BuildDetails("Verified build details", details))
     }
@@ -2771,8 +2744,8 @@ fn compare_builds_job(left: &SavedBuild, right: &SavedBuild) -> Result<JobResult
     {
         let comparison =
             portableforge_core::compile::compare_build_results(&left.directory, &right.directory)?;
-        check_build_identity(left, &comparison.left)?;
-        check_build_identity(right, &comparison.right)?;
+        installer_test::BuildIdentity::from(left).check(&comparison.left)?;
+        installer_test::BuildIdentity::from(right).check(&comparison.right)?;
         let details = [
             ("Setup", comparison.same_setup),
             ("Package", comparison.same_package),
@@ -2819,48 +2792,12 @@ fn compare_builds_job(left: &SavedBuild, right: &SavedBuild) -> Result<JobResult
 
 #[cfg(all(windows, target_arch = "x86_64"))]
 fn runtime_job(build: &SavedBuild, cancellation: &CancellationToken) -> Result<JobResult, String> {
-    use portableforge_core::sbie_verified::{
-        preflight, test_built_paf, RuntimeDataStatus, RuntimeRequest,
-    };
-    preflight()?;
-    let verified = portableforge_core::compile::verify_build_result(&build.directory)?;
-    check_build_identity(build, &verified)?;
-    let parent = sessions_base();
-    std::fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
-    let output = unique_folder(&parent, "Installer-Test")?;
-    let report = test_built_paf(
-        RuntimeRequest {
-            installer: &verified.artifact,
-            installer_sha256: &build.artifact_sha256,
-            app_id: &build.app_id,
-            output: &output,
-            timeout: std::time::Duration::from_secs(600),
-        },
-        cancellation,
-    )?;
-    let state = match report.data_status {
-        RuntimeDataStatus::NoDataFilesChanged => {
-            "No portable data files changed during the first launch."
-        }
-        RuntimeDataStatus::ObservedChangesRetained => {
-            "The observed portable data changes were still present after reopening."
-        }
-        RuntimeDataStatus::ObservedChangesDifferAfterReopen => {
-            "Some observed portable data changes differed after reopening."
-        }
-    };
-    let details = format!(
-        "Installer finished with exit code {}.\nApp launches finished with exit codes {} and {}.\nDedicated box removed · {}\n\n{state}\nNew or changed data files · {}\nDeleted data files · {}\nUnchanged on reopen · {}\n\nTest folder\n{}",
-        report.install_exit,
-        report.launch_exits[0],
-        report.launch_exits[1],
-        if report.cleanup_verified { "Yes" } else { "Unconfirmed" },
-        report.data_files_created_or_changed,
-        report.data_files_deleted,
-        report.data_files_unchanged_on_reopen,
-        output.display(),
-    );
-    Ok(JobResult::BuildDetails("Installer test result", details))
+    let result = installer_test::run(build.into(), cancellation, || {})
+        .map_err(|error| error.detail().to_owned())?;
+    Ok(JobResult::BuildDetails(
+        "Installer test result",
+        result.details(),
+    ))
 }
 
 #[cfg(test)]

@@ -28,7 +28,7 @@ impl WizardApp {
                 ui.horizontal(|ui| {
                     let flow = &mut self.folder_flow;
                     let back = ui.add_enabled(
-                        !flow.busy() && !flow.artwork_open(),
+                        !flow.busy() && !flow.modal_open(),
                         egui::Button::new(if flow.page == Page::Done {
                             "Choose Another App"
                         } else {
@@ -38,13 +38,31 @@ impl WizardApp {
                     if back.clicked() {
                         flow.back();
                     }
-                    if !flow.busy() && !flow.artwork_open() {
+                    if !flow.busy() && !flow.modal_open() {
                         shell::register_region(ui, shell::Region::Footer, back.id);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if flow.page == Page::Done {
-                            let open = dense::primary_action(ui, true, "Open Output Folder");
-                            shell::register_region(ui, shell::Region::Footer, open.id);
+                        if flow.test_in_progress() {
+                            #[cfg(all(windows, target_arch = "x86_64"))]
+                            {
+                                let stop = ui.add_enabled(
+                                    !flow.runtime.stopping,
+                                    egui::Button::new(copy::TEST_CANCEL),
+                                );
+                                if !flow.runtime.stopping {
+                                    shell::register_region(ui, shell::Region::Footer, stop.id);
+                                }
+                                if stop.clicked() {
+                                    flow.cancel_test();
+                                    ctx.request_repaint();
+                                }
+                            }
+                        } else if flow.page == Page::Done {
+                            let enabled = !flow.modal_open();
+                            let open = dense::primary_action(ui, enabled, "Open Output Folder");
+                            if enabled {
+                                shell::register_region(ui, shell::Region::Footer, open.id);
+                            }
                             if open.clicked() {
                                 if let Some(folder) = flow
                                     .result
@@ -85,7 +103,7 @@ impl WizardApp {
             .frame(dense::content_frame(ctx))
             .show(ctx, |ui| {
                 let choose = ui
-                    .add_enabled_ui(!self.folder_flow.artwork_open(), |ui| {
+                    .add_enabled_ui(!self.folder_flow.modal_open(), |ui| {
                         self.folder_flow.show_body(ui)
                     })
                     .inner;
@@ -109,7 +127,9 @@ impl Flow {
     /// The return value asks the wizard to open the shared input folder picker.
     fn show_body(&mut self, ui: &mut egui::Ui) -> bool {
         if self.busy() {
-            let title = if self.scan.is_none() {
+            let title = if self.test_in_progress() {
+                copy::TEST_RUNNING
+            } else if self.scan.is_none() {
                 "Checking Your Folder"
             } else if self.page == Page::Program {
                 "Reading App Details"
@@ -120,7 +140,15 @@ impl Flow {
             if let Some(status) = self.status {
                 status_label(ui, status);
             }
-            path_summary(ui, "Folder", &self.source);
+            if self.test_in_progress() {
+                ui.label(copy::TEST_SETUP_HELP);
+                ui.label(copy::TEST_LAUNCH_HELP);
+                if let Some(error) = &self.error {
+                    ui.colored_label(ui.visuals().error_fg_color, error.message);
+                }
+            } else {
+                path_summary(ui, "Folder", &self.source);
+            }
             return false;
         }
 
@@ -426,14 +454,29 @@ impl Flow {
         }
     }
 
-    fn show_delivery(&self, ui: &mut egui::Ui) {
-        dense::heading(ui, copy::BUILT, copy::UNVERIFIED);
+    fn show_delivery(&mut self, ui: &mut egui::Ui) {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        let tested = self.show_test_outcome(ui);
+        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        let tested = false;
+        if !tested {
+            dense::heading(ui, copy::BUILT, copy::UNVERIFIED);
+        }
         if let Some(delivery) = &self.result {
             if let Some(name) = delivery.artifact.file_name() {
                 ui.label(egui::RichText::new(name.to_string_lossy()).strong());
             }
             path_summary(ui, "Installer", &delivery.artifact);
             path_summary(ui, "Build Receipt", &delivery.manifest);
+        }
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if self.result.is_some() {
+            let test = ui
+                .push_id("folder-test-action", |ui| ui.button(copy::TEST_INSTALLER))
+                .inner;
+            if test.clicked() {
+                self.open_test_confirmation(test.id);
+            }
         }
     }
 }
