@@ -475,7 +475,9 @@ impl Flow {
                 .push_id("folder-test-action", |ui| ui.button(copy::TEST_INSTALLER))
                 .inner;
             if test.clicked() {
-                self.open_test_confirmation(test.id);
+                self.open_test_confirmation();
+            } else {
+                self.restore_test_focus(ui, &test);
             }
         }
     }
