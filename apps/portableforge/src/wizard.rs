@@ -1328,11 +1328,16 @@ impl eframe::App for WizardApp {
                             ui.push_id(("review-finding", item_index), |ui| {
                             card(ui).show(ui, |ui| {
                             let (title, body) = guide::plain_card(&item.classification.finding);
+                            let excluded_fix = verified
+                                && matches!(item.decision, portableforge_core::review::Decision::Fix { .. })
+                                && !self.profile_flow.review_fix_supported(&item.classification.finding);
                             ui.label(egui::RichText::new(title).strong());
-                            ui.label(
-                                egui::RichText::new(body)
-                                    .color(ui.visuals().weak_text_color()),
-                            );
+                            if !excluded_fix {
+                                ui.label(
+                                    egui::RichText::new(body)
+                                        .color(ui.visuals().weak_text_color()),
+                                );
+                            }
                             if verified {
                                 use portableforge_core::classify::Finding;
 
@@ -1354,7 +1359,7 @@ impl eframe::App for WizardApp {
                             }
                             match &mut item.decision {
                                 portableforge_core::review::Decision::Fix { on } => {
-                                    if verified && !self.profile_flow.review_fix_supported(&item.classification.finding) {
+                                    if excluded_fix {
                                         ui.label(self.profile_flow.exclusion_reason(&item.classification.finding));
                                     } else {
                                         ui.checkbox(on, "Apply this fix");
