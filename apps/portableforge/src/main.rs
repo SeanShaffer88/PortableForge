@@ -84,7 +84,7 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
     #[cfg(windows)]
     {
         fn reg_value(value: &str) -> Option<String> {
-            let out = std::process::Command::new("reg.exe")
+            let out = std::process::Command::new(system_directory().ok()?.join("reg.exe"))
                 .args([
                     "query",
                     r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
@@ -123,19 +123,25 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
         } else {
             product_name
         };
-        let sandbox_exe_present =
-            std::path::Path::new(r"C:\Windows\System32\WindowsSandbox.exe").exists();
+        let system_directory = system_directory();
+        let sandbox_exe_present = system_directory
+            .as_ref()
+            .is_ok_and(|directory| directory.join("WindowsSandbox.exe").is_file());
         // The Sandbox feature's real state, asked from DISM itself
         // (needs elevation; a refused run stays "could not be checked").
-        let feature_enabled = std::process::Command::new("dism.exe")
-            .args([
-                "/online",
-                "/Get-FeatureInfo",
-                "/FeatureName:Containers-DisposableClientVM",
-                "/quiet",
-            ])
-            .output()
+        let feature_enabled = system_directory
             .ok()
+            .and_then(|directory| {
+                std::process::Command::new(directory.join("dism.exe"))
+                    .args([
+                        "/English",
+                        "/Online",
+                        "/Get-FeatureInfo",
+                        "/FeatureName:Containers-DisposableClientVM",
+                    ])
+                    .output()
+                    .ok()
+            })
             .filter(|out| out.status.success())
             .and_then(|out| {
                 portableforge_core::orchestrate::parse_dism_feature_state(&String::from_utf8_lossy(
@@ -213,6 +219,9 @@ pub fn sbie_user_name() -> String {
 /// permissions itself.
 #[cfg(windows)]
 pub fn run_program_file(path: &std::path::Path) -> Result<(), String> {
+    if portableforge_core::orchestrate::is_msi(path) {
+        return Err("Open MSI setup only inside the guided Windows Sandbox capture.".into());
+    }
     std::process::Command::new(path)
         .spawn()
         .map_err(|e| format!("The installer could not be opened: {e}"))?;
@@ -1141,6 +1150,9 @@ fn run_cli(args: &[String]) -> Result<(), String> {
             let program = args
                 .get(2)
                 .ok_or("Give the program to run in the quick test box.")?;
+            if portableforge_core::orchestrate::is_msi(std::path::Path::new(program)) {
+                return Err("MSI capture requires the guided Windows Sandbox workflow.".into());
+            }
             let layout = session_layout_for(&std::path::PathBuf::from(dir));
             let start = sbie_start_exe().ok_or("Sandboxie was not found on this computer.")?;
             let session_id = layout
@@ -2162,6 +2174,76 @@ pub fn launch_sandbox(
         Err(format!(
             "The test box can only be started on Windows. On Windows this runs: {program} {arg}"
         ))
+    }
+}
+
+#[cfg(windows)]
+fn system_directory() -> Result<std::path::PathBuf, String> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    }
+    let mut buffer = [0_u16; 261];
+    // SAFETY: the output buffer is writable for the supplied number of UTF-16 units.
+    let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    if length == 0 || length >= buffer.len() {
+        return Err("Could not resolve the Windows system directory.".into());
+    }
+    String::from_utf16(&buffer[..length])
+        .map(std::path::PathBuf::from)
+        .map_err(|e| e.to_string())
+}
+
+pub fn guided_msi_available() -> Result<(), String> {
+    portableforge_core::orchestrate::require_guided_msi_sandbox(&collect_preflight_facts())
+}
+
+pub fn prepare_guided_msi_capture(
+    base: &std::path::Path,
+    id: &str,
+    setup: &std::path::Path,
+    companions: &[std::path::PathBuf],
+    agent: &std::path::Path,
+    memory_mb: u32,
+) -> Result<portableforge_core::orchestrate::SessionLayout, String> {
+    #[cfg(windows)]
+    {
+        let mut session = Session::new(id, SandboxMode::WindowsSandbox);
+        session.installer_path = Some(setup.to_string_lossy().into_owned());
+        portableforge_core::orchestrate::prepare_guided_msi_session(
+            base,
+            &session,
+            &collect_preflight_facts(),
+            setup,
+            companions,
+            agent,
+            memory_mb,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (base, id, setup, companions, agent, memory_mb);
+        Err("Guided MSI capture requires Windows Sandbox.".into())
+    }
+}
+
+pub fn launch_guided_msi_capture(
+    layout: &portableforge_core::orchestrate::SessionLayout,
+) -> Result<(), String> {
+    guided_msi_available()?;
+    #[cfg(windows)]
+    {
+        portableforge_core::orchestrate::verify_guided_msi_config(layout)?;
+        std::process::Command::new(system_directory()?.join("WindowsSandbox.exe"))
+            .arg(&layout.wsb_path)
+            .spawn()
+            .map_err(|e| format!("Windows Sandbox could not be started: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = layout;
+        Err("Guided MSI capture requires Windows Sandbox.".into())
     }
 }
 

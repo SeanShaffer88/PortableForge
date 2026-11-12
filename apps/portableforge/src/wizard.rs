@@ -26,6 +26,8 @@ pub struct WizardApp {
     show_details: bool,
     detail_page: usize,
     review_page: usize,
+    review_needs_attention: bool,
+    msi_review_ready: bool,
     safety_page: usize,
     recent_page: usize,
     applied_layout_zoom: f32,
@@ -92,6 +94,8 @@ impl Default for WizardApp {
             show_details: false,
             detail_page: 0,
             review_page: 0,
+            review_needs_attention: false,
+            msi_review_ready: false,
             safety_page: 0,
             recent_page: 0,
             applied_layout_zoom: 0.0,
@@ -290,12 +294,38 @@ pub fn card() -> egui::Frame {
 }
 
 impl WizardApp {
+    fn setup_changed(&mut self) {
+        self.profile_flow.detach_capture();
+        self.layout = None;
+        self.session_mode = None;
+        self.review = Review::default();
+        self.review_page = 0;
+        self.review_needs_attention = false;
+        self.msi_review_ready = false;
+        self.sharing = None;
+        self.hints_applied = false;
+        self.main_exe.clear();
+        self.app_name.clear();
+        self.publisher.clear();
+        self.description.clear();
+        self.homepage.clear();
+        self.package_version = "1.0.0.0".into();
+        self.mark_dirty();
+    }
+
+    fn uses_guided_msi(&self) -> bool {
+        !self.profile_flow.selected_capture
+            && std::path::Path::new(self.installer_path.trim())
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("msi"))
+    }
+
     /// Make the session folder, copy the setup file and the helper
     /// into it, ask the helper for the clean note, and start the test
     /// box (on Windows). Safe to press again — an existing session is
     /// kept and only the box start is retried.
     fn start_test_box(&mut self) {
-        if self.use_verified_capture() {
+        if self.use_verified_capture() || self.uses_guided_msi() {
             return;
         }
         if self.layout.is_none() {
@@ -484,14 +514,17 @@ impl WizardApp {
         // for in order: after-install once its note is missing and the
         // clean note exists, after-runtime likewise.
         let exchange = &layout.exchange;
-        if exchange.join("after-install.json").is_file()
+        let guided_msi = self.uses_guided_msi();
+        if (!guided_msi || self.step == 5)
+            && exchange.join("after-install.json").is_file()
             && !exchange.join("after-runtime.json").is_file()
         {
             let _ = portableforge_core::orchestrate::request_snapshot(
                 &layout,
                 CapturePoint::AfterRuntime,
             );
-        } else if exchange.join("before.json").is_file()
+        } else if (!guided_msi || self.step == 3)
+            && exchange.join("before.json").is_file()
             && !exchange.join("after-install.json").is_file()
         {
             let _ = portableforge_core::orchestrate::request_snapshot(
@@ -564,7 +597,12 @@ impl WizardApp {
 
     fn finish_capture(&mut self, layout: &portableforge_core::orchestrate::SessionLayout) {
         match portableforge_core::orchestrate::post_capture(layout) {
-            Ok(outcome) => self.apply_capture(outcome),
+            Ok(outcome) => {
+                self.apply_capture(outcome);
+                if self.uses_guided_msi() {
+                    self.msi_review_ready = true;
+                }
+            }
             Err(error) => self.log.push(error),
         }
     }
@@ -761,6 +799,8 @@ impl WizardApp {
         WizardDraft {
             step: if self.use_verified_capture() {
                 "pick"
+            } else if self.uses_guided_msi() && self.step > 1 {
+                "safety"
             } else {
                 STEPS[self.step].id
             }
@@ -775,6 +815,8 @@ impl WizardApp {
             online_url: self.online_url.clone(),
             online_sha: self.online_sha.clone(),
             force_sandbox: self.force_sandbox,
+            cleaned_capture: self.profile_flow.cleaned_capture.clone(),
+            profile_update_base: self.profile_flow.update_base.clone(),
         }
     }
 
@@ -806,7 +848,7 @@ impl WizardApp {
     }
 
     /// Take up the unfinished run the settings remembered.
-    fn resume_draft(&mut self) {
+    fn resume_draft(&mut self, ctx: &egui::Context) {
         let Some(draft) = self.settings.draft.clone() else {
             return;
         };
@@ -826,6 +868,13 @@ impl WizardApp {
             self.step = pos;
         }
         self.resume_offer = false;
+        self.profile_flow.update_base = draft.profile_update_base;
+        if let Some(capture) = draft.cleaned_capture {
+            self.restore_cleaned_capture(ctx, capture);
+        } else if self.profile_flow.update_base.is_some() {
+            self.enter_verified_capture();
+            self.check_prerequisites(ctx);
+        }
         self.mark_dirty();
         self.log
             .push("Picked up your unfinished run where you left it.".to_string());
@@ -862,14 +911,36 @@ impl WizardApp {
             && !self.profile_flow.busy()
             && !self.profile_flow.profile_saved()
             && !(self.use_verified_capture() && self.step == 2 && self.profile_flow.captured)
+            && !(self.uses_guided_msi() && self.step == 2 && self.layout.is_some())
     }
 
     fn can_advance(&self) -> bool {
         if self.profile_flow.busy() {
             return false;
         }
+        if self.uses_guided_msi() {
+            let note = |name| {
+                self.layout
+                    .as_ref()
+                    .is_some_and(|layout| layout.exchange.join(name).is_file())
+            };
+            match self.step {
+                1 => {
+                    return self
+                        .profile_flow
+                        .msi_ready
+                        .as_ref()
+                        .is_some_and(Result::is_ok)
+                }
+                2 => return note("before.json"),
+                3 => return note("after-install.json"),
+                5 => return self.msi_review_ready,
+                _ => {}
+            }
+        }
         match (self.use_verified_capture(), self.step) {
             (true, 2) => self.profile_flow.captured,
+            (true, 6) => self.review.all_acknowledged(),
             (true, 9) => self.profile_flow.profile_saved(),
             _ => true,
         }
@@ -908,6 +979,9 @@ impl WizardApp {
                     true
                 } else {
                     self.settings.remember_installer(self.installer_path.trim());
+                    if self.uses_guided_msi() {
+                        self.force_sandbox = false;
+                    }
                     false
                 }
             }
@@ -1001,7 +1075,7 @@ impl eframe::App for WizardApp {
         if self.finished {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        self.poll_profile_work();
+        self.poll_profile_work(ctx);
         if self.profile_flow.busy() && ctx.input(|input| input.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
@@ -1031,7 +1105,7 @@ impl eframe::App for WizardApp {
                 self.installer_path = path.to_string_lossy().into_owned();
                 self.settings
                     .remember_installer(&self.installer_path.clone());
-                self.mark_dirty();
+                self.setup_changed();
                 self.log.push(format!(
                     "Setup file chosen: {}",
                     self.installer_path.clone()
@@ -1041,43 +1115,71 @@ impl eframe::App for WizardApp {
 
         let step = &STEPS[self.step];
         let verified = self.use_verified_capture();
-        let (title, what_happens, what_you_do) = match (verified, step.id) {
-            (_, "pick") => (
-                "Choose a setup file",
-                "Browse, paste a path, or drag in a setup file.",
-                "",
+        let guided_msi = self.uses_guided_msi();
+        let (title, what_happens, what_you_do) = match (guided_msi, step.id) {
+            (true, "safety") => (
+                "Check Windows Sandbox",
+                "MSI setup runs inside Windows Sandbox.",
+                "The guided steps prepare a package folder.",
             ),
             (true, "clean") => (
-                "Capture with Sandboxie-Plus",
-                "Run setup and the installed app in a dedicated Sandboxie-Plus box.",
-                "Review opens after cleanup is confirmed.",
+                "Prepare the MSI test box",
+                "Choose any companion files before starting Windows Sandbox.",
+                "Wait for the clean note before opening setup.",
             ),
-            (true, "changes") => (
-                "Review captured changes",
-                "Review the location and suggested fix for each change.",
-                "Select the settings the portable copy should keep.",
+            (true, "install") => (
+                "Install the app in Windows Sandbox",
+                r"Open the selected MSI from C:\PortableForge\Input inside the box.",
+                "Tell PortableForge when setup finishes.",
             ),
-            (true, "name") => (
-                "Name your portable copy",
-                "Review the app details that appear in the installer.",
-                "Enter a publisher, homepage and short description.",
+            (true, "try") => (
+                "Try the installed app",
+                "Open the app inside Windows Sandbox and try the settings you want to keep.",
+                "Continue when you are ready to close it.",
             ),
-            (true, "sharing") => (
-                "Confirm redistribution rights",
-                "Confirm that you have permission to include the app files.",
-                "A saved profile contains a copy of the app.",
+            (true, "close") => (
+                "Close the installed app",
+                "Keep Windows Sandbox open while PortableForge takes its last note.",
+                "Tell PortableForge when the app has closed.",
             ),
-            (true, "build") => (
-                "Save a reusable profile",
-                "Save the app files and fixes you approved.",
-                "Use the saved profile to build again from the same setup file.",
-            ),
-            (true, "done") => (
-                "Your profile is ready",
-                "The reviewed profile is saved.",
-                "Build installer becomes available when the approval is saved.",
-            ),
-            _ => (step.title, step.what_happens, step.what_you_do),
+            _ => match (verified, step.id) {
+                (_, "pick") => (
+                    "Choose a setup file",
+                    "Browse, paste a path, or drag in a setup file.",
+                    "",
+                ),
+                (true, "clean") => (
+                    "Check your setup",
+                    "Check the dedicated box and packaging tools before starting capture.",
+                    "Review opens after cleanup is confirmed.",
+                ),
+                (true, "changes") => (
+                    "Review captured changes",
+                    "Review the location and suggested fix for each change.",
+                    "Select the settings the portable copy should keep.",
+                ),
+                (true, "name") => (
+                    "Name your portable copy",
+                    "Review the app details that appear in the installer.",
+                    "Enter a publisher, homepage and short description.",
+                ),
+                (true, "sharing") => (
+                    "Confirm redistribution rights",
+                    "Confirm that you have permission to include the app files.",
+                    "A saved profile contains a copy of the app.",
+                ),
+                (true, "build") => (
+                    "Save a reusable profile",
+                    "Save the app files and fixes you approved.",
+                    "Use the saved profile to build again from the same setup file.",
+                ),
+                (true, "done") => (
+                    "Your profile is ready",
+                    "The reviewed profile is saved.",
+                    "Build installer becomes available when the approval is saved.",
+                ),
+                _ => (step.title, step.what_happens, step.what_you_do),
+            },
         };
         self.show_header(ctx, step.title, Some((self.step + 1, STEPS.len())));
         self.show_navigation(ctx, step.id, verified);
@@ -1102,7 +1204,7 @@ impl eframe::App for WizardApp {
                         .on_hover_text("Fill the steps back in with what you had entered.")
                         .clicked()
                     {
-                        self.resume_draft();
+                        self.resume_draft(ctx);
                     }
                     if ui
                         .button("Start again")
@@ -1115,7 +1217,7 @@ impl eframe::App for WizardApp {
             }
 
             // Compute the safety report the first time its step shows.
-            if step.id == "safety" && self.preflight.is_none() {
+            if step.id == "safety" && !guided_msi && self.preflight.is_none() {
                 let mut facts = crate::collect_preflight_facts();
                 facts.sandbox_override = self.force_sandbox;
                 self.preflight = Some(evaluate_preflight(&facts));
@@ -1124,6 +1226,7 @@ impl eframe::App for WizardApp {
 
             // Per-step intent collection (the core decides what it means).
             match step.id {
+                "safety" if guided_msi => self.show_msi_safety(ui),
                 "safety" => {
                     let mut override_change: Option<bool> = None;
                     if let Some(report) = &self.preflight {
@@ -1271,6 +1374,9 @@ impl eframe::App for WizardApp {
                     }
                 }
                 "changes" => {
+                    if verified {
+                        self.show_update_review(ui);
+                    }
                     if self.review.items.is_empty() {
                         ui.label(
                             egui::RichText::new(
@@ -1279,12 +1385,37 @@ impl eframe::App for WizardApp {
                             .color(color(guide::theme::TEXT_MUTED)),
                         );
                     } else {
-                        ui.label(dense::review_counts(&self.review));
+                        if verified {
+                            let count = self.review.items.iter().filter(|item| {
+                                matches!(item.decision, portableforge_core::review::Decision::Acknowledge { seen: false })
+                            }).count();
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.selectable_label(!self.review_needs_attention, "All findings").clicked() {
+                                    self.review_needs_attention = false;
+                                    self.review_page = 0;
+                                }
+                                if ui.selectable_label(self.review_needs_attention, format!("Needs attention ({count})")).clicked() {
+                                    self.review_needs_attention = true;
+                                    self.review_page = 0;
+                                }
+                                ui.label(dense::review_counts(&self.review));
+                            });
+                        } else {
+                            ui.label(dense::review_counts(&self.review));
+                        }
                         let mut items = std::mem::take(&mut self.review.items);
+                        let visible = items.iter().enumerate().filter_map(|(index, item)| {
+                            (!verified || !self.review_needs_attention || matches!(
+                                item.decision, portableforge_core::review::Decision::Acknowledge { seen: false }
+                            )).then_some(index)
+                        }).collect::<Vec<_>>();
                         let per_page = ((ui.available_height() - 62.0) / 132.0).floor().max(1.0) as usize;
-                        let range = dense::page(ui, &mut self.review_page, items.len(), per_page, "Finding");
+                        let range = dense::page(ui, &mut self.review_page, visible.len(), per_page, "Finding");
+                        if visible.is_empty() {
+                            ui.label("All warnings have been reviewed.");
+                        }
                         for index in range {
-                            let item = &mut items[index];
+                            let item = &mut items[visible[index]];
                             card().show(ui, |ui| {
                             let (title, body) = guide::plain_card(&item.classification.finding);
                             ui.label(egui::RichText::new(title).strong());
@@ -1311,12 +1442,15 @@ impl eframe::App for WizardApp {
                             match &mut item.decision {
                                 portableforge_core::review::Decision::Fix { on } => {
                                     if verified && !self.profile_flow.review_fix_supported(&item.classification.finding) {
-                                        ui.label("This change will be excluded.");
+                                        ui.label(self.profile_flow.exclusion_reason(&item.classification.finding));
                                     } else {
                                         ui.checkbox(on, "Apply this fix");
                                     }
                                 }
                                 portableforge_core::review::Decision::Acknowledge { seen } => {
+                                    if verified {
+                                        ui.label(self.profile_flow.exclusion_reason(&item.classification.finding));
+                                    }
                                     ui.checkbox(seen, "Acknowledge warning");
                                 }
                                 portableforge_core::review::Decision::Info => {}
@@ -1401,7 +1535,7 @@ impl eframe::App for WizardApp {
                             )
                             .changed()
                         {
-                            self.mark_dirty();
+                            self.setup_changed();
                         }
                         if ui
                             .button("Browse…")
@@ -1419,7 +1553,7 @@ impl eframe::App for WizardApp {
                                 self.installer_path = path.to_string_lossy().into_owned();
                                 self.settings
                                     .remember_installer(&self.installer_path.clone());
-                                self.mark_dirty();
+                                self.setup_changed();
                             }
                         }
                         dense::view_text(ui, "View path", "Setup path", &self.installer_path, view);
@@ -1459,8 +1593,9 @@ impl eframe::App for WizardApp {
                     }
                     ui.add_space(8.0);
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button("Capture with Sandboxie-Plus").clicked() {
+                        if !guided_msi && ui.button("Capture with Sandboxie-Plus").clicked() {
                             self.enter_verified_capture();
+                            self.check_prerequisites(ctx);
                         }
                         if ui.button("Rebuild from a saved profile").clicked() {
                             self.open_profile_replay(false);
@@ -1488,11 +1623,12 @@ impl eframe::App for WizardApp {
                                 .clicked()
                             {
                                 self.installer_path = path.clone();
-                                self.mark_dirty();
+                                self.setup_changed();
                             }
                         }
                     }
                 }
+                "clean" if guided_msi => self.show_msi_capture(ui),
                 "clean" => {
                     if verified {
                         self.show_verified_capture(ui);
@@ -1530,6 +1666,13 @@ impl eframe::App for WizardApp {
                         }
                     }
                 }
+                "install" | "close" if guided_msi => {
+                    let label = if self.step == 3 { "MSI setup finished" } else { "App is closed" };
+                    if ui.button(label).clicked() {
+                        self.check_test_box();
+                    }
+                }
+                "try" if guided_msi => {}
                 "install" | "try" | "close" => {
                     if ui
                         .button("Check on the test box")
@@ -1695,6 +1838,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn changing_setup_detaches_previous_capture_and_approval() {
+        let mut wizard = WizardApp::default();
+        wizard.profile_flow.captured = true;
+        wizard.profile_flow.cleaned_capture = Some(settings::CleanedCapture {
+            folder: "old-capture".into(),
+            receipt_sha256: "a".repeat(64),
+        });
+        wizard.main_exe = "old.exe".into();
+        wizard.sharing = Some(SharingAnswer::IMadeIt);
+        wizard.installer_path = "replacement.exe".into();
+        wizard.setup_changed();
+        assert!(!wizard.profile_flow.captured);
+        assert!(wizard.profile_flow.cleaned_capture.is_none());
+        assert!(wizard.main_exe.is_empty());
+        assert!(wizard.sharing.is_none());
+        assert_eq!(wizard.installer_path, "replacement.exe");
+    }
+
+    #[test]
+    fn guided_msi_requires_its_own_preflight_even_with_override() {
+        let mut wizard = WizardApp {
+            installer_path: "selected.MSI".into(),
+            step: 1,
+            force_sandbox: true,
+            ..Default::default()
+        };
+        assert!(wizard.uses_guided_msi());
+        assert!(!wizard.use_verified_capture());
+        assert!(!wizard.can_advance());
+        wizard.profile_flow.msi_ready = Some(Err("Windows Sandbox unavailable".into()));
+        assert!(!wizard.can_advance());
+        wizard.profile_flow.msi_ready = Some(Ok(()));
+        assert!(wizard.can_advance());
+        wizard.step = 2;
+        assert!(!wizard.can_advance());
+    }
+
+    #[test]
     fn sizes_read_plainly() {
         assert_eq!(format_size(0), "0 bytes");
         assert_eq!(format_size(812), "812 bytes");
@@ -1789,6 +1970,7 @@ mod tests {
             let lower = lit
                 .to_ascii_lowercase()
                 .replace("sandboxie-plus", "")
+                .replace("windows sandbox", "")
                 .replace("launcher generator", "")
                 .replace("sha-256", "");
             for banned in portableforge_core::guide::BANNED_IN_PRIMARY {

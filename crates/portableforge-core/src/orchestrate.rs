@@ -337,23 +337,7 @@ pub fn prepare_session(
     clipboard: bool,
 ) -> Result<SessionLayout, String> {
     let layout = session_layout(base, &session.id);
-    for dir in [
-        &layout.root,
-        &layout.input,
-        &layout.tools,
-        &layout.exchange,
-        &layout.output,
-    ] {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("We could not make the work folder {}: {e}", dir.display()))?;
-    }
-    if let Some(agent) = agent_source {
-        let dest = layout.tools.join("portableforge-agent.exe");
-        std::fs::copy(agent, &dest)
-            .map_err(|e| format!("We could not copy the helper program: {e}"))?;
-    }
-    std::fs::write(&layout.session_path, session.to_json())
-        .map_err(|e| format!("We could not save the run record: {e}"))?;
+    prepare_session_files(&layout, session, agent_source)?;
     if session.sandbox_mode == SandboxMode::WindowsSandbox {
         let cfg = SandboxConfig {
             input_dir: layout.input.to_string_lossy().into_owned(),
@@ -371,6 +355,31 @@ pub fn prepare_session(
     Ok(layout)
 }
 
+fn prepare_session_files(
+    layout: &SessionLayout,
+    session: &Session,
+    agent_source: Option<&Path>,
+) -> Result<(), String> {
+    for dir in [
+        &layout.root,
+        &layout.input,
+        &layout.tools,
+        &layout.exchange,
+        &layout.output,
+    ] {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("We could not make the work folder {}: {e}", dir.display()))?;
+    }
+    if let Some(agent) = agent_source {
+        let dest = layout.tools.join("portableforge-agent.exe");
+        std::fs::copy(agent, &dest)
+            .map_err(|e| format!("We could not copy the helper program: {e}"))?;
+    }
+    std::fs::write(&layout.session_path, session.to_json())
+        .map_err(|e| format!("We could not save the run record: {e}"))?;
+    Ok(())
+}
+
 /// The command that starts the test box on Windows. Returned as data
 /// (program + argument) so callers never build a shell string.
 pub fn sandbox_launch_command(layout: &SessionLayout) -> (String, String) {
@@ -378,6 +387,210 @@ pub fn sandbox_launch_command(layout: &SessionLayout) -> (String, String) {
         "WindowsSandbox.exe".to_string(),
         layout.wsb_path.to_string_lossy().into_owned(),
     )
+}
+
+/// Decide whether to attempt Windows Sandbox launch for guided MSI capture.
+/// A clean guest snapshot is required before the MSI can be opened there.
+pub fn require_guided_msi_sandbox(facts: &PreflightFacts) -> Result<(), String> {
+    if facts.is_windows
+        && facts.os_build >= 18342
+        && facts.edition_supported
+        && facts.sandbox_exe_present
+        && facts.feature_enabled != Some(false)
+        && facts.virt_enabled != Some(false)
+        && !facts.sandbox_override
+    {
+        Ok(())
+    } else {
+        Err(
+            "MSI capture requires Windows Sandbox on a supported edition with the feature enabled."
+                .into(),
+        )
+    }
+}
+
+pub const GUIDED_MSI_FILE: &str = "guided-msi.json";
+const GUIDED_MSI_LIMIT: usize = 64 * 1024;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuidedMsi {
+    pub setup_name: String,
+    memory_mb: u32,
+    #[cfg(windows)]
+    files: std::collections::BTreeMap<String, crate::profile::Fingerprint>,
+}
+
+impl GuidedMsi {
+    pub fn read(tools: &Path) -> Result<Self, String> {
+        let path = tools.join(GUIDED_MSI_FILE);
+        let mut bytes = Vec::new();
+        std::fs::File::open(&path)
+            .and_then(|file| {
+                file.take(GUIDED_MSI_LIMIT as u64 + 1)
+                    .read_to_end(&mut bytes)
+            })
+            .map_err(|e| format!("Could not read the guided MSI record: {e}"))?;
+        Self::parse(&bytes)
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() > GUIDED_MSI_LIMIT {
+            return Err("The guided MSI record is too large.".into());
+        }
+        let record: Self = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+        if !crate::compile::safe_name(&record.setup_name) || !is_msi(Path::new(&record.setup_name))
+        {
+            return Err("The guest setup record must name a single MSI file.".into());
+        }
+        Ok(record)
+    }
+
+    #[cfg(windows)]
+    fn config(&self, layout: &SessionLayout) -> SandboxConfig {
+        SandboxConfig {
+            input_dir: layout.input.to_string_lossy().into_owned(),
+            tools_dir: layout.tools.to_string_lossy().into_owned(),
+            exchange_dir: layout.exchange.to_string_lossy().into_owned(),
+            memory_mb: self.memory_mb,
+            ..Default::default()
+        }
+    }
+}
+
+pub fn is_msi(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("msi"))
+}
+
+#[cfg(windows)]
+pub fn prepare_guided_msi_session(
+    base: &Path,
+    session: &Session,
+    facts: &PreflightFacts,
+    setup: &Path,
+    companions: &[PathBuf],
+    agent: &Path,
+    memory_mb: u32,
+) -> Result<SessionLayout, String> {
+    use crate::compile::windows::{local_directory, new_output_path, within};
+    use crate::profile::{fingerprint, local_file, write_new};
+
+    require_guided_msi_sandbox(facts)?;
+    if session.sandbox_mode != SandboxMode::WindowsSandbox || !is_msi(setup) {
+        return Err("Choose an MSI for guided Windows Sandbox capture.".into());
+    }
+    if !crate::compile::safe_name(&session.id) || companions.len() > 32 {
+        return Err("Use a plain session name and at most 32 MSI companion files.".into());
+    }
+    std::fs::create_dir_all(base)
+        .map_err(|e| format!("Could not create the session folder: {e}"))?;
+    let base = local_directory(base)?;
+    let layout = session_layout(&base, &session.id);
+    new_output_path(&layout.root)?;
+    let agent = local_file(agent)?;
+    let mut names = std::collections::BTreeSet::new();
+    let mut staged = Vec::new();
+    let mut bytes = 0_u64;
+    for source in std::iter::once(setup).chain(companions.iter().map(PathBuf::as_path)) {
+        let source = local_file(source)?;
+        if within(&source, &layout.root) {
+            return Err("Choose setup files outside the session folder.".into());
+        }
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("Missing input filename.")?
+            .to_owned();
+        let size = std::fs::metadata(&source)
+            .map_err(|e| format!("Could not inspect the MSI input: {e}"))?
+            .len();
+        bytes = bytes.saturating_add(size);
+        if bytes > 4 * 1024 * 1024 * 1024
+            || name.encode_utf16().count() > 128
+            || !names.insert(name.to_uppercase())
+        {
+            return Err(
+                "MSI inputs must have distinct plain filenames and total at most 4 GiB.".into(),
+            );
+        }
+        let fp = fingerprint(&source)?;
+        if fp.size_bytes != size || (staged.is_empty() && size == 0) {
+            return Err("The MSI setup is empty or an input changed during staging.".into());
+        }
+        staged.push((name, source, fp));
+    }
+    let guided = GuidedMsi {
+        setup_name: staged[0].0.clone(),
+        memory_mb,
+        files: staged
+            .iter()
+            .map(|(name, _, fingerprint)| (name.clone(), fingerprint.clone()))
+            .collect(),
+    };
+    let cfg = guided.config(&layout);
+    cfg.check()?;
+    std::fs::create_dir(&layout.root)
+        .map_err(|e| format!("Could not create the unique MSI session: {e}"))?;
+    prepare_session_files(&layout, session, Some(&agent))?;
+    for (name, source, expected) in staged {
+        let target = layout.input.join(name);
+        let source = std::fs::File::open(&source)
+            .map_err(|e| format!("Could not open the MSI input: {e}"))?;
+        let mut copy = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map_err(|e| format!("Could not stage the MSI input: {e}"))?;
+        std::io::copy(&mut source.take(expected.size_bytes + 1), &mut copy)
+            .map_err(|e| format!("Could not copy the MSI input: {e}"))?;
+        drop(copy);
+        if fingerprint(&target)? != expected {
+            return Err("An MSI input changed during staging.".into());
+        }
+    }
+    let bytes = serde_json::to_vec(&guided).map_err(|error| error.to_string())?;
+    write_new(&layout.tools.join(GUIDED_MSI_FILE), &bytes)?;
+    std::fs::write(&layout.wsb_path, cfg.to_guided_msi_wsb())
+        .map_err(|e| format!("Could not save the guided MSI Sandbox configuration: {e}"))?;
+    Ok(layout)
+}
+
+#[cfg(windows)]
+pub fn verify_guided_msi_config(layout: &SessionLayout) -> Result<(), String> {
+    if layout.exchange.join("state.json").exists()
+        || CapturePoint::ALL
+            .iter()
+            .any(|point| layout.exchange.join(point.note_name()).exists())
+    {
+        return Err(
+            "This MSI session has already started. Create a new session to capture again.".into(),
+        );
+    }
+    let bytes = crate::profile::read_small(
+        &layout.tools.join(GUIDED_MSI_FILE),
+        &layout.root,
+        GUIDED_MSI_LIMIT,
+    )?;
+    let guided = GuidedMsi::parse(&bytes)?;
+    let cfg = guided.config(layout);
+    cfg.check()?;
+    let expected = cfg.to_guided_msi_wsb();
+    let actual = crate::profile::read_small(&layout.wsb_path, &layout.root, expected.len())?;
+    if actual != expected.as_bytes() {
+        return Err("The guided MSI Windows Sandbox configuration changed.".into());
+    }
+    let rows = crate::profile::inventory(&layout.input)?;
+    if !guided.files.contains_key(&guided.setup_name)
+        || rows.len() != guided.files.len()
+        || rows
+            .iter()
+            .any(|row| row.file.is_none() || guided.files.get(&row.path) != row.file.as_ref())
+    {
+        return Err("The staged MSI or its companion files changed.".into());
+    }
+    Ok(())
 }
 
 /// Read the agent's current state from the exchange folder, if it has
@@ -887,6 +1100,60 @@ mod tests {
             edition_witness: "Professional".to_string(),
             sandboxie_present: false,
         }
+    }
+
+    #[test]
+    fn guided_msi_never_falls_back_when_sandbox_launch_is_unavailable() {
+        let mut facts = facts_good();
+        assert!(require_guided_msi_sandbox(&facts).is_ok());
+        facts.feature_enabled = None;
+        assert!(require_guided_msi_sandbox(&facts).is_ok());
+        facts.feature_enabled = Some(false);
+        assert!(require_guided_msi_sandbox(&facts).is_err());
+        facts.feature_enabled = Some(true);
+        facts.sandbox_override = true;
+        assert!(require_guided_msi_sandbox(&facts).is_err());
+        facts.sandbox_override = false;
+        facts.edition_supported = false;
+        facts.sandboxie_present = true;
+        assert!(require_guided_msi_sandbox(&facts).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn guided_msi_stages_only_explicit_sources_and_rejects_changes() {
+        let base = std::env::temp_dir().join(format!("pf-guided-msi-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        let setup = base.join("Setup.msi");
+        let companion = base.join("Setup.cab");
+        let agent = base.join("test-agent.exe");
+        std::fs::write(&setup, b"test setup").unwrap();
+        std::fs::write(&companion, b"test companion").unwrap();
+        std::fs::write(&agent, b"inert test data").unwrap();
+        let session = Session::new("run", Mode::WindowsSandbox);
+        let layout = prepare_guided_msi_session(
+            &base,
+            &session,
+            &facts_good(),
+            &setup,
+            &[companion],
+            &agent,
+            4096,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(layout.input.join("Setup.msi")).unwrap(),
+            b"test setup"
+        );
+        assert_eq!(
+            std::fs::read(layout.input.join("Setup.cab")).unwrap(),
+            b"test companion"
+        );
+        assert_eq!(std::fs::read_dir(&layout.input).unwrap().count(), 2);
+        assert!(verify_guided_msi_config(&layout).is_ok());
+        std::fs::write(layout.input.join("Setup.cab"), b"changed").unwrap();
+        assert!(verify_guided_msi_config(&layout).is_err());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

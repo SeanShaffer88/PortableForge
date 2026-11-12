@@ -240,7 +240,10 @@ pub(crate) use icons::extract_application_icons;
 pub(crate) mod windows;
 
 #[cfg(windows)]
-pub use windows::{compile_installer, CompileReport};
+pub use windows::{
+    compare_build_results, compile_installer, verify_build_result, BuildComparison, CompileReport,
+    VerifiedBuild,
+};
 
 #[cfg(test)]
 mod tests {

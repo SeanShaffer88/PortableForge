@@ -3,8 +3,10 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -138,7 +140,20 @@ extern "system" {
         size: *mut u32,
     ) -> i32;
     fn ResumeThread(thread: Handle) -> u32;
+    fn CreateEventW(
+        attributes: Handle,
+        manual_reset: i32,
+        initial: i32,
+        name: *const u16,
+    ) -> Handle;
+    fn SetEvent(event: Handle) -> i32;
     fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+    fn WaitForMultipleObjects(
+        count: u32,
+        handles: *const Handle,
+        all: i32,
+        milliseconds: u32,
+    ) -> u32;
     fn GetExitCodeProcess(process: Handle, exit: *mut u32) -> i32;
     fn TerminateProcess(process: Handle, exit: u32) -> i32;
     fn CloseHandle(handle: Handle) -> i32;
@@ -187,6 +202,54 @@ impl Drop for ServiceHandle {
         // SAFETY: this wrapper owns a non-null handle from the SCM.
         unsafe { CloseServiceHandle(self.0) };
     }
+}
+
+/// A single-use cancellation signal shared by the caller and its capture worker.
+#[derive(Clone)]
+pub struct CancellationToken(Arc<OwnedHandle>);
+
+impl CancellationToken {
+    pub fn new() -> Result<Self, String> {
+        // SAFETY: create one unnamed, non-inheritable, manual-reset event.
+        let event = unsafe { CreateEventW(null_mut(), 1, 0, null()) };
+        if event.is_null() {
+            return Err(os_error("create a capture cancellation event"));
+        }
+        // SAFETY: the successful call transferred ownership of this handle.
+        Ok(Self(Arc::new(unsafe {
+            OwnedHandle::from_raw_handle(event)
+        })))
+    }
+
+    pub fn cancel(&self) -> Result<(), String> {
+        // SAFETY: the Arc retains a valid event handle.
+        if unsafe { SetEvent(self.0.as_raw_handle()) } == 0 {
+            return Err(os_error("signal capture cancellation"));
+        }
+        Ok(())
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        // SAFETY: the Arc retains a valid event handle. Fail closed if waiting fails.
+        unsafe { WaitForSingleObject(self.0.as_raw_handle(), 0) != 258 }
+    }
+
+    pub(super) fn check(&self) -> Result<(), String> {
+        if self.is_cancelled() {
+            return Err("The operation was cancelled.".into());
+        }
+        Ok(())
+    }
+}
+
+pub(super) enum LaunchArguments<'a> {
+    Tokens(&'a [OsString]),
+    PafDestination(&'a Path),
+}
+
+pub(super) struct RunLimits<'a> {
+    pub(super) timeout: Duration,
+    pub(super) cancellation: &'a CancellationToken,
 }
 
 pub(super) struct Sandboxie {
@@ -393,10 +456,11 @@ impl Sandboxie {
         name: &str,
         root: &Path,
         image: &Path,
-        args: &[OsString],
+        args: LaunchArguments<'_>,
         cwd: &Path,
-        timeout: Duration,
+        limits: RunLimits<'_>,
     ) -> Result<VerifiedExit, String> {
+        limits.cancellation.check()?;
         let paths = self.verify_box(name, root)?;
         let image_parent = image
             .parent()
@@ -412,7 +476,7 @@ impl Sandboxie {
         let dir = wide(local_directory(cwd)?.as_os_str())?;
         let command = command_line(image.as_os_str(), args)?;
         let name_wide = box_name(name)?;
-        let milliseconds = timeout.as_millis().min((u32::MAX - 1) as u128) as u32;
+        let milliseconds = limits.timeout.as_millis().min((u32::MAX - 1) as u128) as u32;
         // SAFETY: Win32 STARTUPINFOW/PROCESS_INFORMATION are C layouts with a
         // valid all-zero initial state. The service accepts these flags.
         let mut startup: StartupInfo = unsafe { std::mem::zeroed() };
@@ -453,6 +517,9 @@ impl Sandboxie {
         if let Err(error) = self.verify_process(name, &paths, process.pid, child.0, &image, false) {
             return Err(reject_child(child.0, error));
         }
+        if let Err(error) = limits.cancellation.check() {
+            return Err(reject_child(child.0, error));
+        }
         // SAFETY: driver membership, configured roots, isolation flags and the
         // exact retained process image have been checked while still suspended.
         let count = unsafe { ResumeThread(primary.0) };
@@ -462,10 +529,13 @@ impl Sandboxie {
                 format!("Unexpected Sandboxie thread suspension count {count}."),
             ));
         }
-        // SAFETY: the service returned a retained, waitable process handle.
-        let wait = unsafe { WaitForSingleObject(child.0, milliseconds) };
+        let handles = [limits.cancellation.0.as_raw_handle(), child.0];
+        // SAFETY: both handles stay live until the wait completes. Cancellation
+        // is first so concurrent process exit cannot publish a cancelled result.
+        let wait = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, milliseconds) };
         match wait {
-            0 => {
+            0 => Err("The operation was cancelled. The owned box needs cleanup.".into()),
+            1 => {
                 let mut exit = 0;
                 // SAFETY: the process is signaled and the exit-code output is writable.
                 if unsafe { GetExitCodeProcess(child.0, &mut exit) } == 0 {
@@ -629,7 +699,7 @@ impl Sandboxie {
         self.roots(name, root)
     }
 
-    fn verify_global(&self) -> Result<(), String> {
+    pub(super) fn verify_global(&self) -> Result<(), String> {
         // Driver-enforced defaults from the pinned vendor installation are
         // supported. Explicit local/global compatibility exceptions are not.
         for key in self.setting_names(Some("GlobalSettings"))? {
@@ -957,7 +1027,7 @@ fn text(buffer: &[u16]) -> Result<String, String> {
     String::from_utf16(&buffer[..end]).map_err(|_| "Sandboxie returned malformed text.".into())
 }
 
-fn command_line(image: &OsStr, args: &[OsString]) -> Result<Vec<u16>, String> {
+fn command_line(image: &OsStr, args: LaunchArguments<'_>) -> Result<Vec<u16>, String> {
     fn quote(value: &OsStr, out: &mut Vec<u16>) -> Result<(), String> {
         let slash = b'\\' as u16;
         let quote = b'"' as u16;
@@ -986,11 +1056,35 @@ fn command_line(image: &OsStr, args: &[OsString]) -> Result<Vec<u16>, String> {
     }
     let mut out = Vec::new();
     quote(image, &mut out)?;
-    for arg in args {
-        out.push(b' ' as u16);
-        quote(arg, &mut out)?;
-        if out.len() >= 32_767 {
-            return Err("The boxed process command line is too long.".into());
+    match args {
+        LaunchArguments::Tokens(args) => {
+            for arg in args {
+                out.push(b' ' as u16);
+                // Keep simple flags visible to installers that parse the raw
+                // command line, such as NSIS. Escape all other arguments.
+                if !arg.is_empty()
+                    && arg.encode_wide().all(|ch| {
+                        ch != 0
+                            && ch != b'"' as u16
+                            && !char::from_u32(u32::from(ch)).is_some_and(char::is_whitespace)
+                    })
+                {
+                    out.extend(arg.encode_wide());
+                } else {
+                    quote(arg, &mut out)?;
+                }
+                if out.len() >= 32_767 {
+                    return Err("The boxed process command line is too long.".into());
+                }
+            }
+        }
+        LaunchArguments::PafDestination(destination) => {
+            // PortableApps.comInstaller.nsi uses NSIS GetOptions on the raw
+            // command line and appends AppID to this directory. GetOptions
+            // ignores option prefixes inside quotes.
+            let destination = validate_root(destination)?;
+            box_name(&destination[3..])?;
+            out.extend(format!(" /DESTINATION={destination}\\").encode_utf16());
         }
     }
     out.push(0);
@@ -1090,17 +1184,42 @@ mod tests {
     fn quoted_command_keeps_spaces_quotes_and_trailing_slashes_in_one_argument() {
         let command = command_line(
             OsStr::new(r"C:\Program Files\Setup.exe"),
-            &[
+            LaunchArguments::Tokens(&[
                 OsString::from(""),
+                OsString::from("/owned-fixture"),
                 OsString::from("a\"b"),
                 OsString::from(r"C:\Folder With Spaces\"),
-            ],
+            ]),
         )
         .unwrap();
         assert_eq!(
             text(&command).unwrap(),
-            r#""C:\Program Files\Setup.exe" "" "a\"b" "C:\Folder With Spaces\\""#
+            r#""C:\Program Files\Setup.exe" "" /owned-fixture "a\"b" "C:\Folder With Spaces\\""#
         );
+    }
+
+    #[test]
+    fn paf_destination_is_a_raw_owned_root_option() {
+        let installer = OsStr::new(r"C:\A Build\Fixture.paf.exe");
+        let destination = Path::new(r"C:\PF_0123456789ABCDEF");
+        let command =
+            command_line(installer, LaunchArguments::PafDestination(destination)).unwrap();
+        assert_eq!(
+            text(&command).unwrap(),
+            r#""C:\A Build\Fixture.paf.exe" /DESTINATION=C:\PF_0123456789ABCDEF\"#
+        );
+        let other = Path::new(r"C:\Other\PF_0123456789ABCDEF");
+        assert!(command_line(installer, LaunchArguments::PafDestination(other)).is_err());
+    }
+
+    #[test]
+    fn cancellation_stays_signaled_across_clones() {
+        let original = CancellationToken::new().unwrap();
+        let copy = original.clone();
+        assert!(!original.is_cancelled());
+        copy.cancel().unwrap();
+        assert!(original.is_cancelled());
+        assert!(copy.check().is_err());
     }
 
     #[test]

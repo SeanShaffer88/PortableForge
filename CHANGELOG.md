@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### Added
+- Check prerequisites before capture, supply setup arguments and selected
+  companion files, choose an installed app after setup, and cancel or
+  reopen a cleaned capture. **Needs attention** filters unresolved warnings.
+- Search and relocate saved profiles, compare an update with an earlier
+  approval, and build approved apps one at a time from the queue. Build
+  history includes verified receipt comparison and a guided installer
+  test in a dedicated Sandboxie-Plus box.
+- Guided MSI capture in Windows Sandbox on supported Windows editions,
+  with explicitly selected companion files and standard package output.
 - Compact VaporGrid wizard with a subtle tread-plate background, full-width
   paths, and paged findings and details. Standard, Large, and Extra large
   text sizes retain the primary controls at the minimum logical window size.

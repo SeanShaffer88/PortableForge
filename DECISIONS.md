@@ -1,5 +1,28 @@
 # Decisions — PortableForge
 
+## 2026-11-12 — Reopen capture evidence and replay saved approvals
+
+The wizard stores the receipt digest separately from the cleaned capture.
+Reopening checks that digest, the capture notes, and the harvested payload
+before returning to review. Changing setup detaches the previous capture
+and clears its trust and review state. Updating an app requires a fresh
+capture, comparison against the previous approval, and a separate saved
+profile.
+
+The queue freezes the approved profile, setup, tool folder, and output
+folder when an entry is added. It executes serially and records each
+result independently. Saved build identity includes the verified receipt
+digest, installer SHA-256, and app ID. Installer tests check all three
+before opening the dedicated box. Build comparisons retain both installer
+SHA-256s and track staged file times before normalization independently
+of the content hashes.
+
+Windows Installer packages use a guided Windows Sandbox guest flow.
+The clean guest note precedes opening setup, and the guest flow keeps
+network and clipboard sharing disabled. Windows Installer can involve
+a system service, so the Sandboxie-Plus reusable workflow is scoped to
+EXE setup.
+
 ## 2026-11-05 — Dedicated Sandboxie-Plus capture for reusable profiles
 
 The explicit Windows x64 capture command provisions an owned fresh

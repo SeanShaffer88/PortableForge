@@ -27,12 +27,23 @@ In the standard package flow, select a setup file and review the system checks. 
 
 ## Reuse a reviewed capture in the wizard
 
-1. On the first page choose **Capture with Sandboxie-Plus**. This needs Windows x64 and Sandboxie-Plus 1.18.8 x64. Choose a trusted, self-contained setup `.exe` that runs with its default invocation and needs no separate files, extra arguments, network access, elevation, or restart. Enter the full path where it will install the app's main `.exe`.
-2. Confirm that you trust both files and choose **Start capture**. Finish setup inside the box, try the installed app, then close it. The review opens after PortableForge confirms cleanup.
-3. Review the suggested fixes. Enter the portable copy's name, publisher, full HTTP or HTTPS homepage, and a short description. Confirm that you have permission to bundle the app. Select the official PortableApps.com Launcher Generator 2.2.9 folder and a new profile folder, then choose **Save profile**.
-4. Choose **Build installer**, or open **Rebuild from a saved profile** from the first page later. Select the same setup file, the official PortableApps.com Installer 3.9.19 folder, and a new build folder. The wizard checks the setup SHA-256 against the saved capture and checks the profile against the approval it stored separately. A successful build shows the `.paf.exe` and can open its folder.
+1. On the first page choose **Capture with Sandboxie-Plus**. This needs Windows x64 and Sandboxie-Plus 1.18.8 x64. Choose a trusted setup `.exe` that can finish offline without elevation or a restart. In **Setup options**, enter one argument per line and explicitly choose any companion files. Enter the installed app path or leave it blank to pick an app after setup.
+2. Use **Check prerequisites**, confirm that you trust the selected inputs and installed app, and choose **Start capture**. Finish setup inside the dedicated box, choose the installed app if prompted, then try and close it. **Cancel capture** requests cleanup of the dedicated box.
+3. The review opens after cleanup is confirmed. **Needs attention** shows unresolved warnings. If you close the wizard after a cleaned capture, **Pick up where I left off** rechecks its saved receipt and opens the review so you can recheck the choices. Captures whose receipts predate the selected app field need a fresh capture to reopen in the wizard.
+4. Enter the portable copy's name, publisher, full HTTP or HTTPS homepage, and a short description. Confirm permission to bundle the app. Select the official PortableApps.com Launcher Generator 2.2.9 folder and a new profile folder, then choose **Save profile**.
+5. Choose **Build installer**, or open **Rebuild from a saved profile** on the first page later. Select the matching setup, the official PortableApps.com Installer 3.9.19 folder, and a new build folder. The build checks the setup bytes, saved profile approval, staged package, and installer tools before publishing the installer and receipt.
 
-Use printable ASCII for the capture and build paths. Leave out `$`, `%`, single and double quotes, and backticks. Use **Capture location** if your default path contains one of these characters.
+Use printable ASCII for the capture and build paths. Leave out `$`, `%`, single and double quotes, and backticks. Use **Setup options** to pick a capture folder if the default path contains one of these characters.
+
+### Manage profiles and builds
+
+- **Saved profiles** supports searches by name, version, or saved setup fingerprint. **Profile actions** shows the profile and can verify or relocate it. **Capture an update** compares the new capture with the earlier approval before you save a fresh profile.
+- **Add to queue** holds an approved build request for this wizard session. **Build queued apps** processes one app at a time. A failed entry keeps its error and any generated working files. Retry it in a fresh output folder.
+- **Build results** shows saved builds. **Compare builds** verifies both receipts and displays both installer SHA-256s, input differences, and staged file times before normalization when recorded. **Test installer** verifies the chosen receipt and installer again before opening a dedicated Sandboxie-Plus test box. Follow the prompts to complete setup and try the app twice.
+
+### Capture an MSI in Windows Sandbox
+
+Select a trusted `.msi` in the standard wizard and choose **Check Windows Sandbox**. On a supported Windows edition, choose any companion files in **Setup options**, confirm trust, and start Windows Sandbox. Wait for the clean note, then open the staged MSI inside the guest and finish the guided capture steps. This flow prepares a standard package folder. The reusable profile wizard uses the verified Sandboxie-Plus EXE flow above.
 
 ## Safety, in plain words
 

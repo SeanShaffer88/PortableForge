@@ -100,6 +100,15 @@ impl SandboxConfig {
     /// Render the `.wsb` file. The agent path inside the sandbox is the
     /// logon command — a direct executable launch, no shell script.
     pub fn to_wsb(&self) -> String {
+        self.render_wsb("")
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn to_guided_msi_wsb(&self) -> String {
+        self.render_wsb(" --guided-msi")
+    }
+
+    fn render_wsb(&self, agent_options: &str) -> String {
         let networking = if self.networking { "Enable" } else { "Disable" };
         let clipboard = if self.clipboard { "Enable" } else { "Disable" };
         format!(
@@ -129,7 +138,7 @@ impl SandboxConfig {
              \x20   </MappedFolder>\n\
              \x20 </MappedFolders>\n\
              \x20 <LogonCommand>\n\
-             \x20   <Command>{}\\portableforge-agent.exe run --exchange {}</Command>\n\
+             \x20   <Command>{}\\portableforge-agent.exe run --exchange {}{agent_options}</Command>\n\
              \x20 </LogonCommand>\n\
              </Configuration>\n",
             self.memory_mb,
@@ -172,6 +181,17 @@ mod tests {
             exchange_dir: r"D:\Work & Play\Exchange".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn guided_msi_keeps_inputs_read_only_and_starts_only_the_guest_agent() {
+        let xml = cfg().to_guided_msi_wsb();
+        assert_eq!(xml.matches("<ReadOnly>true</ReadOnly>").count(), 2);
+        assert!(xml.contains("<Networking>Disable</Networking>"));
+        assert!(xml.contains("<ClipboardRedirection>Disable</ClipboardRedirection>"));
+        assert!(xml.contains(
+            r"<Command>C:\PortableForge\Tools\portableforge-agent.exe run --exchange C:\PortableForge\Exchange --guided-msi</Command>"
+        ));
     }
 
     #[test]

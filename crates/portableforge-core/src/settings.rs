@@ -32,6 +32,17 @@ pub struct WizardDraft {
     /// ("use it anyway") — resumed runs keep their word.
     #[serde(default)]
     pub force_sandbox: bool,
+    #[serde(default)]
+    pub cleaned_capture: Option<CleanedCapture>,
+    #[serde(default)]
+    pub profile_update_base: Option<SavedProfileApproval>,
+}
+
+/// The separately stored identity of a capture that completed cleanup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanedCapture {
+    pub folder: PathBuf,
+    pub receipt_sha256: String,
 }
 
 impl WizardDraft {
@@ -47,6 +58,26 @@ pub struct SavedProfileApproval {
     pub folder: PathBuf,
     pub label: String,
     pub manifest_sha256: String,
+    #[serde(default)]
+    pub details: ProfileDetails,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileDetails {
+    pub version: String,
+    pub setup_sha256: String,
+    pub builds: Vec<SavedBuild>,
+}
+
+/// Independently remembered identity of a successful installer build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedBuild {
+    pub directory: PathBuf,
+    pub artifact: PathBuf,
+    pub manifest_sha256: String,
+    pub artifact_sha256: String,
+    pub app_id: String,
+    pub completed_utc: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -147,14 +178,46 @@ pub fn save_approval(
     settings: &mut WizardSettings,
     approval: SavedProfileApproval,
 ) -> Result<(), String> {
-    settings.saved_profiles = write_settings(path, settings, Some(approval))?;
+    settings.saved_profiles =
+        write_settings(path, settings, Some(LibraryUpdate::Approve(approval)))?;
     Ok(())
+}
+
+pub fn save_build(
+    path: &Path,
+    settings: &mut WizardSettings,
+    approval: &SavedProfileApproval,
+    build: SavedBuild,
+) -> Result<(), String> {
+    settings.saved_profiles =
+        write_settings(path, settings, Some(LibraryUpdate::Built(approval, build)))?;
+    Ok(())
+}
+
+pub fn relocate_approval(
+    path: &Path,
+    settings: &mut WizardSettings,
+    approval: &SavedProfileApproval,
+    destination: PathBuf,
+) -> Result<(), String> {
+    settings.saved_profiles = write_settings(
+        path,
+        settings,
+        Some(LibraryUpdate::Relocate(approval, destination)),
+    )?;
+    Ok(())
+}
+
+enum LibraryUpdate<'a> {
+    Approve(SavedProfileApproval),
+    Built(&'a SavedProfileApproval, SavedBuild),
+    Relocate(&'a SavedProfileApproval, PathBuf),
 }
 
 fn write_settings(
     path: &Path,
     settings: &WizardSettings,
-    approval: Option<SavedProfileApproval>,
+    update: Option<LibraryUpdate<'_>>,
 ) -> Result<Vec<SavedProfileApproval>, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -188,8 +251,27 @@ fn write_settings(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(format!("We could not read the wizard settings: {error}")),
     };
-    if let Some(approval) = approval {
-        updated.remember_profile(approval);
+    match update {
+        Some(LibraryUpdate::Approve(approval)) => updated.remember_profile(approval),
+        Some(LibraryUpdate::Built(approval, build)) => {
+            let current = locate_approval(&mut updated, approval)?;
+            current
+                .details
+                .builds
+                .retain(|old| old.directory != build.directory);
+            current.details.builds.insert(0, build);
+        }
+        Some(LibraryUpdate::Relocate(approval, destination)) => {
+            if updated
+                .saved_profiles
+                .iter()
+                .any(|item| item.folder == destination)
+            {
+                return Err("The destination already belongs to another saved profile.".into());
+            }
+            locate_approval(&mut updated, approval)?.folder = destination;
+        }
+        None => {}
     }
     let text = serde_json::to_string_pretty(&updated)
         .map_err(|e| format!("We could not write the settings: {e}"))?;
@@ -198,6 +280,19 @@ fn write_settings(
     std::fs::rename(&tmp, path)
         .map_err(|e| format!("We could not save {}: {e}", path.display()))?;
     Ok(updated.saved_profiles)
+}
+
+fn locate_approval<'a>(
+    settings: &'a mut WizardSettings,
+    approval: &SavedProfileApproval,
+) -> Result<&'a mut SavedProfileApproval, String> {
+    settings
+        .saved_profiles
+        .iter_mut()
+        .find(|current| {
+            current.folder == approval.folder && current.manifest_sha256 == approval.manifest_sha256
+        })
+        .ok_or_else(|| "The profile approval changed since this operation began.".into())
 }
 
 #[cfg(test)]
@@ -222,11 +317,13 @@ mod tests {
             folder: folder.clone(),
             label: "Example".into(),
             manifest_sha256: "a".repeat(64),
+            details: ProfileDetails::default(),
         });
         settings.remember_profile(SavedProfileApproval {
             folder,
             label: "Example updated".into(),
             manifest_sha256: "b".repeat(64),
+            details: ProfileDetails::default(),
         });
         assert_eq!(settings.saved_profiles.len(), 1);
         let serialized = serde_json::to_string(&settings).unwrap();
@@ -248,6 +345,7 @@ mod tests {
                     folder: dir.join(label),
                     label: label.into(),
                     manifest_sha256: "a".repeat(64),
+                    details: ProfileDetails::default(),
                 },
             )
             .unwrap();

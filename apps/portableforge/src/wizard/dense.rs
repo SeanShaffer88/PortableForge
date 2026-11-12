@@ -505,7 +505,7 @@ mod tests {
                 scale,
                 &[
                     "Setup file",
-                    "Installed app path (.exe)",
+                    "Installed app path (optional)",
                     "I trust this setup file and the installed app.",
                     "Start capture",
                 ],
@@ -539,6 +539,25 @@ mod tests {
     }
 
     #[test]
+    fn prerequisite_results_fit_at_extra_large() {
+        let mut wizard = WizardApp::default();
+        wizard.enter_verified_capture();
+        wizard.profile_flow.populate_prerequisites_fixture();
+        assert_page_fits(
+            1.5,
+            wizard,
+            &[
+                "Check prerequisites",
+                "Sandboxie-Plus 1.18.8 · Needs attention",
+                "Launcher Generator · Ready",
+                "Installer maker · Choose folder",
+                "View prerequisite details",
+                "Start capture",
+            ],
+        );
+    }
+
+    #[test]
     fn three_wrapped_paths_are_visible_at_extra_large() {
         let mut wizard = WizardApp::default();
         wizard.profile_flow.replay_open = true;
@@ -546,6 +565,7 @@ mod tests {
             folder: r"C:\Profiles\Fixture".into(),
             label: "Fixture".into(),
             manifest_sha256: "a".repeat(64),
+            details: Default::default(),
         }];
         let mut paths = ["setup.exe", "PortableAppsInstaller", "FixtureInstaller"]
             .map(|name| format!(r"C:\{}\{name}", "Portable Forge Fixture\\".repeat(4)));
@@ -638,6 +658,7 @@ mod tests {
                     folder: r"C:\Profiles\Fixture".into(),
                     label: "Fixture".into(),
                     manifest_sha256: "a".repeat(64),
+                    details: Default::default(),
                 }];
                 let finish = replay.profile_flow.populate_layout_fixture(busy);
                 assert_page_fits(
