@@ -616,7 +616,15 @@ fn compile_in(
     super::icons::verify(&app_icon, &artifact)?;
     let installer_artwork = sidebar
         .as_deref()
-        .map(|sidebar| verify_embedded_artwork(&artifact, sidebar, &staged_tools, &work))
+        .map(|sidebar| {
+            verify_embedded_artwork(
+                &artifact,
+                sidebar,
+                &staged_tools,
+                &work,
+                folder.as_ref().map(|checks| checks.tool_temp),
+            )
+        })
         .transpose()?;
     let size_bytes = metadata_at(&artifact)?.len();
     let digest = sha256(&artifact)?;
@@ -675,6 +683,7 @@ fn verify_embedded_artwork(
     expected: &[u8],
     tools: &Path,
     work: &Path,
+    folder_temp: Option<&Path>,
 ) -> Result<InstallerArtworkEvidence, String> {
     for (name, digest) in [
         (ARTWORK_EXTRACTOR, ARTWORK_EXTRACTOR_SHA256),
@@ -693,7 +702,7 @@ fn verify_embedded_artwork(
     let log = work.join("artwork-verification.log");
     let mut output_option = OsString::from("-o");
     output_option.push(&destination);
-    let step = run_step(
+    let step = run_step_with_temp(
         &tools.join(ARTWORK_EXTRACTOR),
         vec![
             "x".into(),
@@ -705,6 +714,7 @@ fn verify_embedded_artwork(
         ],
         &destination,
         &log,
+        folder_temp,
     )?;
     let embedded = read_canonical_sidebar(&destination.join(EMBEDDED_SIDEBAR), &destination)?;
     if embedded != expected {

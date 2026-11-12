@@ -16,7 +16,9 @@ pub(crate) use windows::windows_directory;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod build;
 #[cfg(all(windows, target_arch = "x86_64"))]
-pub use build::{build, FolderBuildControl, FolderBuildReport, FolderBuildRequest};
+pub use build::{
+    build, build_with_artwork, FolderBuildControl, FolderBuildReport, FolderBuildRequest,
+};
 
 pub mod input;
 mod validation;

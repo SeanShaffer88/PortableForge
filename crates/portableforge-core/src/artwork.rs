@@ -229,8 +229,8 @@ pub(crate) struct PackageIcons {
     pub(crate) png: Vec<(u32, Vec<u8>)>,
 }
 
-#[cfg(target_arch = "x86_64")]
-pub(crate) fn default_application_icon() -> Raster {
+/// Deterministic fallback used when a folder executable has no readable icon.
+pub fn default_application_icon() -> Raster {
     Raster(Arc::new(RgbaImage::from_fn(64, 64, |x, y| {
         if !(6..58).contains(&x) || !(6..58).contains(&y) {
             Rgba([0, 0, 0, 0])
