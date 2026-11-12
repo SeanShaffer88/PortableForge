@@ -17,6 +17,7 @@ pub mod classify;
 #[cfg(any(windows, test))]
 pub mod compile;
 pub mod diff;
+pub mod folder;
 pub mod guide;
 pub mod leaktest;
 pub mod noise;

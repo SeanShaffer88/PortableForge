@@ -1,0 +1,17 @@
+# Folder-first package workspace
+
+This slice adds read-only folder inspection to `portableforge-core`. The check inventories the supplied folder, reads bounded metadata, and reports findings without starting the application, generating files, or changing the input. The next slice can use PortableForge's existing Rust, egui, and TesselGUI stack to show the dropped folder, scanned files, proposed entry point, and findings for review.
+
+## Supported inspection
+
+- For a raw app folder, choose a scanned executable or use the single recommendation when the evidence identifies one. The check keeps the full path relative to the selected folder. It looks in up to 32 recognized text settings files, at most 128 KiB each, for likely Windows absolute paths and parent-folder references. A warning names the file and the issue, without copying values from the file. These checks suggest what to review before moving the app.
+- For a prepared package, the check reads `App/AppInfo/appinfo.ini` and resolves `[Control] Start` relative to the package root. It checks the basic format, identity, license fields, and version. When `App/AppInfo/Launcher/<AppID>.ini` exists, the check resolves `[Launch] ProgramExecutable` and recognized alternate executable fields relative to `App`. A package with its own launcher may omit that file. The check accepts a plain executable path for each supported entry and reports paths it cannot resolve to a scanned executable. Dynamic targets, including launchers that resolve Java from an external runtime, are outside this check's supported scope.
+- Optional `App/AppInfo/installer.ini` receives a bounded syntax check and checks for `[Source] IncludeInstallerSource` and `[CheckRunning]` values. Other options remain unverified. Existing files are read in place and preserved. These checks cover a subset of the format and do not establish build compatibility. [PortableApps.com Format](https://portableapps.com/development/portableapps.com_format) [Launcher launch settings](https://portableapps.com/manuals/PortableApps.comLauncher/ref/launcher.ini/launch.html) [Installer settings](https://portableapps.com/manuals/PortableApps.comLauncher/ref/paf/installer.html)
+
+Incomplete inventory, unsafe choices, and malformed supported metadata are blocking findings. The scan can show a nested entry point. The existing capture-based builder expects a payload executable at the root of its harvested app directory. Folder builds need explicit support for nested entry points before they can reuse that builder.
+
+## Future build transaction
+
+A folder build should freeze the selected relative entry point, reviewed metadata, input inventory and fingerprints, tool identity, and explicit redistribution decision. Revalidate the evidence immediately before staging. Copy the selected input into a private working directory, preserving its layout. Use the pinned official tools against that copy and verify the generated artifact before publishing to a new destination. Publish the artifact and receipt together through an atomic rename on the destination volume. On failure or cancellation, clean up the owned working directory or report its exact location if cleanup fails.
+
+The receipt should bind the inputs, tool versions, chosen entry point, and final installer hash. File inspection cannot establish redistribution rights, installation behavior, or runtime portability. Those decisions and evidence stay separate from scan results.
