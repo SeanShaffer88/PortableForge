@@ -100,9 +100,17 @@ runs:
           }
         }
 
-        foreach ($name in @('SandMan.exe', 'KmdUtil.exe', 'Sandboxie.ini', 'Sandboxie-Plus.ini')) {
+        foreach ($name in @('SandMan.exe', 'KmdUtil.exe')) {
           $file = Get-Item -LiteralPath (Join-Path $destination $name)
           if ($file.PSIsContainer -or $file.Length -le 0) { throw "Missing portable Sandboxie-Plus file $name." }
+        }
+        # The pinned vendor payload supplies two empty portable mode markers.
+        foreach ($name in @('Sandboxie.ini', 'Sandboxie-Plus.ini')) {
+          $file = Get-Item -LiteralPath (Join-Path $destination $name)
+          if ($file -isnot [IO.FileInfo] -or
+              ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $file.Length -ne 0) {
+            throw "Invalid portable Sandboxie-Plus marker $name. Expected an empty regular file."
+          }
         }
         $entries = @(Get-ChildItem -LiteralPath $destination -Force -Recurse)
         if ($entries | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }) {
