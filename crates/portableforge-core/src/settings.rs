@@ -87,6 +87,8 @@ pub struct WizardSettings {
     #[serde(default = "default_text_scale")]
     pub text_scale: f32,
     #[serde(default)]
+    pub appearance: Appearance,
+    #[serde(default)]
     pub draft: Option<WizardDraft>,
     /// Whether the first-run welcome has been read and dismissed.
     #[serde(default)]
@@ -94,6 +96,15 @@ pub struct WizardSettings {
     /// Approvals are stored separately from the profile folders they cover.
     #[serde(default)]
     pub saved_profiles: Vec<SavedProfileApproval>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Appearance {
+    #[default]
+    System,
+    Dark,
+    Light,
 }
 
 fn default_text_scale() -> f32 {
@@ -105,6 +116,7 @@ impl Default for WizardSettings {
         Self {
             recent_installers: Vec::new(),
             text_scale: 1.0,
+            appearance: Appearance::System,
             draft: None,
             welcomed: false,
             saved_profiles: Vec::new(),
@@ -307,6 +319,7 @@ mod tests {
         .unwrap();
         assert!(settings.saved_profiles.is_empty());
         assert_eq!(settings.text_scale, 1.25);
+        assert_eq!(settings.appearance, Appearance::System);
     }
 
     #[test]
@@ -402,6 +415,7 @@ mod tests {
         let mut s = WizardSettings::default();
         s.remember_installer(r"C:\Downloads\widget-setup.exe");
         s.text_scale = 1.25;
+        s.appearance = Appearance::Light;
         s.draft = Some(WizardDraft {
             step: "name".to_string(),
             installer_path: r"C:\Downloads\widget-setup.exe".to_string(),

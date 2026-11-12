@@ -15,13 +15,13 @@ use portableforge_core::settings::{self, WizardDraft, WizardSettings};
 
 mod dense;
 mod profiles;
-mod texture;
-
-const ALERT_TEXT: &str = guide::theme::TEXT;
-const CRIMSON: &str = "#76172A";
+mod shell;
+mod theme;
 
 pub struct WizardApp {
     profile_flow: profiles::ProfileFlow,
+    theme_state: theme::State,
+    shell: shell::State,
     step: usize,
     show_details: bool,
     detail_page: usize,
@@ -90,6 +90,8 @@ impl Default for WizardApp {
             .unwrap_or(false);
         Self {
             profile_flow: profiles::ProfileFlow::default(),
+            theme_state: theme::State::default(),
+            shell: shell::State::default(),
             step: 0,
             show_details: false,
             detail_page: 0,
@@ -206,91 +208,11 @@ fn test_state_root() -> Option<std::path::PathBuf> {
     }
 }
 
-fn color(hex: &str) -> egui::Color32 {
-    let (r, g, b) = guide::theme::rgb(hex);
-    egui::Color32::from_rgb(r, g, b)
-}
-
-pub fn dark_visuals() -> egui::Visuals {
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = color("#12141A");
-    v.window_fill = color("#12141A");
-    v.extreme_bg_color = color("#23252D");
-    v.faint_bg_color = color("#1C1E25");
-    v.override_text_color = Some(color(guide::theme::TEXT));
-    v.hyperlink_color = color(ALERT_TEXT);
-    v.selection.bg_fill = color(CRIMSON);
-    v.selection.stroke = egui::Stroke::new(1.0_f32, color(guide::theme::ACCENT_RED));
-    v.widgets.active.bg_fill = color(CRIMSON);
-    v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, color("#E5E5E8"));
-    v.widgets.hovered.bg_fill = color(guide::theme::HAIRLINE);
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::TEXT_FAINT));
-    v.widgets.inactive.bg_fill = color("#242630");
-    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::HAIRLINE));
-    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::HAIRLINE));
-    let radius = egui::CornerRadius::same(6);
-    for w in [
-        &mut v.widgets.inactive,
-        &mut v.widgets.hovered,
-        &mut v.widgets.active,
-        &mut v.widgets.open,
-        &mut v.widgets.noninteractive,
-    ] {
-        w.corner_radius = radius;
-    }
-    v
-}
-
-/// The whole window style: family colours, rounded widgets,
-/// Fluent-rhythm spacing (4/8/16/24), readable text sizes, and a
-/// short animation time so hovers, scrolls and state changes glide
-/// instead of snapping. Presentation only — no wording lives here.
-pub fn polished_style() -> egui::Style {
-    let mut style = egui::Style {
-        visuals: dark_visuals(),
-        ..Default::default()
-    };
-    style.animation_time = 0.15;
-    style.spacing.item_spacing = egui::vec2(8.0, 4.0);
-    style.spacing.button_padding = egui::vec2(12.0, 5.0);
-    style.spacing.indent = 20.0;
-    style.spacing.interact_size = egui::vec2(42.0, 26.0);
-    style.spacing.slider_width = 180.0;
-    style.text_styles = [
-        (
-            egui::TextStyle::Heading,
-            egui::FontId::new(26.0, egui::FontFamily::Proportional),
-        ),
-        (
-            egui::TextStyle::Body,
-            egui::FontId::new(15.5, egui::FontFamily::Proportional),
-        ),
-        (
-            egui::TextStyle::Button,
-            egui::FontId::new(15.0, egui::FontFamily::Proportional),
-        ),
-        (
-            egui::TextStyle::Small,
-            egui::FontId::new(12.5, egui::FontFamily::Proportional),
-        ),
-        (
-            egui::TextStyle::Monospace,
-            egui::FontId::new(13.5, egui::FontFamily::Monospace),
-        ),
-    ]
-    .into();
-    style
-}
-
-/// A content card: panel fill, hairline edge, soft corners,
-/// comfortable padding. Step controls live on cards so the window
-/// reads as grouped panels instead of text floating on black.
-pub fn card() -> egui::Frame {
+fn card(ui: &egui::Ui) -> egui::Frame {
     egui::Frame::new()
-        .fill(color("#1C1E25"))
-        .stroke(egui::Stroke::new(1.0_f32, color(guide::theme::HAIRLINE)))
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(9))
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .inner_margin(egui::Margin::same(8))
 }
 
 impl WizardApp {
@@ -1070,8 +992,8 @@ impl WizardApp {
 
 impl eframe::App for WizardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.set_style(polished_style());
         self.apply_layout_zoom(ctx);
+        self.theme_state.apply(ctx, self.settings.appearance);
         if self.finished {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -1080,21 +1002,12 @@ impl eframe::App for WizardApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         self.persist_if_due();
+        self.handle_shell_keys(ctx);
+        self.update_heading_focus(ctx);
         if self.profile_flow.replay_open {
             self.show_profile_replay(ctx);
+            self.show_shell_popup(ctx);
             return;
-        }
-
-        // Keyboard: Enter continues and Escape goes back — but never
-        // while the person is typing in a box, where those keys are
-        // theirs.
-        let typing = ctx.memory(|m| m.focused().is_some() || m.top_modal_layer().is_some());
-        if !typing && !self.show_details {
-            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                self.advance();
-            } else if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.go_back();
-            }
         }
 
         // Drag-and-drop: dropping the setup file anywhere on the pick
@@ -1182,23 +1095,19 @@ impl eframe::App for WizardApp {
             },
         };
         self.show_header(ctx, step.title, Some((self.step + 1, STEPS.len())));
-        self.show_navigation(ctx, step.id, verified);
+        self.show_navigation(ctx, what_you_do);
         egui::CentralPanel::default()
             .frame(dense::content_frame(ctx))
             .show(ctx, |ui| {
-            texture::paint(ui);
             if self.show_details {
                 self.show_step_details(ui, step);
                 return;
             }
             dense::heading(ui, title, what_happens);
-            if !what_you_do.is_empty() {
-                ui.label(egui::RichText::new(what_you_do).color(color(guide::theme::TEXT_MUTED)));
-            }
             // An unfinished run from last time is offered, never forced.
             if self.resume_offer && step.id == "pick" {
                 ui.horizontal(|ui| {
-                    ui.colored_label(color(ALERT_TEXT), "Unfinished run");
+                    ui.colored_label(ui.visuals().error_fg_color, "Unfinished run");
                     if ui
                         .button("Pick up where I left off")
                         .on_hover_text("Fill the steps back in with what you had entered.")
@@ -1230,13 +1139,13 @@ impl eframe::App for WizardApp {
                 "safety" => {
                     let mut override_change: Option<bool> = None;
                     if let Some(report) = &self.preflight {
-                        card().show(ui, |ui| {
+                        card(ui).show(ui, |ui| {
                         for index in dense::page(ui, &mut self.safety_page, report.checks.len(), 1, "Check") {
                             let check = &report.checks[index];
                             let col = if check.ok {
-                                color(guide::theme::TEXT)
+                                ui.visuals().text_color()
                             } else {
-                                color(ALERT_TEXT)
+                                ui.visuals().error_fg_color
                             };
                             // The tick / cross is DRAWN, not a
                             // character: the bundled font has no
@@ -1289,7 +1198,7 @@ impl eframe::App for WizardApp {
                             if !check.fix.is_empty() {
                                 ui.label(
                                     egui::RichText::new(format!("     {}", check.fix))
-                                        .color(color(guide::theme::TEXT_MUTED)),
+                                        .color(ui.visuals().weak_text_color()),
                                 );
                             }
                             if let Some(copy) = &check.copy_text {
@@ -1308,7 +1217,7 @@ impl eframe::App for WizardApp {
                         let (name, honesty) = report.best_mode.describe();
                         ui.label(format!("Way we will use: {name}"));
                         ui.label(
-                            egui::RichText::new(honesty).color(color(guide::theme::TEXT_MUTED)),
+                            egui::RichText::new(honesty).color(ui.visuals().weak_text_color()),
                         );
                         if report.best_mode != portableforge_core::wsb::SandboxMode::WindowsSandbox {
                             ui.add_space(6.0);
@@ -1355,7 +1264,7 @@ impl eframe::App for WizardApp {
                             }
                             ui.label(
                                 egui::RichText::new("The quick test box is a separate free program. PortableForge carries its installer untouched and checks its fingerprint before opening it.")
-                                    .color(color(guide::theme::TEXT_MUTED)),
+                                    .color(ui.visuals().weak_text_color()),
                             );
                             ui.add_space(4.0);
                         }
@@ -1382,7 +1291,7 @@ impl eframe::App for WizardApp {
                             egui::RichText::new(
                                 "Nothing here yet — this list fills in after the program has been tried in the test box.",
                             )
-                            .color(color(guide::theme::TEXT_MUTED)),
+                            .color(ui.visuals().weak_text_color()),
                         );
                     } else {
                         if verified {
@@ -1409,35 +1318,39 @@ impl eframe::App for WizardApp {
                                 item.decision, portableforge_core::review::Decision::Acknowledge { seen: false }
                             )).then_some(index)
                         }).collect::<Vec<_>>();
-                        let per_page = ((ui.available_height() - 62.0) / 132.0).floor().max(1.0) as usize;
-                        let range = dense::page(ui, &mut self.review_page, visible.len(), per_page, "Finding");
+                        let range = dense::page(ui, &mut self.review_page, visible.len(), 1, "Finding");
                         if visible.is_empty() {
                             ui.label("All warnings have been reviewed.");
                         }
                         for index in range {
-                            let item = &mut items[visible[index]];
-                            card().show(ui, |ui| {
+                            let item_index = visible[index];
+                            let item = &mut items[item_index];
+                            ui.push_id(("review-finding", item_index), |ui| {
+                            card(ui).show(ui, |ui| {
                             let (title, body) = guide::plain_card(&item.classification.finding);
                             ui.label(egui::RichText::new(title).strong());
                             ui.label(
                                 egui::RichText::new(body)
-                                    .color(color(guide::theme::TEXT_MUTED)),
+                                    .color(ui.visuals().weak_text_color()),
                             );
                             if verified {
                                 use portableforge_core::classify::Finding;
 
-                                match &item.classification.finding {
-                                    Finding::DirectoriesMove { host_pattern, .. } => ui.label(host_pattern),
-                                    Finding::FilesMove { host_pattern, data_target } => {
-                                        ui.label(format!("{host_pattern}\\{data_target}"))
-                                    }
+                                let location = match &item.classification.finding {
+                                    Finding::DirectoriesMove { host_pattern, .. } => std::borrow::Cow::Borrowed(host_pattern.as_str()),
+                                    Finding::FilesMove { host_pattern, data_target } => std::borrow::Cow::Owned(format!("{host_pattern}\\{data_target}")),
                                     Finding::RegistryKey { key }
                                     | Finding::AssociationCandidate { key }
-                                    | Finding::UninstallMetadata { key } => ui.label(key),
+                                    | Finding::UninstallMetadata { key } => std::borrow::Cow::Borrowed(key.as_str()),
                                     Finding::AppFile { path }
-                                    | Finding::FileWriteRewrite { path, .. } => ui.label(path),
-                                    Finding::RedFlag { detail, .. } => ui.label(detail),
+                                    | Finding::FileWriteRewrite { path, .. } => std::borrow::Cow::Borrowed(path.as_str()),
+                                    Finding::RedFlag { detail, .. } => std::borrow::Cow::Borrowed(detail.as_str()),
                                 };
+                                if dense::path_needs_view(ui, &location, ui.available_width()) {
+                                    dense::view_text(ui, "View location", "Finding location", &location, true);
+                                } else {
+                                    ui.label(location.as_ref());
+                                }
                             }
                             match &mut item.decision {
                                 portableforge_core::review::Decision::Fix { on } => {
@@ -1455,6 +1368,7 @@ impl eframe::App for WizardApp {
                                 }
                                 portableforge_core::review::Decision::Info => {}
                             }
+                            });
                             });
                         }
                         self.review.items = items;
@@ -1578,7 +1492,7 @@ impl eframe::App for WizardApp {
                                     egui::RichText::new(
                                         "That path is a folder — pick the setup file inside it.",
                                     )
-                                    .color(color(ALERT_TEXT)),
+                                    .color(ui.visuals().error_fg_color),
                                 );
                             }
                             Err(_) => {
@@ -1586,12 +1500,11 @@ impl eframe::App for WizardApp {
                                     egui::RichText::new(
                                         "We can't find a file there yet — check the path, or use Browse.",
                                     )
-                                    .color(color(guide::theme::TEXT_MUTED)),
+                                    .color(ui.visuals().weak_text_color()),
                                 );
                             }
                         }
                     }
-                    ui.add_space(8.0);
                     ui.horizontal_wrapped(|ui| {
                         if !guided_msi && ui.button("Capture with Sandboxie-Plus").clicked() {
                             self.enter_verified_capture();
@@ -1606,26 +1519,20 @@ impl eframe::App for WizardApp {
                     let others: Vec<&String> =
                         recents.iter().filter(|p| p.as_str() != typed).collect();
                     if !others.is_empty() {
-                        ui.add_space(6.0);
-                        ui.label(
-                            egui::RichText::new("Setup files you used lately:")
-                                .color(color(guide::theme::TEXT_MUTED)),
-                        );
-                        for index in dense::page(ui, &mut self.recent_page, others.len(), 1, "File") {
-                            let path = others[index];
-                            let name = std::path::Path::new(path)
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| path.clone());
-                            if ui
-                                .button(name)
-                                .on_hover_text(path.clone())
-                                .clicked()
-                            {
-                                self.installer_path = path.clone();
-                                self.setup_changed();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new("Recent setup files").weak());
+                            for index in dense::page(ui, &mut self.recent_page, others.len(), 1, "File") {
+                                let path = others[index];
+                                let name = std::path::Path::new(path)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.clone());
+                                if ui.button(name).on_hover_text(path.clone()).clicked() {
+                                    self.installer_path = path.clone();
+                                    self.setup_changed();
+                                }
                             }
-                        }
+                        });
                     }
                 }
                 "clean" if guided_msi => self.show_msi_capture(ui),
@@ -1768,9 +1675,9 @@ impl eframe::App for WizardApp {
                         self.mark_dirty();
                     }
                     if let Some(error) = self.verified_metadata_error() {
-                        ui.colored_label(color(ALERT_TEXT), error);
+                        ui.colored_label(ui.visuals().error_fg_color, error);
                     } else if !portableforge_core::paf::valid_package_version(self.package_version.trim()) {
-                        ui.colored_label(color(ALERT_TEXT), "Use four numbers with dots between them, like 1.0.0.0.");
+                        ui.colored_label(ui.visuals().error_fg_color, "Use four numbers with dots between them, like 1.0.0.0.");
                     }
                     if !verified && self.show_icon_field(ui) {
                         self.mark_dirty();
@@ -1791,7 +1698,7 @@ impl eframe::App for WizardApp {
                         }
                         ui.label(
                             egui::RichText::new(option.explanation)
-                                .color(color(guide::theme::TEXT_MUTED)),
+                                .color(ui.visuals().weak_text_color()),
                         );
                         ui.add_space(4.0);
                     }
@@ -1815,6 +1722,7 @@ impl eframe::App for WizardApp {
 
             let _ = self.phase();
         });
+        self.show_shell_popup(ctx);
     }
 }
 
@@ -1829,7 +1737,10 @@ pub fn run_gui() -> eframe::Result<()> {
     eframe::run_native(
         "PortableForge",
         options,
-        Box::new(|_cc| Ok(Box::new(WizardApp::default()))),
+        Box::new(|cc| {
+            theme::install_fonts(&cc.egui_ctx);
+            Ok(Box::new(WizardApp::default()))
+        }),
     )
 }
 

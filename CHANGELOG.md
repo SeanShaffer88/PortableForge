@@ -12,9 +12,10 @@
   test in a dedicated Sandboxie-Plus box.
 - Guided MSI capture in Windows Sandbox on supported Windows editions,
   with explicitly selected companion files and standard package output.
-- Compact VaporGrid wizard with a subtle tread-plate background, full-width
-  paths, and paged findings and details. Standard, Large, and Extra large
-  text sizes retain the primary controls at the minimum logical window size.
+- TesselGUI revision 2 wizard with System, GitHub Dark and GitHub Light
+  appearance, Windows contrast theme colors, a keyboard command dialog,
+  phase navigation, and one finding per review page. Paths and diagnostics
+  have full-value views at all three text sizes.
 - In the wizard, capture a trusted setup in the verified quick test
   box, save the reviewed profile and rebuild its `.paf.exe` with a
   matching setup file. The wizard remembers the approval separately

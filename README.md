@@ -6,7 +6,7 @@ PortableForge helps turn a Windows app into a PortableApps.com package. Capture 
 
 ## Who it is for
 
-The desktop wizard guides capture, review, and packaging. Use **Status and details** for diagnostics and choose one of three text sizes.
+The desktop wizard guides capture, review, and packaging. **Appearance** offers System, GitHub Dark and GitHub Light, plus three text sizes. Use **Commands** or **Ctrl+K** to find an action and **Status and details** for diagnostics.
 
 ## What you need
 
@@ -66,7 +66,7 @@ Your answer is written into the package's notes, so anyone can see which kind of
 
 - **100% Rust** for everything PortableForge itself is made of — the window, the helper that works inside the test box, and all the thinking in between. No scripts, no second languages to install.
 - The official PortableApps.com Launcher and Installer tools are used at the building step (they are separate programs, kept under their own licenses — see the notes inside any package PortableForge makes). They are checked by fingerprint before every use.
-- Compact VaporGrid layout with deep crimson controls, a subtle square tread-plate background, and pages for long reviews.
+- TesselGUI revision 2 uses flat task surfaces, one finding per review page, and a consistent status and action strip. The generated Rust tokens are used under the project's MIT license. [Pinned TesselGUI source](https://github.com/SeanShaffer88/TesselGUI/tree/a689a5e3bfadf9e1e77a3acea826bea5cc717e94)
 
 ## Command line (optional)
 

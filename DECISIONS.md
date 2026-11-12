@@ -1,5 +1,20 @@
 # Decisions — PortableForge
 
+## 2026-11-12 — TesselGUI revision 2 for the wizard
+
+The wizard uses the GitHub palette and workflow patterns from TesselGUI
+revision 2. This replaces the October 23 dark-only decision. The
+generated Rust token file is copied verbatim from the pinned MIT code
+export. Both projects ship the same copyright and MIT license text.
+[Token source](https://github.com/SeanShaffer88/TesselGUI/blob/a689a5e3bfadf9e1e77a3acea826bea5cc717e94/dist/tessel.rs)
+
+Appearance is local wizard state. System follows the theme reported
+by egui and uses the dark palette when the desktop theme is unknown.
+Windows contrast themes take precedence over the saved preference and
+use native colors. The UI uses a compact single-column task at the
+minimum size, accessible full-value views, and a fixed action strip
+that keeps the next decision in reach. [Accessibility notes](docs/ACCESSIBILITY.md)
+
 ## 2026-11-12 — Reopen capture evidence and replay saved approvals
 
 The wizard stores the receipt digest separately from the cleaned capture.

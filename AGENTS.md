@@ -5,7 +5,7 @@ The Universal Windows Desktop Master Prompt applies in full:
 
 ## Project in one line
 
-A guided Windows program (Rust + egui, dark black/red UI) that automates
+A guided Windows program (Rust + egui, TesselGUI revision 2) that automates
 making PortableApps.com Format packages: pre-scan, install, run, close,
 post-scan inside a disposable Windows Sandbox, then classify, generate,
 build, and leak-test — so the host machine is untouched.
@@ -23,9 +23,14 @@ build, and leak-test — so the host machine is untouched.
   PortableApps.com Launcher/Installer generators, Windows Sandbox,
   `reg.exe`) are invoked, never reimplemented, pinned and SHA-256
   verified where they are files we ship.
-- **Dark UI only**, family tokens in `guide::theme`
-  (#000000/#101010 bg, #242424 hairlines, #6B0700 primary red,
-  #E5484D accent text, #F5F5F5/#A8A8A8/#6E6E6E text). No light theme.
+- **TesselGUI revision 2** governs the wizard's visual and interaction
+  design. Keep the generated Rust tokens unmodified at
+  `apps/portableforge/src/wizard/theme/tessel.rs`. Use the GitHub Light,
+  GitHub Dark and System appearance choices, native Windows contrast
+  colors, flat task surfaces, a single primary action per region, and
+  keyboard-reachable controls. Verify the 640 × 480 logical minimum at
+  Standard, Large and Extra large text sizes. Record platform and
+  density adaptations in `docs/ACCESSIBILITY.md`.
 - **Sandbox honesty.** Mode A (Windows Sandbox) and Mode B (user VM) are
   isolated. Mode C (host snapshot) is NOT isolated and must always be
   labelled "watched and put back, not sealed off" — in UI, logs, reports.
