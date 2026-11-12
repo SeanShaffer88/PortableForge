@@ -39,18 +39,20 @@ extern "system" {
 }
 
 pub(super) fn local_drive(path: &Path) -> bool {
+    matches!(drive_type(path), 2 | 3 | 5 | 6)
+}
+
+fn drive_type(path: &Path) -> u32 {
     let Some(Component::Prefix(prefix)) = path.components().next() else {
-        return false;
+        return 0;
     };
     let drive = match prefix.kind() {
         Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
-        _ => return false,
+        _ => return 0,
     };
     let root = [u16::from(drive), u16::from(b':'), u16::from(b'\\'), 0];
     // SAFETY: this is a live, NUL-terminated DOS drive-root string.
-    let kind = unsafe { GetDriveTypeW(root.as_ptr()) };
-    // DRIVE_REMOVABLE, DRIVE_FIXED, DRIVE_CDROM, or DRIVE_RAMDISK.
-    matches!(kind, 2 | 3 | 5 | 6)
+    unsafe { GetDriveTypeW(root.as_ptr()) }
 }
 
 pub(super) fn open_directory(path: &Path) -> Result<File, ScanError> {
@@ -228,3 +230,318 @@ mod tests {
         assert!(safe_property_text(&vec![0; 2 * (MAX_PROPERTY_UNITS + 2)]).is_none());
     }
 }
+
+#[cfg(target_arch = "x86_64")]
+mod build_paths {
+    use std::ffi::{c_void, OsString};
+    use std::fs::{self, File, OpenOptions};
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::{Path, PathBuf};
+    use std::ptr;
+
+    const FILE_PERSISTENT_ACLS: u32 = 8;
+
+    #[repr(C)]
+    struct SecurityAttributes {
+        length: u32,
+        descriptor: *mut c_void,
+        inherit: i32,
+    }
+
+    #[repr(C)]
+    struct FileIdentityInfo {
+        attributes: u32,
+        creation: [u32; 2],
+        access: [u32; 2],
+        written: [u32; 2],
+        volume: u32,
+        size: [u32; 2],
+        links: u32,
+        index: [u32; 2],
+    }
+
+    #[repr(C)]
+    struct RenameInfo {
+        replace: u32,
+        root: *mut c_void,
+        name_bytes: u32,
+        first_name_unit: u16,
+    }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            text: *const u16,
+            revision: u32,
+            descriptor: *mut *mut c_void,
+            length: *mut u32,
+        ) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateDirectoryW(path: *const u16, attributes: *const SecurityAttributes) -> i32;
+        fn GetVolumePathNameW(path: *const u16, volume: *mut u16, capacity: u32) -> i32;
+        fn GetVolumeInformationW(
+            root: *const u16,
+            name: *mut u16,
+            name_capacity: u32,
+            serial: *mut u32,
+            component_length: *mut u32,
+            flags: *mut u32,
+            filesystem: *mut u16,
+            filesystem_capacity: u32,
+        ) -> i32;
+        fn LocalFree(allocation: *mut c_void) -> *mut c_void;
+        fn GetFileInformationByHandle(handle: *mut c_void, info: *mut FileIdentityInfo) -> i32;
+        fn SetFileInformationByHandle(
+            handle: *mut c_void,
+            class: u32,
+            info: *const c_void,
+            size: u32,
+        ) -> i32;
+        fn GetSystemWindowsDirectoryW(path: *mut u16, capacity: u32) -> u32;
+    }
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain([0]).collect()
+    }
+
+    pub(in super::super) fn create_private_directory(path: &Path, scratch: bool) -> io::Result<()> {
+        if scratch && super::drive_type(path) != 3 {
+            return Err(io::Error::other(
+                "Use a fixed local drive for temporary build work.",
+            ));
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| io::Error::other("No work folder parent."))?;
+        let parent = wide(parent);
+        let mut volume = vec![0u16; 32_768];
+        // SAFETY: parent is terminated and the writable volume buffer has capacity.
+        if unsafe { GetVolumePathNameW(parent.as_ptr(), volume.as_mut_ptr(), volume.len() as u32) }
+            == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let mut flags = 0;
+        // SAFETY: the volume string was initialized by the preceding successful
+        // call; flags is writable and omitted outputs permit null.
+        if unsafe {
+            GetVolumeInformationW(
+                volume.as_ptr(),
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut flags,
+                ptr::null_mut(),
+                0,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if flags & FILE_PERSISTENT_ACLS == 0 {
+            if !scratch {
+                return fs::create_dir(path);
+            }
+            return Err(io::Error::other(
+                "The local temporary drive cannot enforce a private work folder.",
+            ));
+        }
+        let mut descriptor = ptr::null_mut();
+        // Protected inherited DACL: only the owner, SYSTEM and Administrators
+        // may modify files under this staging directory.
+        let sddl: Vec<_> = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        // SAFETY: sddl is terminated and descriptor is a writable output.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let attributes = SecurityAttributes {
+            length: std::mem::size_of::<SecurityAttributes>() as u32,
+            descriptor,
+            inherit: 0,
+        };
+        let path = wide(path);
+        // SAFETY: attributes references a valid security descriptor until after
+        // CreateDirectoryW returns; path is terminated.
+        let created = unsafe { CreateDirectoryW(path.as_ptr(), &attributes) };
+        let result = if created == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        };
+        // SAFETY: ConvertStringSecurityDescriptorToSecurityDescriptorW allocated it.
+        unsafe { LocalFree(descriptor) };
+        result
+    }
+
+    pub(in super::super) fn file_identity(file: &File) -> io::Result<[u32; 3]> {
+        let mut info = std::mem::MaybeUninit::<FileIdentityInfo>::uninit();
+        // SAFETY: file is a live handle and info is a writable native structure.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the successful Win32 call initialized the full structure.
+        let info = unsafe { info.assume_init() };
+        Ok([info.volume, info.index[0], info.index[1]])
+    }
+
+    pub(in super::super) fn open_writable_ancestor(
+        path: &Path,
+    ) -> Result<File, super::super::ScanError> {
+        let file = OpenOptions::new()
+            .access_mode(super::FILE_LIST_DIRECTORY | super::FILE_READ_ATTRIBUTES)
+            .share_mode(super::FILE_SHARE_READ | 2)
+            .custom_flags(super::FILE_FLAG_BACKUP_SEMANTICS | super::FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .map_err(super::super::io_error)?;
+        let metadata = file.metadata().map_err(super::super::io_error)?;
+        if !metadata.is_dir() || super::is_link(&metadata) {
+            return Err(super::super::error(
+                "Choose an ordinary local folder. Links and redirected paths are excluded.",
+            ));
+        }
+        Ok(file)
+    }
+
+    pub(in super::super) fn own_delivery(path: &Path) -> io::Result<File> {
+        const DELETE: u32 = 0x0001_0000;
+        let file = OpenOptions::new()
+            .access_mode(super::FILE_LIST_DIRECTORY | super::FILE_READ_ATTRIBUTES | DELETE)
+            .share_mode(super::FILE_SHARE_READ)
+            .custom_flags(super::FILE_FLAG_BACKUP_SEMANTICS | super::FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_dir() || super::is_link(&metadata) {
+            return Err(io::Error::other(
+                "The delivery folder is no longer an ordinary directory.",
+            ));
+        }
+        Ok(file)
+    }
+
+    pub(in super::super) fn lock_delivery_file(
+        path: &Path,
+        identity: [u32; 3],
+    ) -> io::Result<File> {
+        let file = OpenOptions::new()
+            .read(true)
+            .share_mode(super::FILE_SHARE_READ)
+            .custom_flags(super::FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || super::is_link(&metadata) || file_identity(&file)? != identity {
+            return Err(io::Error::other("A delivery file changed ownership."));
+        }
+        Ok(file)
+    }
+
+    pub(in super::super) fn discard_owned_file(path: &Path, identity: [u32; 3]) -> io::Result<()> {
+        const DELETE: u32 = 0x0001_0000;
+        let file = match OpenOptions::new()
+            .access_mode(super::FILE_READ_ATTRIBUTES | DELETE)
+            .share_mode(super::FILE_SHARE_READ)
+            .custom_flags(super::FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(cause) if cause.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(cause) => return Err(cause),
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || super::is_link(&metadata) || file_identity(&file)? != identity {
+            return Err(io::Error::other("A delivery file changed ownership."));
+        }
+        discard_owned(&file)
+    }
+
+    pub(in super::super) fn publish_directory(
+        directory: &File,
+        destination: &Path,
+    ) -> io::Result<()> {
+        let name: Vec<u16> = destination.as_os_str().encode_wide().collect();
+        let offset = std::mem::offset_of!(RenameInfo, first_name_unit);
+        let size = (offset + 2 * name.len()).max(std::mem::size_of::<RenameInfo>());
+        let mut buffer = vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
+        let header = buffer.as_mut_ptr().cast::<RenameInfo>();
+        // SAFETY: usize alignment is adequate for RenameInfo; the allocation
+        // covers the fixed fields and complete UTF-16 path without a NUL.
+        unsafe {
+            (*header).replace = 0;
+            (*header).root = ptr::null_mut();
+            (*header).name_bytes = (name.len() * 2) as u32;
+            ptr::copy_nonoverlapping(
+                name.as_ptr(),
+                buffer.as_mut_ptr().cast::<u8>().add(offset).cast::<u16>(),
+                name.len(),
+            );
+        }
+        // SAFETY: directory is the originally opened DELETE-access handle;
+        // FileRenameInfo with ReplaceIfExists false cannot overwrite output.
+        if unsafe {
+            SetFileInformationByHandle(
+                directory.as_raw_handle(),
+                3,
+                buffer.as_ptr().cast(),
+                size as u32,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub(in super::super) fn discard_owned(directory: &File) -> io::Result<()> {
+        let delete: u8 = 1;
+        // SAFETY: FileDispositionInfo takes a pointer to one Win32 BOOLEAN.
+        if unsafe {
+            SetFileInformationByHandle(
+                directory.as_raw_handle(),
+                4,
+                (&delete as *const u8).cast(),
+                1,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn windows_directory() -> io::Result<PathBuf> {
+        let mut path = vec![0u16; 32_768];
+        // SAFETY: the writable buffer has the specified capacity.
+        let len =
+            unsafe { GetSystemWindowsDirectoryW(path.as_mut_ptr(), path.len() as u32) } as usize;
+        if len == 0 || len >= path.len() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(OsString::from_wide(&path[..len]).into())
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) use build_paths::windows_directory;
+#[cfg(target_arch = "x86_64")]
+pub(super) use build_paths::{
+    create_private_directory, discard_owned, discard_owned_file, file_identity, lock_delivery_file,
+    open_writable_ancestor, own_delivery, publish_directory,
+};

@@ -10,7 +10,15 @@ use crate::snapshot::{pe_arch, PeArch};
 
 #[cfg(windows)]
 mod windows;
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub(crate) use windows::windows_directory;
 
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod build;
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub use build::{build, FolderBuildControl, FolderBuildReport, FolderBuildRequest};
+
+pub mod input;
 mod validation;
 pub use validation::validate;
 
@@ -98,6 +106,14 @@ fn error(message: impl Into<String>) -> ScanError {
 }
 
 impl FolderScan {
+    /// Report the same prepared-package markers as the folder validator.
+    pub fn is_prepared(&self) -> bool {
+        self.entries.iter().any(|entry| {
+            ["App/AppInfo/appinfo.ini", "App/AppInfo"]
+                .iter()
+                .any(|marker| validation::same_path(&entry.relative_path, Path::new(marker)))
+        })
+    }
     /// Read a previously inventoried file through a fresh safety check.
     pub fn read_small(&self, relative: &Path, max_bytes: usize) -> Result<Vec<u8>, ScanError> {
         let max_bytes = max_bytes.min(MAX_SMALL_READ);
@@ -723,6 +739,13 @@ fn open_inventory_file(
 }
 
 fn hold_directory_chain(path: &Path) -> Result<Vec<DirectoryGuard>, ScanError> {
+    hold_directory_chain_with(path, hold_directory)
+}
+
+fn hold_directory_chain_with(
+    path: &Path,
+    open: impl Fn(&Path) -> Result<DirectoryGuard, ScanError>,
+) -> Result<Vec<DirectoryGuard>, ScanError> {
     if !path.is_absolute() {
         return Err(error("Choose a local folder with a full path."));
     }
@@ -739,11 +762,11 @@ fn hold_directory_chain(path: &Path) -> Result<Vec<DirectoryGuard>, ScanError> {
             Component::Prefix(_) => current.push(part.as_os_str()),
             Component::RootDir => {
                 current.push(part.as_os_str());
-                chain.push(hold_directory(&current)?);
+                chain.push(open(&current)?);
             }
             Component::Normal(name) if name.to_str().is_some_and(safe_name) => {
                 current.push(name);
-                chain.push(hold_directory(&current)?);
+                chain.push(open(&current)?);
             }
             _ => return Err(error("The selected folder path contains an unsafe name.")),
         }

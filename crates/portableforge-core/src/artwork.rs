@@ -229,6 +229,21 @@ pub(crate) struct PackageIcons {
     pub(crate) png: Vec<(u32, Vec<u8>)>,
 }
 
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn default_application_icon() -> Raster {
+    Raster(Arc::new(RgbaImage::from_fn(64, 64, |x, y| {
+        if !(6..58).contains(&x) || !(6..58).contains(&y) {
+            Rgba([0, 0, 0, 0])
+        } else if (15..49).contains(&x) && (17..23).contains(&y) {
+            Rgba([180, 205, 226, 255])
+        } else if (15..49).contains(&x) && (28..48).contains(&y) {
+            Rgba([40, 61, 77, 255])
+        } else {
+            Rgba([61, 102, 133, 255])
+        }
+    })))
+}
+
 pub(crate) fn package_icons(artwork: &IconArtwork) -> Result<PackageIcons, String> {
     let mut frames = Vec::new();
     let mut pngs = Vec::new();

@@ -106,6 +106,13 @@ pub(crate) struct CompileApproval<'a> {
     pub wizard_checks: bool,
 }
 
+pub(crate) struct FolderCompileChecks<'a> {
+    pub verify_staged: &'a dyn Fn(&Path) -> Result<(), String>,
+    pub verify_tool_support: &'a dyn Fn(&Path) -> Result<(), String>,
+    pub tool_temp: &'a Path,
+    pub checkpoint: &'a mut dyn FnMut(&'static str) -> Result<(), String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct BuildStep {
     executable: PathBuf,
@@ -395,6 +402,34 @@ pub(crate) fn compile_installer_checked(
     redistribution_asserted: bool,
     approval: Option<CompileApproval<'_>>,
 ) -> Result<CompileReport, String> {
+    compile_with_checks(
+        package,
+        tool_root,
+        output,
+        redistribution_asserted,
+        approval,
+        None,
+    )
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn compile_folder_installer(
+    package: &Path,
+    tool_root: &Path,
+    output: &Path,
+    checks: FolderCompileChecks<'_>,
+) -> Result<CompileReport, String> {
+    compile_with_checks(package, tool_root, output, true, None, Some(checks))
+}
+
+fn compile_with_checks(
+    package: &Path,
+    tool_root: &Path,
+    output: &Path,
+    redistribution_asserted: bool,
+    approval: Option<CompileApproval<'_>>,
+    folder: Option<FolderCompileChecks<'_>>,
+) -> Result<CompileReport, String> {
     Distribution::Bundled {
         redistribution_asserted,
     }
@@ -415,6 +450,9 @@ pub(crate) fn compile_installer_checked(
     if let Some(approval) = &approval {
         (approval.verify_tool_support)(&tool_root)?;
     }
+    if let Some(checks) = &folder {
+        (checks.verify_tool_support)(&tool_root)?;
+    }
     // Reserve the entire run directory with a single exclusive create. A failed
     // attempt retains its work and cannot be mistaken for a fresh attempt.
     fs::create_dir(&output).map_err(|e| {
@@ -429,6 +467,7 @@ pub(crate) fn compile_installer_checked(
         &output,
         redistribution_asserted,
         approval,
+        folder,
     )
     .map_err(|e| {
         format!(
@@ -457,6 +496,7 @@ fn compile_in(
     output: &Path,
     redistribution_asserted: bool,
     mut approval: Option<CompileApproval<'_>>,
+    mut folder: Option<FolderCompileChecks<'_>>,
 ) -> Result<CompileReport, String> {
     let work = output.join("work");
     create_dir(&work)?;
@@ -475,15 +515,23 @@ fn compile_in(
             inputs.staged_file_times_sha256 = Some(file_times);
         }
     }
+    if let Some(checks) = &folder {
+        (checks.verify_staged)(&stage)?;
+    }
     let appinfo = stage.join("App/AppInfo");
     let (metadata, installer_ini, sidebar) = preflight_package(&stage)?;
     #[cfg(target_arch = "x86_64")]
     if approval
         .as_ref()
         .is_some_and(|approval| approval.wizard_checks)
+        || folder.is_some()
     {
         preflight_wizard_details(&metadata.appinfo).map_err(|error| {
-            format!("{error} Save a new reviewed profile with these details before rebuilding.")
+            if folder.is_some() {
+                error
+            } else {
+                format!("{error} Save a new reviewed profile with these details before rebuilding.")
+            }
         })?;
     }
     if metadata.app_id != initial.app_id {
@@ -507,12 +555,20 @@ fn compile_in(
     if let Some(approval) = &approval {
         (approval.verify_tool_support)(&staged_tools)?;
     }
-    let maker = run_step(
+    if let Some(checks) = &mut folder {
+        (checks.verify_tool_support)(&staged_tools)?;
+        (checks.checkpoint)("Generating the installer")?;
+    }
+    let maker = run_step_with_temp(
         &staged_tools.join(MAKER),
         vec![stage.clone()],
         &staged_tools,
         &work.join("maker.log"),
+        folder.as_ref().map(|checks| checks.tool_temp),
     )?;
+    if let Some(checks) = &mut folder {
+        (checks.checkpoint)("Checking generated installer inputs")?;
+    }
     let initial_artifact = find_artifact(&package_work)?;
     let filename = initial_artifact
         .file_name()
@@ -539,12 +595,20 @@ fn compile_in(
     if let Some(approval) = &approval {
         (approval.verify_tool_support)(&staged_tools)?;
     }
-    let compiler = run_step(
+    if let Some(checks) = &mut folder {
+        (checks.verify_tool_support)(&staged_tools)?;
+        (checks.checkpoint)("Compiling the installer")?;
+    }
+    let compiler = run_step_with_temp(
         &staged_tools.join(COMPILER),
         vec![PathBuf::from("/NOCONFIG"), script],
         &staged_tools.join("App/nsis"),
         &work.join("compiler.log"),
+        folder.as_ref().map(|checks| checks.tool_temp),
     )?;
+    if let Some(checks) = &mut folder {
+        (checks.checkpoint)("Verifying the installer")?;
+    }
     let artifact = find_artifact(&package_work)?;
     if artifact != initial_artifact {
         return Err("The final compiler produced an unexpected installer name.".into());
@@ -993,6 +1057,16 @@ pub(crate) fn run_step(
     cwd: &Path,
     log: &Path,
 ) -> Result<BuildStep, String> {
+    run_step_with_temp(executable, arguments, cwd, log, None)
+}
+
+pub(crate) fn run_step_with_temp(
+    executable: &Path,
+    arguments: Vec<PathBuf>,
+    cwd: &Path,
+    log: &Path,
+    folder_temp: Option<&Path>,
+) -> Result<BuildStep, String> {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let mut output =
         File::create(log).map_err(|e| format!("Could not create {}: {e}", log.display()))?;
@@ -1005,7 +1079,8 @@ pub(crate) fn run_step(
     .map_err(|e| format!("Could not write {}: {e}", log.display()))?;
     let stderr = output.try_clone().map_err(|e| e.to_string())?;
     let stdout = output.try_clone().map_err(|e| e.to_string())?;
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(&arguments)
         .current_dir(cwd)
         .env_remove("NSISDIR")
@@ -1014,7 +1089,29 @@ pub(crate) fn run_step(
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(stdout)
-        .stderr(stderr)
+        .stderr(stderr);
+    if let Some(temp) = folder_temp {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let root = crate::folder::windows_directory()
+                .map_err(|error| format!("Could not find the Windows system folder: {error}"))?;
+            let system = root.join("System32");
+            let path = std::env::join_paths([&system, &root]).map_err(|error| error.to_string())?;
+            command
+                .env("SystemRoot", &root)
+                .env("WINDIR", &root)
+                .env("PATH", path)
+                .env("COMSPEC", system.join("cmd.exe"))
+                .env("TEMP", temp)
+                .env("TMP", temp);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = temp;
+            return Err("Folder builds require Windows x64.".into());
+        }
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| format!("Could not start {}: {e}", executable.display()))?;
     extern "system" {
