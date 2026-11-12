@@ -15,7 +15,9 @@ use portableforge_core::SandboxMode;
 
 #[cfg(all(windows, target_arch = "x86_64"))]
 use super::sessions_base;
-use super::{dense, open_folder, picker_start_dir, theme, WizardApp};
+use super::{
+    dense, open_folder, picker_start_dir, setup_input, theme, SetupInput, SetupKind, WizardApp,
+};
 
 #[derive(Default)]
 pub(super) struct ProfileFlow {
@@ -708,35 +710,36 @@ impl ProfileFlow {
 
     fn show_prerequisites(&self, ui: &mut egui::Ui) {
         let Some(checks) = &self.prerequisites else {
-            ui.label("Check that the dedicated box is available.");
             return;
         };
-        let mut errors = Vec::new();
+        let (status, tone) = if checks.capture.is_ok() {
+            ("Ready", RecordStatus::Complete)
+        } else {
+            ("Needs attention", RecordStatus::Failed)
+        };
+        let mut details = Vec::new();
+        if let Err(error) = &checks.capture {
+            details.push(format!("Sandboxie-Plus 1.18.8 · {status}\n{error}"));
+        }
+        for (tool, result) in [
+            ("Launcher Generator", checks.launcher.as_ref()),
+            ("Installer maker", checks.installer.as_ref()),
+        ] {
+            details.push(match result {
+                Some(Ok(())) => format!("{tool} · Ready"),
+                Some(Err(error)) => format!("{tool} · Needs attention\n{error}"),
+                None => format!("{tool} · Choose folder"),
+            });
+        }
         ui.horizontal_wrapped(|ui| {
-            for (tool, result) in [
-                ("Sandboxie-Plus 1.18.8", Some(&checks.capture)),
-                ("Launcher Generator", checks.launcher.as_ref()),
-                ("Installer maker", checks.installer.as_ref()),
-            ] {
-                let (status, tone) = match result {
-                    Some(Ok(())) => ("Ready", RecordStatus::Complete),
-                    Some(Err(error)) => {
-                        errors.push(format!("{tool}\n{error}"));
-                        ("Needs attention", RecordStatus::Failed)
-                    }
-                    None => ("Choose folder", RecordStatus::Neutral),
-                };
-                ui.colored_label(tone.color(ui), format!("{tool} · {status}"));
-            }
-            if !errors.is_empty() {
-                dense::view_text(
-                    ui,
-                    "View prerequisite details",
-                    "Prerequisites",
-                    &errors.join("\n\n"),
-                    true,
-                );
-            }
+            ui.colored_label(tone.color(ui), format!("Sandboxie-Plus 1.18.8 · {status}"));
+            dense::view_text(
+                ui,
+                "View prerequisite details",
+                "Prerequisites",
+                &details.join("\n\n"),
+                true,
+            );
         });
     }
 }
@@ -745,7 +748,7 @@ fn path_field(ui: &mut egui::Ui, label: &str, value: &mut String, kind: FieldKin
     let heading = ui.label(label);
     let browse = match kind {
         FieldKind::Typed => None,
-        FieldKind::NewFolder(_) => Some("Choose parent…"),
+        FieldKind::NewFolder(..) => Some("Choose parent…"),
         _ => Some("Browse…"),
     };
     let mut changed = false;
@@ -762,14 +765,26 @@ fn path_field(ui: &mut egui::Ui, label: &str, value: &mut String, kind: FieldKin
                     dialog = dialog.set_directory(dir);
                 }
                 let picked = match kind {
-                    FieldKind::File => dialog.add_filter("Setup files", &["exe"]).pick_file(),
-                    FieldKind::Folder => dialog.pick_folder(),
-                    FieldKind::NewFolder(name) => dialog.pick_folder().map(|path| path.join(name)),
-                    FieldKind::Typed => None,
+                    FieldKind::File => Ok(dialog.add_filter("Setup files", &["exe"]).pick_file()),
+                    FieldKind::MatchingSetup => Ok(dialog
+                        .add_filter("Setup files", &["exe", "msi"])
+                        .pick_file()),
+                    FieldKind::Folder => Ok(dialog.pick_folder()),
+                    FieldKind::NewFolder(name, queue) => dialog
+                        .pick_folder()
+                        .map(|parent| fresh_child_path(&parent, name, queue))
+                        .transpose(),
+                    FieldKind::Typed => Ok(None),
                 };
-                if let Some(path) = picked {
-                    *value = path.to_string_lossy().into_owned();
-                    changed = true;
+                match picked {
+                    Ok(Some(path)) => {
+                        *value = path.to_string_lossy().into_owned();
+                        changed = true;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    }
                 }
             }
         }
@@ -780,13 +795,72 @@ fn path_field(ui: &mut egui::Ui, label: &str, value: &mut String, kind: FieldKin
 
 enum FieldKind<'a> {
     File,
+    MatchingSetup,
     Folder,
-    NewFolder(&'a str),
+    NewFolder(&'a str, &'a [QueuedBuild]),
     Typed,
 }
 
 fn entered(value: &str) -> PathBuf {
     PathBuf::from(value.trim())
+}
+
+fn output_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
+fn destination_key(path: &Path) -> PathBuf {
+    let parent = output_parent(path);
+    std::fs::canonicalize(parent)
+        .unwrap_or_else(|_| parent.to_path_buf())
+        .join(path.file_name().unwrap_or_default())
+}
+
+fn queue_uses_destination(queue: &[QueuedBuild], destination: &Path) -> bool {
+    queue.iter().any(|job| {
+        let used = &job.request.destination;
+        if cfg!(windows) {
+            destination
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_uppercase()
+                == used
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_uppercase()
+                && destination_key(destination)
+                    .to_string_lossy()
+                    .to_uppercase()
+                    == destination_key(used).to_string_lossy().to_uppercase()
+        } else {
+            destination.file_name() == used.file_name()
+                && destination_key(destination) == destination_key(used)
+        }
+    })
+}
+
+fn fresh_child_path(parent: &Path, name: &str, queue: &[QueuedBuild]) -> Result<PathBuf, String> {
+    for index in 1.. {
+        let path = parent.join(if index == 1 {
+            name.to_owned()
+        } else {
+            format!("{name} ({index})")
+        });
+        match path.symlink_metadata() {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !queue_uses_destination(queue, &path) {
+                    return Ok(path);
+                }
+            }
+            Err(error) => return Err(format!("Could not check the new folder: {error}")),
+        }
+    }
+    unreachable!()
 }
 
 impl WizardApp {
@@ -1020,6 +1094,9 @@ impl WizardApp {
                 if ui.button("Check prerequisites").clicked() {
                     self.check_prerequisites(ui.ctx());
                 }
+                if let Some(blocker) = self.capture_blocker() {
+                    ui.label(egui::RichText::new(blocker).weak());
+                }
             });
             let trust_label = if self.profile_flow.companions.is_empty() {
                 "I trust this setup file and the installed app."
@@ -1029,6 +1106,14 @@ impl WizardApp {
             ui.checkbox(&mut self.profile_flow.trusted, trust_label);
         });
         self.profile_flow.show_prerequisites(ui);
+        if self
+            .profile_flow
+            .prerequisites
+            .as_ref()
+            .is_some_and(|checks| checks.capture.is_err())
+        {
+            self.show_bundled_test_box_help(ui);
+        }
         self.profile_flow.show_feedback(ui);
         if self.profile_flow.setup_options_open {
             self.show_setup_options(ui.ctx());
@@ -1036,16 +1121,28 @@ impl WizardApp {
     }
 
     pub(super) fn capture_ready(&self) -> bool {
-        !self.profile_flow.busy()
-            && self.profile_flow.trusted
-            && entered(&self.installer_path)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-            && self
-                .profile_flow
-                .prerequisites
-                .as_ref()
-                .is_some_and(|checks| checks.capture.is_ok())
+        !self.profile_flow.busy() && self.capture_blocker().is_none()
+    }
+
+    fn capture_blocker(&self) -> Option<&'static str> {
+        match setup_input(&self.installer_path) {
+            SetupInput::Ready {
+                kind: SetupKind::Exe,
+                ..
+            } => {}
+            SetupInput::Ready {
+                kind: SetupKind::Msi,
+                ..
+            } => return Some("Use Windows Sandbox for MSI setup."),
+            SetupInput::Empty => return Some("Choose an EXE setup file."),
+            input => return input.problem(),
+        }
+        match &self.profile_flow.prerequisites {
+            None => Some("Check prerequisites before capture."),
+            Some(checks) if checks.capture.is_err() => Some("Resolve the dedicated box check."),
+            _ if !self.profile_flow.trusted => Some("Confirm that you trust setup and the app."),
+            _ => None,
+        }
     }
 
     pub(super) fn check_prerequisites(&mut self, ctx: &egui::Context) {
@@ -1304,7 +1401,7 @@ impl WizardApp {
                 ui,
                 "New profile folder",
                 &mut self.profile_flow.profile_destination,
-                FieldKind::NewFolder("PortableForge Profile"),
+                FieldKind::NewFolder("PortableForge Profile", &[]),
             );
         });
         self.profile_flow.show_feedback(ui);
@@ -1412,7 +1509,8 @@ impl WizardApp {
         };
         self.show_header(ctx, title, None);
         let busy = self.profile_flow.busy();
-        let request = self.replay_request();
+        let readiness = self.replay_request();
+        let request = readiness.as_ref().ok();
         egui::TopBottomPanel::bottom("profile-replay-back").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.add_enabled(!busy, egui::Button::new("Back")).clicked() {
@@ -1429,8 +1527,8 @@ impl WizardApp {
                             )
                             .clicked()
                             {
-                                if let Some(request) = request.clone() {
-                                    self.start_rebuild(ctx, request, None);
+                                if let Some(request) = request {
+                                    self.start_rebuild(ctx, request.clone(), None);
                                 }
                             }
                             if ui
@@ -1440,8 +1538,17 @@ impl WizardApp {
                                 )
                                 .clicked()
                             {
-                                if let Some(request) = request.clone() {
-                                    self.enqueue(request);
+                                if let Some(request) = request {
+                                    self.enqueue(request.clone());
+                                }
+                            }
+                            if !busy {
+                                if let Err(blocker) = readiness {
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(blocker).weak())
+                                            .truncate(),
+                                    )
+                                    .on_hover_text(blocker);
                                 }
                             }
                         }
@@ -1783,7 +1890,7 @@ impl WizardApp {
             ui,
             "Matching setup file",
             &mut self.profile_flow.replay_setup,
-            FieldKind::File,
+            FieldKind::MatchingSetup,
         );
         if path_field(
             ui,
@@ -1797,7 +1904,7 @@ impl WizardApp {
             ui,
             "New build folder",
             &mut self.profile_flow.replay_destination,
-            FieldKind::NewFolder("PortableForge Installer"),
+            FieldKind::NewFolder("PortableForge Installer", &self.profile_flow.queue),
         );
     }
 
@@ -1845,7 +1952,7 @@ impl WizardApp {
                 ui,
                 "New profile location",
                 &mut self.profile_flow.relocate_destination,
-                FieldKind::NewFolder("PortableForge Profile"),
+                FieldKind::NewFolder("PortableForge Profile", &[]),
             );
             ui.horizontal_wrapped(|ui| {
                 if ui
@@ -1873,35 +1980,77 @@ impl WizardApp {
         }
     }
 
-    fn replay_request(&self) -> Option<ReplayRequest> {
+    fn replay_request(&self) -> Result<ReplayRequest, &'static str> {
+        let approval = self
+            .settings
+            .saved_profiles
+            .get(self.profile_flow.selected_profile)
+            .ok_or("Choose a saved profile.")?;
+        match setup_input(&self.profile_flow.replay_setup) {
+            SetupInput::Ready { .. } => {}
+            SetupInput::Empty => return Err("Choose the matching setup file."),
+            input => return Err(input.problem().unwrap_or("Check the setup file.")),
+        }
         let setup = entered(&self.profile_flow.replay_setup);
         let tools = entered(&self.profile_flow.installer_tools);
-        let destination = entered(&self.profile_flow.replay_destination);
-        if [&setup, &tools, &destination]
-            .iter()
-            .any(|path| path.as_os_str().is_empty())
-        {
-            return None;
+        if tools.as_os_str().is_empty() {
+            return Err("Choose the Installer folder.");
         }
-        Some(ReplayRequest {
+        if !tools.is_dir() {
+            return Err("Installer folder was not found.");
+        }
+        let destination = entered(&self.profile_flow.replay_destination);
+        if destination.file_name().is_none() {
+            return Err("Choose a new build folder.");
+        }
+        if !output_parent(&destination).is_dir() {
+            return Err("Choose an existing parent folder.");
+        }
+        if !matches!(destination.symlink_metadata(), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            || queue_uses_destination(&self.profile_flow.queue, &destination)
+        {
+            return Err("Choose an unused build folder.");
+        }
+        Ok(ReplayRequest {
             setup,
-            approval: self
-                .settings
-                .saved_profiles
-                .get(self.profile_flow.selected_profile)?
-                .clone(),
+            approval: approval.clone(),
             tools,
             destination,
         })
     }
 
+    fn edit_queued_build(&mut self, index: usize) {
+        let job = &self.profile_flow.queue[index];
+        let Some(profile) = self.settings.saved_profiles.iter().position(|approval| {
+            approval.folder == job.request.approval.folder
+                && approval.manifest_sha256 == job.request.approval.manifest_sha256
+        }) else {
+            self.profile_flow.error =
+                Some("The saved profile for this attempt is unavailable.".into());
+            return;
+        };
+        self.profile_flow.selected_profile = profile;
+        self.profile_flow.profile_page = profile;
+        self.profile_flow.profile_search.clear();
+        self.profile_flow.replay_setup = job.request.setup.to_string_lossy().into_owned();
+        let tools = job.request.tools.to_string_lossy();
+        if self.profile_flow.installer_tools != tools {
+            self.profile_flow.installer_tools = tools.into_owned();
+            self.profile_flow.prerequisites = None;
+        }
+        self.profile_flow.replay_destination.clear();
+        self.profile_flow.build = None;
+        self.profile_flow.result_page = 0;
+        self.profile_flow.library_tab = LibraryTab::Profiles;
+        self.profile_flow.error = None;
+        self.log.push(format!(
+            "Editing build inputs after a failed attempt for {}.",
+            job.request.approval.label
+        ));
+    }
+
     fn enqueue(&mut self, request: ReplayRequest) {
-        if self
-            .profile_flow
-            .queue
-            .iter()
-            .any(|item| item.request.destination == request.destination)
-        {
+        if queue_uses_destination(&self.profile_flow.queue, &request.destination) {
             self.profile_flow.error =
                 Some("Choose a new build folder for each queue entry.".into());
             return;
@@ -1996,6 +2145,10 @@ impl WizardApp {
             },
         );
         self.profile_flow.queue_page = index;
+        let busy = self.profile_flow.busy();
+        let mut edit = false;
+        let mut retry_request = None;
+        let mut action_error = None;
         {
             let job = &self.profile_flow.queue[index];
             let destination = job.request.destination.display().to_string();
@@ -2020,36 +2173,51 @@ impl WizardApp {
                     }
                 }
                 QueueState::Failed(error) => {
-                    dense::view_text(ui, "View build log", "Build problem", error, true);
-                    let work = job.request.destination.join("work");
-                    if work.is_dir() && ui.button("Open build working folder").clicked() {
-                        if let Err(error) = open_folder(&work) {
-                            self.profile_flow.error = Some(error);
-                        }
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.profile_flow.busy(),
-                            egui::Button::new("Retry in a new folder…"),
-                        )
-                        .clicked()
-                    {
-                        if let Some(parent) = rfd::FileDialog::new()
-                            .set_title("Choose a parent for the retry")
-                            .pick_folder()
-                        {
-                            match fresh_retry_path(&parent) {
-                                Ok(destination) => {
-                                    let mut retry = job.request.clone();
-                                    retry.destination = destination;
-                                    self.enqueue(retry);
-                                }
-                                Err(error) => self.profile_flow.error = Some(error),
+                    ui.horizontal_wrapped(|ui| {
+                        dense::view_text(ui, "View build log", "Build problem", error, true);
+                        let work = job.request.destination.join("work");
+                        if work.is_dir() && ui.button("Open build working folder").clicked() {
+                            if let Err(error) = open_folder(&work) {
+                                action_error = Some(error);
                             }
                         }
-                    }
+                        edit = ui
+                            .add_enabled(!busy, egui::Button::new("Edit build inputs"))
+                            .clicked();
+                        if ui
+                            .add_enabled(!busy, egui::Button::new("Retry in a new folder…"))
+                            .clicked()
+                        {
+                            if let Some(parent) = rfd::FileDialog::new()
+                                .set_title("Choose a parent for the retry")
+                                .pick_folder()
+                            {
+                                match fresh_child_path(
+                                    &parent,
+                                    "PortableForge Retry",
+                                    &self.profile_flow.queue,
+                                ) {
+                                    Ok(destination) => {
+                                        let mut retry = job.request.clone();
+                                        retry.destination = destination;
+                                        retry_request = Some(retry);
+                                    }
+                                    Err(error) => action_error = Some(error),
+                                }
+                            }
+                        }
+                    });
                 }
             }
+        }
+        if edit {
+            self.edit_queued_build(index);
+        }
+        if let Some(request) = retry_request {
+            self.enqueue(request);
+        }
+        if let Some(error) = action_error {
+            self.profile_flow.error = Some(error);
         }
     }
 
@@ -2378,18 +2546,6 @@ fn profile_matches(approval: &SavedProfileApproval, query: &str) -> bool {
     ]
     .iter()
     .any(|text| text.to_lowercase().contains(query))
-}
-
-fn fresh_retry_path(parent: &Path) -> Result<PathBuf, String> {
-    #[cfg(all(windows, target_arch = "x86_64"))]
-    {
-        unique_folder(parent, "PortableForge-Retry")
-    }
-    #[cfg(not(all(windows, target_arch = "x86_64")))]
-    {
-        let _ = parent;
-        Err("Building needs 64-bit Windows on an x64 computer.".into())
-    }
 }
 
 fn inspect_job(approval: &SavedProfileApproval) -> Result<JobResult, String> {
@@ -2733,7 +2889,13 @@ mod tests {
                 ),
                 (
                     LibraryTab::Queue,
-                    &["× Build failed", "View build log", "Build queued apps"][..],
+                    &[
+                        "× Build failed",
+                        "View build log",
+                        "Edit build inputs",
+                        "Retry in a new folder…",
+                        "Build queued apps",
+                    ][..],
                 ),
                 (
                     LibraryTab::Results,
@@ -2745,6 +2907,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn failed_build_reopens_its_approved_inputs_without_reusing_output() {
+        let mut wizard = library_fixture();
+        wizard.profile_flow.library_tab = LibraryTab::Queue;
+        let first = wizard.profile_flow.queue[0].request.clone();
+        wizard.profile_flow.replay_destination = "Previous form destination".into();
+        wizard.edit_queued_build(0);
+        let state = &wizard.profile_flow;
+        assert!(state.library_tab == LibraryTab::Profiles);
+        assert_eq!(
+            wizard.settings.saved_profiles[state.selected_profile].manifest_sha256,
+            first.approval.manifest_sha256
+        );
+        assert_eq!(entered(&state.replay_setup), first.setup);
+        assert_eq!(entered(&state.installer_tools), first.tools);
+        assert!(state.replay_destination.is_empty());
+        assert_eq!(state.queue[0].request.destination, first.destination);
+        assert!(
+            matches!(&state.queue[0].state, QueueState::Failed(error) if error == "The build input changed.")
+        );
     }
 
     fn assert_library_controls_fit(tab: LibraryTab, labels: &[&str], size: [f32; 2], scale: f32) {

@@ -588,10 +588,15 @@ fn sandboxie_capture_command(_args: &[String]) -> Result<(), String> {
 
 #[cfg(all(windows, target_arch = "x86_64"))]
 fn sandboxie_exercise_command(args: &[String]) -> Result<(), String> {
-    let [name, root, program] = args else {
+    let [name, root, runtime_root, program] = args else {
         return Err("Invalid internal Sandboxie exercise command.".into());
     };
-    portableforge_core::sbie_verified::exercise_boxed(name, Path::new(root), Path::new(program))
+    portableforge_core::sbie_verified::exercise_boxed(
+        name,
+        Path::new(root),
+        Path::new(runtime_root),
+        Path::new(program),
+    )
 }
 
 #[cfg(windows)]

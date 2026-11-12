@@ -810,6 +810,7 @@ pub fn capture_with_options(
             OsString::from("__sandboxie-exercise"),
             OsString::from(&name),
             root.clone().into_os_string(),
+            sbie.runtime_root().as_os_str().to_os_string(),
             installed.clone().into_os_string(),
         ];
         let exercise = checked_exit(
@@ -993,13 +994,18 @@ fn cleanup(
 }
 
 /// Internal subcommand entered only from a driver-verified process.
-pub fn exercise_boxed(name: &str, root: &Path, program: &Path) -> Result<(), String> {
+pub fn exercise_boxed(
+    name: &str,
+    root: &Path,
+    runtime_root: &Path,
+    program: &Path,
+) -> Result<(), String> {
     if !valid_box_name(name) {
         return Err("Invalid dedicated box identity.".into());
     }
     let program = logical_executable(program)?;
     let helper = std::env::current_exe().map_err(|error| error.to_string())?;
-    Sandboxie::verify_current(name, root, &helper)?;
+    Sandboxie::verify_current(name, root, runtime_root, &helper)?;
     let status = Command::new(&program)
         .current_dir(program.parent().ok_or("Choose an installed app folder.")?)
         .stdin(Stdio::null())

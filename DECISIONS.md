@@ -1,5 +1,15 @@
 # Decisions — PortableForge
 
+## 2026-11-12 — Bundle the portable test box files
+
+This replaces the October 25 setup executable bundle. Release packaging
+extracts the pinned official Sandboxie-Plus 1.18.8 x64 payload before it
+stages PortableForge. The wizard can open the folder in Explorer.
+Administrator prompts and the service lifecycle belong to the vendor
+manager that the user opens from a protected local copy. Verified
+capture and installer testing attach to a compatible running engine
+after checking its active service and driver identities.
+
 ## 2026-11-12 — TesselGUI revision 2 for the wizard
 
 The wizard uses the GitHub palette and workflow patterns from TesselGUI

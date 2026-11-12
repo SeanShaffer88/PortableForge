@@ -163,6 +163,7 @@ pub fn test_built_paf(
                 OsString::from("__sandboxie-exercise"),
                 OsString::from(&name),
                 root.clone().into_os_string(),
+                sbie.runtime_root().as_os_str().to_os_string(),
                 launcher.clone().into_os_string(),
             ];
             *exit = checked_exit(

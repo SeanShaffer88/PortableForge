@@ -152,6 +152,76 @@ fn picker_start_dir(current: &str) -> Option<std::path::PathBuf> {
 }
 
 /// A file size in plain words: `812 KB`, `14.2 MB`, `1.3 GB`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SetupKind {
+    Exe,
+    Msi,
+}
+
+impl SetupKind {
+    fn from_path(path: &std::path::Path) -> Option<Self> {
+        let extension = path.extension()?;
+        if extension.eq_ignore_ascii_case("exe") {
+            Some(Self::Exe)
+        } else if extension.eq_ignore_ascii_case("msi") {
+            Some(Self::Msi)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SetupInput {
+    Empty,
+    Missing,
+    Folder,
+    Unsupported,
+    Ready { kind: SetupKind, size: u64 },
+}
+
+impl SetupInput {
+    fn problem(self) -> Option<&'static str> {
+        match self {
+            Self::Empty => Some(guide::SETUP_REQUIRED),
+            Self::Missing => Some(guide::SETUP_MISSING),
+            Self::Folder => Some(guide::SETUP_FOLDER),
+            Self::Unsupported => Some(guide::SETUP_UNSUPPORTED),
+            Self::Ready { .. } => None,
+        }
+    }
+
+    fn allows_verified_picker(self) -> bool {
+        matches!(
+            self,
+            Self::Empty
+                | Self::Ready {
+                    kind: SetupKind::Exe,
+                    ..
+                }
+        )
+    }
+}
+
+fn setup_input(input: &str) -> SetupInput {
+    let input = input.trim();
+    if input.is_empty() {
+        return SetupInput::Empty;
+    }
+    let path = std::path::Path::new(input);
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => SetupInput::Folder,
+        Ok(metadata) if metadata.is_file() => {
+            SetupKind::from_path(path).map_or(SetupInput::Unsupported, |kind| SetupInput::Ready {
+                kind,
+                size: metadata.len(),
+            })
+        }
+        Ok(_) => SetupInput::Unsupported,
+        Err(_) => SetupInput::Missing,
+    }
+}
+
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1_000;
     const MB: u64 = 1_000_000;
@@ -237,9 +307,8 @@ impl WizardApp {
 
     fn uses_guided_msi(&self) -> bool {
         !self.profile_flow.selected_capture
-            && std::path::Path::new(self.installer_path.trim())
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("msi"))
+            && SetupKind::from_path(std::path::Path::new(self.installer_path.trim()))
+                == Some(SetupKind::Msi)
     }
 
     /// Make the session folder, copy the setup file and the helper
@@ -251,6 +320,10 @@ impl WizardApp {
             return;
         }
         if self.layout.is_none() {
+            if let Some(problem) = setup_input(&self.installer_path).problem() {
+                self.log.push(problem.into());
+                return;
+            }
             let stem = std::path::Path::new(self.installer_path.trim())
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -490,31 +563,30 @@ impl WizardApp {
         }
     }
 
-    /// Where the bundled quick box installer sits, if this copy of
-    /// PortableForge carries one (release copies do).
-    fn bundled_sbie_path(&self) -> Option<std::path::PathBuf> {
-        let exe = std::env::current_exe().ok()?;
-        let dir = exe.parent()?;
-        portableforge_core::sbie::bundled_installer(dir)
-    }
-
-    /// Verify the bundled installer against its recorded
-    /// fingerprint, then open it. A file that does not match is
-    /// never run — that refusal is the point of carrying the
-    /// fingerprint.
-    fn install_bundled_sbie(&mut self, path: &std::path::Path) {
-        let pin =
-            portableforge_core::tools::pin(portableforge_core::tools::ToolId::SandboxieInstaller);
-        match portableforge_core::tools::verify_tool_file(path, pin) {
-            Ok(()) => match crate::run_program_file(path) {
-                Ok(()) => self.log.push(
-                    "The quick test box installer is opening. When it has finished, press Check again."
-                        .to_string(),
-                ),
-                Err(e) => self.log.push(e),
-            },
-            Err(e) => self.log.push(e),
-        }
+    pub(super) fn show_bundled_test_box_help(&mut self, ui: &mut egui::Ui) {
+        let folder = std::env::current_exe().ok().and_then(|exe| {
+            let folder = exe.parent()?.join("bundled").join("Sandboxie-Plus");
+            folder.join("SandMan.exe").is_file().then_some(folder)
+        });
+        ui.horizontal_wrapped(|ui| {
+            let open = ui
+                .add_enabled(folder.is_some(), egui::Button::new("Open bundled test box folder"))
+                .on_disabled_hover_text("The portable test box files are missing from this copy.");
+            if open.clicked() {
+                if let Some(folder) = folder {
+                    if let Err(error) = open_folder(&folder) {
+                        self.log.push(error);
+                    }
+                }
+            }
+            dense::view_text(
+                ui,
+                "Portable test box instructions",
+                "Start the bundled test box",
+                "Copy the whole bundled Sandboxie-Plus folder to a new protected local folder under Program Files.\n\nOpen SandMan.exe from that copy and approve its administrator prompts to start the Sandboxie-Plus service and driver.\n\nReturn to Capture with Sandboxie-Plus in PortableForge and choose Check prerequisites.\n\nWhen finished with the portable test box, close SandMan and choose Yes when it asks to clean up the services it created.",
+                true,
+            );
+        });
     }
 
     fn finish_capture(&mut self, layout: &portableforge_core::orchestrate::SessionLayout) {
@@ -840,6 +912,9 @@ impl WizardApp {
         if self.profile_flow.busy() {
             return false;
         }
+        if self.step == 0 {
+            return matches!(setup_input(&self.installer_path), SetupInput::Ready { .. });
+        }
         if self.uses_guided_msi() {
             let note = |name| {
                 self.layout
@@ -887,25 +962,11 @@ impl WizardApp {
         }
         let blocked = match STEPS[self.step].id {
             "pick" => {
-                if self.installer_path.trim().is_empty() {
-                    self.log.push(
-                        "Pick the program's setup file first — type its full path above."
-                            .to_string(),
-                    );
-                    true
-                } else if !std::path::Path::new(self.installer_path.trim()).exists() {
-                    self.log.push(format!(
-                        "We could not find a file at {} — check the path and try again.",
-                        self.installer_path.trim()
-                    ));
-                    true
-                } else {
-                    self.settings.remember_installer(self.installer_path.trim());
-                    if self.uses_guided_msi() {
-                        self.force_sandbox = false;
-                    }
-                    false
+                self.settings.remember_installer(self.installer_path.trim());
+                if self.uses_guided_msi() {
+                    self.force_sandbox = false;
                 }
+                false
             }
             "name" => {
                 if self.app_name.trim().is_empty() {
@@ -1056,11 +1117,7 @@ impl eframe::App for WizardApp {
                 "Tell PortableForge when the app has closed.",
             ),
             _ => match (verified, step.id) {
-                (_, "pick") => (
-                    "Choose a setup file",
-                    "Browse, paste a path, or drag in a setup file.",
-                    "",
-                ),
+                (_, "pick") => (step.title, step.what_happens, step.what_you_do),
                 (true, "clean") => (
                     "Check your setup",
                     "Check the dedicated box and packaging tools before starting capture.",
@@ -1242,35 +1299,16 @@ impl eframe::App for WizardApp {
                         self.mark_dirty();
                         self.persist_now();
                     }
-                    // The bundled way in: when this computer has no
-                    // quick test box yet, offer the installer
-                    // PortableForge carries with it (untouched,
-                    // fingerprint-checked before it ever runs) —
-                    // and a fresh check for afterwards.
                     let sbie_missing = self
                         .preflight_facts
                         .as_ref()
                         .map(|f| !f.sandboxie_present)
                         .unwrap_or(false);
                     if sbie_missing {
-                        ui.add_space(8.0);
-                        if let Some(bundled) = self.bundled_sbie_path() {
-                            if ui
-                                .button("Install the quick test box now")
-                                .on_hover_text("This opens the quick box's own installer, which PortableForge carries with it untouched. Windows will ask for an administrator's OK, because the quick box works deep in the system. When it has finished, press Check again.")
-                                .clicked()
-                            {
-                                self.install_bundled_sbie(&bundled);
-                            }
-                            ui.label(
-                                egui::RichText::new("The quick test box is a separate free program. PortableForge carries its installer untouched and checks its fingerprint before opening it.")
-                                    .color(ui.visuals().weak_text_color()),
-                            );
-                            ui.add_space(4.0);
-                        }
+                        self.show_bundled_test_box_help(ui);
                         if ui
                             .button("Check again")
-                            .on_hover_text("Look at this computer once more — for after the quick test box has been installed.")
+                            .on_hover_text("Refresh the standard wizard's system checks.")
                             .clicked()
                         {
                             let mut facts = crate::collect_preflight_facts();
@@ -1443,7 +1481,7 @@ impl eframe::App for WizardApp {
                                 &guide::WELCOME.join("\n"), true);
                         });
                     }
-                    let setup_label = ui.label("Where is the program's setup file?");
+                    let setup_label = ui.label("Setup file (.exe or .msi)");
                     ui.horizontal(|ui| {
                         let width = dense::width_with_button(ui, "Browse…");
                         let (response, view) = dense::path_edit(ui, &mut self.installer_path, width);
@@ -1463,8 +1501,7 @@ impl eframe::App for WizardApp {
                         {
                             let mut dialog = rfd::FileDialog::new()
                                 .set_title("Pick the program's setup file")
-                                .add_filter("Setup files", &["exe", "msi", "zip"])
-                                .add_filter("All files", &["*"]);
+                                .add_filter("Setup files", &["exe", "msi"]);
                             if let Some(dir) = picker_start_dir(&self.installer_path) {
                                 dialog = dialog.set_directory(dir);
                             }
@@ -1477,45 +1514,32 @@ impl eframe::App for WizardApp {
                         }
                         dense::view_text(ui, "View path", "Setup path", &self.installer_path, view);
                     });
-                    // Say plainly what the typed path points at.
                     let typed = self.installer_path.trim().to_string();
-                    if !typed.is_empty() {
-                        match std::fs::metadata(&typed) {
-                            Ok(md) if md.is_file() => {
-                                let name = std::path::Path::new(&typed)
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_default();
-                                ui.label(format!(
-                                    "That file is {} — {}.",
-                                    format_size(md.len()),
-                                    name
-                                ));
-                            }
-                            Ok(_) => {
-                                ui.label(
-                                    egui::RichText::new(
-                                        "That path is a folder — pick the setup file inside it.",
-                                    )
-                                    .color(ui.visuals().error_fg_color),
-                                );
-                            }
-                            Err(_) => {
-                                ui.label(
-                                    egui::RichText::new(
-                                        "We can't find a file there yet — check the path, or use Browse.",
-                                    )
-                                    .color(ui.visuals().weak_text_color()),
-                                );
-                            }
-                        }
+                    let input = setup_input(&typed);
+                    if let SetupInput::Ready { size, .. } = input {
+                        let name = std::path::Path::new(&typed).file_name().unwrap_or_default().to_string_lossy();
+                        let description = format!("Ready · {name} · {}", format_size(size));
+                        ui.add(egui::Label::new(&description).truncate()).on_hover_text(description);
+                    } else if let Some(problem) = input.problem() {
+                        let color = if input == SetupInput::Empty {
+                            ui.visuals().weak_text_color()
+                        } else {
+                            ui.visuals().error_fg_color
+                        };
+                        ui.colored_label(color, problem);
                     }
                     ui.horizontal_wrapped(|ui| {
-                        if !guided_msi && ui.button("Capture with Sandboxie-Plus").clicked() {
+                        if !guided_msi
+                            && ui.add_enabled(input.allows_verified_picker(), egui::Button::new("Capture with Sandboxie-Plus")).clicked()
+                            && setup_input(&self.installer_path).allows_verified_picker()
+                        {
                             self.enter_verified_capture();
                             self.check_prerequisites(ctx);
                         }
-                        if ui.button("Rebuild from a saved profile").clicked() {
+                        if ui.button("Open saved profiles")
+                            .on_hover_text("Rebuild with a saved profile and its original setup file.")
+                            .clicked()
+                        {
                             self.open_profile_replay(false);
                         }
                     });
@@ -1752,6 +1776,76 @@ pub fn run_gui() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pick_validation_controls_both_routes() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("portableforge-pick-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let exe = root.join("Example Setup.EXE");
+        let msi = root.join("Example Setup.MSI");
+        let zip = root.join("Example Setup.zip");
+        for path in [&exe, &msi, &zip] {
+            std::fs::write(path, b"inert test bytes").unwrap();
+        }
+        let missing = root.join("Missing Setup.exe");
+        let mut wizard = WizardApp {
+            settings: WizardSettings::default(),
+            ..Default::default()
+        };
+        for (path, expected, continue_ready, verified_picker) in [
+            (" ".into(), SetupInput::Empty, false, true),
+            (root.to_string_lossy(), SetupInput::Folder, false, false),
+            (missing.to_string_lossy(), SetupInput::Missing, false, false),
+            (zip.to_string_lossy(), SetupInput::Unsupported, false, false),
+            (
+                exe.to_string_lossy(),
+                SetupInput::Ready {
+                    kind: SetupKind::Exe,
+                    size: 16,
+                },
+                true,
+                true,
+            ),
+            (
+                msi.to_string_lossy(),
+                SetupInput::Ready {
+                    kind: SetupKind::Msi,
+                    size: 16,
+                },
+                true,
+                false,
+            ),
+        ] {
+            wizard.installer_path = path.into_owned();
+            let observed = setup_input(&wizard.installer_path);
+            assert_eq!(observed, expected);
+            assert_eq!(observed.allows_verified_picker(), verified_picker);
+            assert_eq!(observed.problem().is_none(), continue_ready);
+            assert_eq!(
+                wizard.current_wizard_action(),
+                Some((shell::WizardAction::Continue, continue_ready))
+            );
+            if !continue_ready {
+                assert!(!wizard.advance());
+                assert_eq!(wizard.step, 0);
+            }
+        }
+        assert!(wizard.advance());
+        assert_eq!(wizard.step, 1);
+        assert_eq!(
+            wizard.settings.recent_installers,
+            vec![msi.to_string_lossy()]
+        );
+        for path in [exe, msi, zip] {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn changing_setup_detaches_previous_capture_and_approval() {

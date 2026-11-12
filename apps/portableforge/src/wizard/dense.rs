@@ -568,7 +568,7 @@ mod tests {
                 "Pick up where I left off",
                 "About this wizard",
                 "Capture with Sandboxie-Plus",
-                "Rebuild from a saved profile",
+                "Open saved profiles",
                 "first.exe",
                 "Continue",
             ],
@@ -586,9 +586,9 @@ mod tests {
             &[
                 "Check prerequisites",
                 "Sandboxie-Plus 1.18.8 · Needs attention",
-                "Launcher Generator · Ready",
-                "Installer maker · Choose folder",
                 "View prerequisite details",
+                "Open bundled test box folder",
+                "Portable test box instructions",
                 "Start capture",
             ],
         );
