@@ -1,4 +1,4 @@
-//! Pre-save edits and previews for a profile's packaged artwork.
+//! Edits and previews for packaged artwork.
 
 use std::path::PathBuf;
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -32,16 +32,50 @@ pub(super) struct Editor {
 
 struct Draft {
     opener: egui::Id,
+    copy: &'static EditorCopy,
     tab: Tab,
     icon_size: u32,
     artwork: Artwork,
-    captured_icon: Option<Raster>,
+    base_icon: Option<Raster>,
     captured_load: Option<Receiver<Result<Raster, String>>>,
     preview: Option<egui::TextureHandle>,
     dirty_preview: bool,
     focus_first: bool,
     problem: Option<String>,
 }
+
+struct EditorCopy {
+    modal_id: &'static str,
+    title: &'static str,
+    apply: &'static str,
+    icon_tab: &'static str,
+    sidebar_tab: &'static str,
+    icon_help: &'static str,
+    restore_icon: &'static str,
+    normalize_base_preview: bool,
+}
+
+const CAPTURE_COPY: EditorCopy = EditorCopy {
+    modal_id: "profile-artwork",
+    title: "Package artwork",
+    apply: "Apply artwork",
+    icon_tab: "App icon",
+    sidebar_tab: "Installer left pane",
+    icon_help: "Import a picture or use the captured app icon.",
+    restore_icon: "Use captured icon",
+    normalize_base_preview: false,
+};
+
+const FOLDER_COPY: EditorCopy = EditorCopy {
+    modal_id: "folder-artwork",
+    title: "Package Artwork",
+    apply: "Apply Artwork",
+    icon_tab: "App Icon",
+    sidebar_tab: "Installer Left Pane",
+    icon_help: "Import a picture or keep the default app icon.",
+    restore_icon: "Use Default App Icon",
+    normalize_base_preview: true,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Exit {
@@ -59,12 +93,26 @@ impl Editor {
     }
 
     pub(super) fn open(&mut self, opener: egui::Id, captured_icon: Option<Raster>) {
+        self.open_with_copy(opener, captured_icon, &CAPTURE_COPY);
+    }
+
+    pub(super) fn open_folder(&mut self, opener: egui::Id, base_icon: Raster) {
+        self.open_with_copy(opener, Some(base_icon), &FOLDER_COPY);
+    }
+
+    fn open_with_copy(
+        &mut self,
+        opener: egui::Id,
+        base_icon: Option<Raster>,
+        copy: &'static EditorCopy,
+    ) {
         self.editing = Some(Draft {
             opener,
+            copy,
             tab: Tab::Icon,
             icon_size: 128,
             artwork: self.applied.clone(),
-            captured_icon,
+            base_icon,
             captured_load: None,
             preview: None,
             dirty_preview: true,
@@ -110,7 +158,8 @@ impl Editor {
         }
     }
 
-    pub(super) fn show(&mut self, ctx: &egui::Context) {
+    /// Returns true after the user applies the artwork.
+    pub(super) fn show(&mut self, ctx: &egui::Context) -> bool {
         let Some(draft) = &mut self.editing else {
             if let Some(opener) = self.return_focus {
                 if ctx.memory(|memory| memory.top_modal_layer().is_none()) {
@@ -119,13 +168,13 @@ impl Editor {
                 }
                 ctx.request_repaint();
             }
-            return;
+            return false;
         };
         draft.poll_captured_icon();
         let width = (ctx.content_rect().width() - 52.0).clamp(380.0, 560.0);
-        let response = egui::Modal::new(egui::Id::new("profile-artwork")).show(ctx, |ui| {
+        let response = egui::Modal::new(egui::Id::new(draft.copy.modal_id)).show(ctx, |ui| {
             ui.set_width(width);
-            ui.heading("Package artwork");
+            ui.heading(draft.copy.title);
             draft.show_tabs(ui);
             draft.show_workspace(ui);
             ui.separator();
@@ -134,7 +183,7 @@ impl Editor {
                     return Some(Exit::Cancel);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    dense::primary_action(ui, draft.can_apply(), "Apply artwork")
+                    dense::primary_action(ui, draft.can_apply(), draft.copy.apply)
                         .clicked()
                         .then_some(Exit::Apply)
                 })
@@ -148,7 +197,9 @@ impl Editor {
         {
             self.finish(exit);
             ctx.request_repaint();
+            return exit == Exit::Apply;
         }
+        false
     }
 
     fn finish(&mut self, exit: Exit) {
@@ -174,7 +225,7 @@ impl Draft {
         self.captured_load = None;
         match result {
             Ok(icon) => {
-                self.captured_icon = Some(icon);
+                self.base_icon = Some(icon);
                 self.dirty_preview = true;
             }
             Err(error) => self.problem = Some(error),
@@ -187,14 +238,14 @@ impl Draft {
             .as_ref()
             .is_none_or(|pane| pane.source.is_some())
             || self.artwork.icon.is_some()
-            || self.captured_icon.is_some()
+            || self.base_icon.is_some()
     }
 
     fn show_tabs(&mut self, ui: &mut egui::Ui) {
         let before = self.tab;
         ui.horizontal(|ui| {
-            let icon = ui.selectable_value(&mut self.tab, Tab::Icon, "App icon");
-            ui.selectable_value(&mut self.tab, Tab::Sidebar, "Installer left pane");
+            let icon = ui.selectable_value(&mut self.tab, Tab::Icon, self.copy.icon_tab);
+            ui.selectable_value(&mut self.tab, Tab::Sidebar, self.copy.sidebar_tab);
             if self.focus_first {
                 icon.request_focus();
                 self.focus_first = false;
@@ -248,7 +299,7 @@ impl Draft {
     }
 
     fn show_icon_controls(&mut self, ui: &mut egui::Ui) {
-        ui.label("Import a picture or use the captured app icon.");
+        ui.label(self.copy.icon_help);
         ui.horizontal_wrapped(|ui| {
             if ui.button("Import image…").clicked() {
                 self.import_image();
@@ -256,7 +307,7 @@ impl Draft {
             if ui
                 .add_enabled(
                     self.artwork.icon.is_some(),
-                    egui::Button::new("Use captured icon"),
+                    egui::Button::new(self.copy.restore_icon),
                 )
                 .clicked()
             {
@@ -288,7 +339,7 @@ impl Draft {
             if ui.button("Import image…").clicked() {
                 self.import_image();
             }
-            let icon_available = self.artwork.icon.is_some() || self.captured_icon.is_some();
+            let icon_available = self.artwork.icon.is_some() || self.base_icon.is_some();
             if ui
                 .add_enabled(icon_available, egui::Button::new("Use app icon"))
                 .clicked()
@@ -382,7 +433,7 @@ impl Draft {
         }
         self.dirty_preview = false;
         let rendered = match self.tab {
-            Tab::Icon => self.effective_icon(self.icon_size),
+            Tab::Icon => self.icon_preview(),
             Tab::Sidebar => self.artwork.sidebar.as_ref().map_or(Ok(None), |pane| {
                 let icon = if pane.source.is_none() {
                     self.effective_icon(256)?
@@ -394,7 +445,7 @@ impl Draft {
         };
         self.preview = match rendered {
             Ok(Some(raster)) => Some(ctx.load_texture(
-                "profile-artwork-preview",
+                self.copy.modal_id,
                 egui::ColorImage::from_rgba_unmultiplied(
                     [raster.width() as usize, raster.height() as usize],
                     raster.rgba(),
@@ -411,9 +462,25 @@ impl Draft {
 
     fn effective_icon(&self, size: u32) -> Result<Option<Raster>, String> {
         self.artwork.icon.as_ref().map_or_else(
-            || Ok(self.captured_icon.clone()),
+            || Ok(self.base_icon.clone()),
             |icon| render_icon(icon, size).map(Some),
         )
+    }
+
+    fn icon_preview(&self) -> Result<Option<Raster>, String> {
+        if self.copy.normalize_base_preview && self.artwork.icon.is_none() {
+            if let Some(source) = &self.base_icon {
+                return render_icon(
+                    &IconArtwork {
+                        source: source.clone(),
+                        transform: Transform::default(),
+                    },
+                    self.icon_size,
+                )
+                .map(Some);
+            }
+        }
+        self.effective_icon(self.icon_size)
     }
 
     fn show_preview(&self, ui: &mut egui::Ui, width: f32) {
@@ -522,23 +589,40 @@ mod tests {
 
     #[test]
     fn artwork_only_changes_the_applied_draft_after_apply() {
-        let mut editor = Editor::default();
         let opener = egui::Id::new("edit-artwork");
         let icon = fixture_icon();
-        editor.open(opener, Some(icon.clone()));
-        editor.editing.as_mut().unwrap().artwork.icon = Some(IconArtwork {
-            source: icon.clone(),
-            transform: Transform::default(),
-        });
-        assert!(editor.artwork().is_none());
-        editor.finish(Exit::Apply);
-        assert!(editor.artwork().unwrap().icon.is_some());
+        for copy in [&CAPTURE_COPY, &FOLDER_COPY] {
+            let mut editor = Editor::default();
+            editor.open_with_copy(opener, Some(icon.clone()), copy);
+            editor.editing.as_mut().unwrap().artwork.icon = Some(IconArtwork {
+                source: icon.clone(),
+                transform: Transform::default(),
+            });
+            assert!(editor.artwork().is_none());
+            editor.finish(Exit::Apply);
+            assert!(editor.artwork().unwrap().icon.is_some());
 
-        editor.open(opener, Some(icon));
-        editor.editing.as_mut().unwrap().artwork.icon = None;
-        editor.finish(Exit::Cancel);
-        assert!(editor.artwork().unwrap().icon.is_some());
-        assert_eq!(editor.return_focus, Some(opener));
+            editor.open_with_copy(opener, Some(icon.clone()), copy);
+            editor.editing.as_mut().unwrap().artwork.icon = None;
+            editor.finish(Exit::Cancel);
+            assert!(editor.artwork().unwrap().icon.is_some());
+            assert_eq!(editor.return_focus, Some(opener));
+        }
+    }
+
+    #[test]
+    fn folder_normalizes_the_icon_preview_but_keeps_the_raw_sidebar_source() {
+        let mut editor = Editor::default();
+        let base = fixture_icon();
+        editor.open_folder(egui::Id::new("folder-artwork"), base.clone());
+        let draft = editor.editing.as_mut().unwrap();
+        draft.icon_size = 32;
+        let preview = draft.icon_preview().unwrap().unwrap();
+        assert_eq!((preview.width(), preview.height()), (32, 32));
+        assert_eq!(
+            draft.effective_icon(256).unwrap().unwrap().rgba(),
+            base.rgba()
+        );
     }
 
     #[test]
@@ -547,13 +631,18 @@ mod tests {
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(dense::MIN_CONTENT));
         let icon = fixture_icon();
         for scale in [1.0, 1.25, 1.5] {
-            for tab in [Tab::Icon, Tab::Sidebar] {
+            for (tab, copy) in [
+                (Tab::Icon, &CAPTURE_COPY),
+                (Tab::Sidebar, &CAPTURE_COPY),
+                (Tab::Icon, &FOLDER_COPY),
+                (Tab::Sidebar, &FOLDER_COPY),
+            ] {
                 let ctx = egui::Context::default();
                 super::super::theme::install_fonts(&ctx);
                 ctx.set_zoom_factor(scale);
                 let mut theme = super::super::theme::State::default();
                 let mut editor = Editor::default();
-                editor.open(egui::Id::new("edit-artwork"), Some(icon.clone()));
+                editor.open_with_copy(egui::Id::new("edit-artwork"), Some(icon.clone()), copy);
                 let draft = editor.editing.as_mut().unwrap();
                 draft.tab = tab;
                 draft.artwork = Artwork {
@@ -584,7 +673,7 @@ mod tests {
                 draw();
                 let output = draw();
                 for expected in [
-                    "Apply artwork",
+                    copy.apply,
                     "Cancel",
                     "Rotate 90°",
                     "Flip horizontal",

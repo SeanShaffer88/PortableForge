@@ -12,6 +12,8 @@ Incomplete inventory, unsafe choices, and malformed supported metadata are block
 
 ## Build transaction
 
+Use the artwork editor from the folder review to preview an app icon or installer left pane. Only applied edits are included in a build. Choosing a new folder or a different executable clears the edits. With no changes, the build uses the selected executable’s icon or the generated default and keeps the installer’s default pane.
+
 The wizard collects the relative entry point, app details, pinned tool locations, a new output folder, and explicit permission to include the app files. The builder rechecks the source and stages a private copy with the same layout. It generates `App/AppInfo/appinfo.ini`, `App/AppInfo/installer.ini`, and the launcher configuration before invoking the pinned official tools. The launcher starts the selected program in its packaged directory.
 
 The installer and receipt are published together through a same-volume directory rename. An existing destination is preserved. Stop requests are cooperative and checked before publication. Temporary files are cleaned up on success, failure, or a completed stop. If Windows prevents cleanup, the error identifies the affected path.

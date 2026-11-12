@@ -28,7 +28,7 @@ impl WizardApp {
                 ui.horizontal(|ui| {
                     let flow = &mut self.folder_flow;
                     let back = ui.add_enabled(
-                        !flow.busy(),
+                        !flow.busy() && !flow.artwork_open(),
                         egui::Button::new(if flow.page == Page::Done {
                             "Choose Another App"
                         } else {
@@ -38,7 +38,7 @@ impl WizardApp {
                     if back.clicked() {
                         flow.back();
                     }
-                    if !flow.busy() {
+                    if !flow.busy() && !flow.artwork_open() {
                         shell::register_region(ui, shell::Region::Footer, back.id);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -84,7 +84,12 @@ impl WizardApp {
         egui::CentralPanel::default()
             .frame(dense::content_frame(ctx))
             .show(ctx, |ui| {
-                if self.folder_flow.show_body(ui) {
+                let choose = ui
+                    .add_enabled_ui(!self.folder_flow.artwork_open(), |ui| {
+                        self.folder_flow.show_body(ui)
+                    })
+                    .inner;
+                if choose {
                     self.choose_app_folder(ctx);
                 }
             });
@@ -182,10 +187,21 @@ impl Flow {
             path_summary(ui, "Save To", &self.output());
         }
         let mut choose = false;
+        if self.selected.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Edit App Details").clicked() {
+                    self.page = Page::App;
+                }
+                #[cfg(windows)]
+                {
+                    let edit = ui.button("Edit Package Artwork…");
+                    if edit.clicked() {
+                        self.open_artwork(edit.id);
+                    }
+                }
+            });
+        }
         ui.horizontal_wrapped(|ui| {
-            if self.selected.is_some() && ui.button("Edit App Details").clicked() {
-                self.page = Page::App;
-            }
             if self.selected.is_some() && ui.button("Build Tools and Output").clicked() {
                 self.page = Page::Files;
             }

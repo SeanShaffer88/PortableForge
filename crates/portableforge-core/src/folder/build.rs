@@ -3,7 +3,7 @@
 use super::{
     open_inventory_file, scan, validate, EntryKind, FolderEntry, FolderScan, IssueSeverity,
 };
-use crate::artwork::{default_application_icon, package_icons, IconArtwork, Transform};
+use crate::artwork::{self, Artwork, IconArtwork, Transform};
 use crate::compile::windows::{
     compile_folder_installer, copy_new_file, local_directory, new_output_path,
     preflight_generated_settings, preflight_profile_package, within, FolderCompileChecks,
@@ -104,10 +104,21 @@ pub struct FolderBuildReport {
 pub fn build(
     request: FolderBuildRequest<'_>,
     control: &FolderBuildControl,
+    progress: impl FnMut(&'static str),
+) -> Result<FolderBuildReport, String> {
+    build_with_artwork(request, None, control, progress)
+}
+
+/// Build with optional applied artwork. The images are rendered in the private
+/// package stage and verified in the final installer before publication.
+pub fn build_with_artwork(
+    request: FolderBuildRequest<'_>,
+    artwork: Option<&Artwork>,
+    control: &FolderBuildControl,
     mut progress: impl FnMut(&'static str),
 ) -> Result<FolderBuildReport, String> {
     control.begin()?;
-    let result = build_inner(request, control, &mut progress);
+    let result = build_inner(request, artwork, control, &mut progress);
     let state = control.0.swap(DONE, Ordering::AcqRel);
     if state == STOPPED {
         match result {
@@ -132,6 +143,7 @@ fn checkpoint(
 
 fn build_inner(
     request: FolderBuildRequest<'_>,
+    artwork: Option<&Artwork>,
     control: &FolderBuildControl,
     progress: &mut dyn FnMut(&'static str),
 ) -> Result<FolderBuildReport, String> {
@@ -254,18 +266,7 @@ fn build_inner(
         verify_payload(&payload, &current.entries, &expected, control)?;
 
         let app_info = package.join("App/AppInfo");
-        let (icon, icon_source) = match read_application_icon(&payload.join(selected)) {
-            Ok(icon) => (icon, "application"),
-            Err(_) => (default_application_icon(), "default"),
-        };
-        let icon_set = package_icons(&IconArtwork {
-            source: icon,
-            transform: Transform::default(),
-        })?;
-        write_new(&app_info.join("appicon.ico"), &icon_set.ico)?;
-        for (size, bytes) in &icon_set.png {
-            write_new(&app_info.join(format!("appicon_{size}.png")), bytes)?;
-        }
+        let staged_artwork = stage_artwork(&package, &payload.join(selected), artwork)?;
         write_launcher_settings(&package, &metadata, selected)?;
         copy_license(&payload, &app_info, &current.entries)?;
         if let Some(issue) = validate_tree(&package, &metadata)
@@ -291,6 +292,7 @@ fn build_inner(
         control.active()?;
         preflight_profile_package(&package)?;
         verify_payload(&payload, &current.entries, &expected, control)?;
+        staged_artwork.verify(&package)?;
 
         let verify_staged = |stage: &Path| {
             verify_payload(
@@ -298,7 +300,8 @@ fn build_inner(
                 &current.entries,
                 &expected,
                 control,
-            )
+            )?;
+            staged_artwork.verify(stage)
         };
         let mut compiler_checkpoint = |stage| checkpoint(control, progress, stage);
         let compile_output = scratch.join("c");
@@ -313,6 +316,19 @@ fn build_inner(
                 checkpoint: &mut compiler_checkpoint,
             },
         )?;
+        if compiler.application_icon_sha256 != staged_artwork.icon_sha256
+            || !compiler.embedded_icons_verified
+        {
+            return Err("The installer icon does not match the staged application icon.".into());
+        }
+        let embedded_sidebar_sha256 = compiler
+            .installer_artwork
+            .as_ref()
+            .filter(|evidence| evidence.embedded_verified)
+            .map(|evidence| evidence.sha256.as_str());
+        if embedded_sidebar_sha256 != staged_artwork.sidebar_sha256.as_deref() {
+            return Err("The installer artwork does not match the staged sidebar.".into());
+        }
         checkpoint(
             control,
             progress,
@@ -352,7 +368,7 @@ fn build_inner(
             "source": source,
             "selected_executable": metadata.main_exe,
             "payload_sha256": expected,
-            "icon_source": icon_source,
+            "icon_source": staged_artwork.icon_source,
             "launcher_tools": launcher_tools,
             "launcher_step": launcher_step,
             "support_trees_verified": true,
@@ -566,6 +582,88 @@ fn launcher_relative(path: &Path) -> Result<String, String> {
     Ok(names.join("\\"))
 }
 
+struct StagedArtwork {
+    icon_source: &'static str,
+    icon_sha256: String,
+    icon_size: usize,
+    sidebar_sha256: Option<String>,
+}
+
+impl StagedArtwork {
+    fn verify(&self, package: &Path) -> Result<(), String> {
+        let icon_path = package.join("App/AppInfo/appicon.ico");
+        let icon = crate::profile::read_small(&icon_path, package, self.icon_size)?;
+        if sha256_hex(&icon) != self.icon_sha256 {
+            return Err("The application icon changed before installer compilation.".into());
+        }
+
+        let sidebar_path = package.join(artwork::SIDEBAR_PATH);
+        if let Some(expected) = &self.sidebar_sha256 {
+            let sidebar = crate::profile::read_small(&sidebar_path, package, artwork::BMP_BYTES)?;
+            artwork::validate_sidebar_bmp(&sidebar)?;
+            if sha256_hex(&sidebar) != *expected {
+                return Err("The installer sidebar changed before compilation.".into());
+            }
+        } else if !fs::symlink_metadata(sidebar_path)
+            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        {
+            return Err("An unexpected installer sidebar appeared before compilation.".into());
+        }
+        Ok(())
+    }
+}
+
+fn stage_artwork(
+    package: &Path,
+    application: &Path,
+    artwork: Option<&Artwork>,
+) -> Result<StagedArtwork, String> {
+    let custom_icon = artwork.and_then(|choice| choice.icon.as_ref());
+    let (icon, icon_source) = if let Some(custom) = custom_icon {
+        (custom.clone(), "custom")
+    } else {
+        let (source, origin) = match read_application_icon(application) {
+            Ok(source) => (source, "application"),
+            Err(_) => (artwork::default_application_icon(), "default"),
+        };
+        (
+            IconArtwork {
+                source,
+                transform: Transform::default(),
+            },
+            origin,
+        )
+    };
+    let icon_set = artwork::package_icons(&icon)?;
+    let app_info = package.join("App/AppInfo");
+    write_new(&app_info.join("appicon.ico"), &icon_set.ico)?;
+    for (size, bytes) in &icon_set.png {
+        write_new(&app_info.join(format!("appicon_{size}.png")), bytes)?;
+    }
+
+    let sidebar_sha256 = artwork
+        .and_then(|choice| choice.sidebar.as_ref())
+        .map(|sidebar| {
+            let effective = if sidebar.source.is_some() {
+                None
+            } else if custom_icon.is_some() {
+                Some(artwork::render_icon(&icon, 256)?)
+            } else {
+                Some(icon.source)
+            };
+            let bytes = artwork::sidebar_bmp(sidebar, effective.as_ref())?;
+            write_new(&package.join(artwork::SIDEBAR_PATH), &bytes)?;
+            Ok::<_, String>(sha256_hex(&bytes))
+        })
+        .transpose()?;
+    Ok(StagedArtwork {
+        icon_source,
+        icon_sha256: sha256_hex(&icon_set.ico),
+        icon_size: icon_set.ico.len(),
+        sidebar_sha256,
+    })
+}
+
 fn write_launcher_settings(
     package: &Path,
     meta: &PafMetadata,
@@ -727,6 +825,48 @@ fn io_message(cause: io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_artwork_staging_uses_the_applied_icon_for_sidebar_composition() {
+        let stage = owned_path(&std::env::temp_dir()).unwrap();
+        fs::create_dir(&stage).unwrap();
+        fs::create_dir_all(stage.join("App/AppInfo")).unwrap();
+        fs::create_dir_all(stage.join("Other/Source")).unwrap();
+
+        let icon = IconArtwork {
+            source: artwork::default_application_icon(),
+            transform: Transform {
+                quarter_turns: 1,
+                ..Transform::default()
+            },
+        };
+        let sidebar = artwork::SidebarArtwork {
+            source: None,
+            transform: Transform::default(),
+            background: [38, 40, 52],
+        };
+        let effective = artwork::render_icon(&icon, 256).unwrap();
+        let expected_sidebar = artwork::sidebar_bmp(&sidebar, Some(&effective)).unwrap();
+        let expected_icon = artwork::package_icons(&icon).unwrap();
+        let choice = Artwork {
+            icon: Some(icon),
+            sidebar: Some(sidebar),
+        };
+        let staged = stage_artwork(&stage, &stage.join("missing.exe"), Some(&choice)).unwrap();
+        assert_eq!(staged.icon_source, "custom");
+        assert_eq!(staged.icon_sha256, sha256_hex(&expected_icon.ico));
+        assert_eq!(staged.sidebar_sha256, Some(sha256_hex(&expected_sidebar)));
+        staged.verify(&stage).unwrap();
+        let mut changed = expected_sidebar;
+        *changed.last_mut().unwrap() ^= 1;
+        fs::write(stage.join(artwork::SIDEBAR_PATH), changed).unwrap();
+        let verification = staged.verify(&stage);
+        fs::remove_dir_all(&stage).unwrap();
+        assert_eq!(
+            verification.unwrap_err(),
+            "The installer sidebar changed before compilation."
+        );
+    }
 
     #[test]
     fn delivery_requires_closed_children_and_protects_existing_output() {

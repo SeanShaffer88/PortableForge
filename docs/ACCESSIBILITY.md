@@ -67,3 +67,8 @@ Installer** in the action strip on the review screen, and displays
 **Stop After This Step** while a running build can still be stopped.
 Geometry tests exercise the populated folder pages at 640 × 480 for
 Standard, Large, and Extra large text.
+
+**Edit Package Artwork** opens the same icon and installer pane controls
+from folder review. **Apply Artwork** keeps edits for the current review,
+and **Cancel** or Escape discards unapplied edits. Closing the editor
+returns focus to **Edit Package Artwork**.

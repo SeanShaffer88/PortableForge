@@ -3,12 +3,14 @@ use std::sync::{mpsc, Arc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
+#[cfg(windows)]
+use portableforge_core::artwork::{default_application_icon, render_icon, Raster};
 #[cfg(all(windows, target_arch = "x86_64"))]
 use portableforge_core::folder::FolderBuildControl;
 use portableforge_core::folder::{self, AppProperties, FolderIssue, FolderScan, IssueSeverity};
 use portableforge_core::guide::folder_flow as copy;
 
-use super::WizardApp;
+use super::{artwork_ui, WizardApp};
 
 mod draft;
 mod view;
@@ -36,6 +38,9 @@ pub(super) struct Flow {
     scan: Option<Arc<FolderScan>>,
     selected: Option<PathBuf>,
     inferred_name: bool,
+    artwork: artwork_ui::Editor,
+    #[cfg(windows)]
+    base_icon: Option<Raster>,
     icon: Option<egui::TextureHandle>,
     issues: Vec<FolderIssue>,
     draft: Draft,
@@ -138,8 +143,51 @@ impl Flow {
         self.page
     }
 
+    pub(super) fn artwork_open(&self) -> bool {
+        self.artwork.is_open()
+    }
+
+    #[cfg(windows)]
+    fn open_artwork(&mut self, opener: egui::Id) {
+        self.artwork.open_folder(
+            opener,
+            self.base_icon
+                .clone()
+                .unwrap_or_else(default_application_icon),
+        );
+    }
+
+    pub(super) fn show_artwork(&mut self, ctx: &egui::Context) {
+        if self.artwork.show(ctx) {
+            self.refresh_review_icon(ctx);
+        }
+    }
+
+    fn refresh_review_icon(&mut self, ctx: &egui::Context) {
+        #[cfg(windows)]
+        {
+            let custom = self
+                .artwork
+                .artwork()
+                .and_then(|artwork| artwork.icon.as_ref())
+                .and_then(|icon| render_icon(icon, 32).ok());
+            self.icon = custom.as_ref().or(self.base_icon.as_ref()).map(|raster| {
+                ctx.load_texture(
+                    "folder-program-icon",
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [raster.width() as usize, raster.height() as usize],
+                        raster.rgba(),
+                    ),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+        }
+        #[cfg(not(windows))]
+        let _ = ctx;
+    }
+
     pub(super) fn back(&mut self) {
-        if self.busy() {
+        if self.busy() || self.artwork_open() {
             return;
         }
         if self.page == Page::Findings {
@@ -152,7 +200,7 @@ impl Flow {
     }
 
     pub(super) fn toggle_findings(&mut self) {
-        if !self.busy() {
+        if !self.busy() && !self.artwork_open() {
             if self.page == Page::Findings {
                 self.page = self.findings_from;
             } else {
@@ -243,6 +291,7 @@ impl Flow {
             return;
         }
         self.draft = Draft::default();
+        self.artwork = artwork_ui::Editor::default();
         let properties = selection.properties;
         self.draft.name = properties.name;
         self.draft.id = suggested_id(&self.draft.name);
@@ -251,19 +300,9 @@ impl Flow {
         self.inferred_name = properties.name_inferred;
         #[cfg(windows)]
         {
-            self.icon = properties.icon.map(|raster| {
-                ctx.load_texture(
-                    "folder-program-icon",
-                    egui::ColorImage::from_rgba_unmultiplied(
-                        [raster.width() as usize, raster.height() as usize],
-                        raster.rgba(),
-                    ),
-                    egui::TextureOptions::LINEAR,
-                )
-            });
+            self.base_icon = Some(properties.icon.unwrap_or_else(default_application_icon));
         }
-        #[cfg(not(windows))]
-        let _ = ctx;
+        self.refresh_review_icon(ctx);
         self.selected = Some(selection.relative);
         self.page = Page::Review;
     }
@@ -400,7 +439,11 @@ impl Flow {
     }
 
     pub(super) fn build_ready(&self) -> bool {
-        self.page == Page::Review && !self.busy() && self.scan.is_some() && self.blocker().is_none()
+        self.page == Page::Review
+            && !self.busy()
+            && !self.artwork_open()
+            && self.scan.is_some()
+            && self.blocker().is_none()
     }
 
     pub(super) fn show_build_action(&self) -> bool {
@@ -423,10 +466,11 @@ impl Flow {
         let launcher_tools = self.launcher_tools.clone();
         let installer_tools = self.installer_tools.clone();
         let output = self.output();
+        let artwork = self.artwork.artwork().cloned();
         let control = FolderBuildControl::default();
         self.control = Some(control.clone());
         self.start(ctx, "Checking the app folder…", move |tx, ctx| {
-            use portableforge_core::folder::{build, FolderBuildRequest};
+            use portableforge_core::folder::{build_with_artwork, FolderBuildRequest};
             let request = FolderBuildRequest {
                 scan: &scan,
                 selected: &selected,
@@ -436,7 +480,7 @@ impl Flow {
                 output: &output,
             };
             let mut stage = "";
-            match build(request, &control, |status| {
+            match build_with_artwork(request, artwork.as_ref(), &control, |status| {
                 stage = status;
                 let _ = tx.send(Event::Stage(status));
                 ctx.request_repaint();
@@ -505,7 +549,7 @@ impl WizardApp {
     }
 
     pub(super) fn inspect_app_folder(&mut self, ctx: &egui::Context, path: PathBuf, dropped: bool) {
-        if self.folder_flow.busy() || self.profile_flow.busy() {
+        if self.folder_flow.busy() || self.folder_flow.artwork_open() || self.profile_flow.busy() {
             return;
         }
         let (launcher, installer) = self.profile_flow.folder_tool_paths();
@@ -695,6 +739,86 @@ mod tests {
         std::fs::remove_dir(root).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn folder_artwork_is_applied_only_on_confirmation_and_tracks_the_selected_program() {
+        let mut wizard = populated();
+        let ctx = egui::Context::default();
+        super::super::theme::install_fonts(&ctx);
+        let bounds = egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::from(super::super::dense::MIN_CONTENT),
+        );
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut draw = |wizard: &mut WizardApp, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(bounds),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| eframe::App::update(wizard, ctx, &mut frame),
+            )
+        };
+        let mut click = |wizard: &mut WizardApp, label: &str| {
+            let output = draw(wizard, vec![]);
+            let pos = output
+                .shapes
+                .iter()
+                .find(|shape| {
+                    matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == label)
+                })
+                .unwrap_or_else(|| panic!("Missing action {label:?}"))
+                .shape
+                .visual_bounding_rect()
+                .center();
+            for pressed in [true, false] {
+                draw(
+                    wizard,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+        };
+
+        click(&mut wizard, "Edit Package Artwork…");
+        assert!(wizard.folder_flow.artwork_open());
+        assert!(!wizard.folder_flow.build_ready());
+        let source = wizard.folder_flow.source.clone();
+        wizard.inspect_app_folder(&ctx, source.join("Another"), true);
+        assert_eq!(wizard.folder_flow.source, source);
+        wizard.folder_flow.back();
+        assert!(wizard.folder_flow.open);
+
+        click(&mut wizard, "Installer Left Pane");
+        click(&mut wizard, "Use app icon");
+        assert!(wizard.folder_flow.artwork.artwork().is_none());
+        click(&mut wizard, "Apply Artwork");
+        click(&mut wizard, "Edit Package Artwork…");
+        click(&mut wizard, "Installer Left Pane");
+        click(&mut wizard, "Use default left pane");
+        click(&mut wizard, "Cancel");
+        let flow = &mut wizard.folder_flow;
+        assert!(!flow.artwork_open());
+        assert!(flow.artwork.artwork().unwrap().sidebar.is_some());
+        assert!(wizard.artwork.artwork().is_none());
+
+        let selected = flow.selected.clone().unwrap();
+        flow.accept_selection(&ctx, selection(selected.to_str().unwrap()));
+        flow.page = Page::App;
+        flow.back();
+        assert!(flow.artwork.artwork().unwrap().sidebar.is_some());
+        flow.accept_selection(&ctx, selection("bin/another.exe"));
+        assert!(flow.artwork.artwork().is_none());
+    }
+
     #[test]
     fn folder_views_fit_at_minimum_size_at_all_text_sizes() {
         for scale in [1.0, 1.25, 1.5] {
@@ -710,7 +834,13 @@ mod tests {
             for (page, labels) in [
                 (
                     Page::Review,
-                    &["Review Your App", "Build Installer", copy::RIGHTS][..],
+                    &[
+                        "Review Your App",
+                        #[cfg(windows)]
+                        "Edit Package Artwork…",
+                        "Build Installer",
+                        copy::RIGHTS,
+                    ][..],
                 ),
                 (
                     Page::Program,

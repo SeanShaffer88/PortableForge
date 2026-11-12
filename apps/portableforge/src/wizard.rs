@@ -1080,7 +1080,8 @@ impl eframe::App for WizardApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         self.persist_if_due();
-        if !self.artwork.is_open() {
+        let editing_artwork = self.artwork.is_open() || self.folder_flow.artwork_open();
+        if !editing_artwork {
             self.handle_shell_keys(ctx);
         }
         self.update_heading_focus(ctx);
@@ -1093,6 +1094,7 @@ impl eframe::App for WizardApp {
         let pick_step = STEPS[self.step.min(STEPS.len() - 1)].id == "pick";
         if (pick_step || self.folder_flow.open)
             && !self.folder_flow.busy()
+            && !editing_artwork
             && !ctx.memory(|memory| memory.top_modal_layer().is_some())
         {
             let dropped = ctx.input_mut(|i| {
@@ -1108,6 +1110,7 @@ impl eframe::App for WizardApp {
         if self.folder_flow.open {
             self.show_folder_flow(ctx);
             self.show_shell_popup(ctx);
+            self.folder_flow.show_artwork(ctx);
             return;
         }
 
