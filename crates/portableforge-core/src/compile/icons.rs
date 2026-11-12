@@ -250,7 +250,10 @@ fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-pub(crate) fn extract_application_icons(executable: &Path, app_info: &Path) -> Result<(), String> {
+fn with_icon_images<T>(
+    executable: &Path,
+    read: impl FnOnce(&[IconImage<'_>]) -> Result<T, String>,
+) -> Result<T, String> {
     let module = ResourceModule::open(executable)?;
     let group = module.first_icon_group()?;
     let entries = icon_entries(group, 14)
@@ -265,11 +268,28 @@ pub(crate) fn extract_application_icons(executable: &Path, app_info: &Path) -> R
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let ico = encode_ico(&images)?;
+    read(&images)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn read_application_icon(executable: &Path) -> Result<crate::artwork::Raster, String> {
+    with_icon_images(executable, |images| {
+        crate::artwork::Raster::decode(&encode_ico(images)?)
+    })
+}
+
+pub(crate) fn extract_application_icons(executable: &Path, app_info: &Path) -> Result<(), String> {
+    with_icon_images(executable, |images| {
+        write_application_icons(images, app_info)
+    })
+}
+
+fn write_application_icons(images: &[IconImage<'_>], app_info: &Path) -> Result<(), String> {
+    let ico = encode_ico(images)?;
     // Keep only the best representation for each size. Validate every entry
     // before any resource bytes are handed to the external compiler.
     let mut previews: [Option<Preview>; 2] = [None, None];
-    for entry in &images {
+    for entry in images {
         let source = decode_icon(entry)?;
         for (size, preview) in [16_u32, 32].into_iter().zip(&mut previews) {
             let (width, height) = (source.width(), source.height());

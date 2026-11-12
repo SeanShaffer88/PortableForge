@@ -25,8 +25,8 @@ task surface. Warnings and outcomes include text. [TesselGUI revision 2 verifica
 - Ctrl+, opens **Appearance**. F1 opens **Status and details** or shortcut help
   in the saved-profile workspace. F6 moves focus between available regions.
 - Escape dismisses a dialog or goes back when the current step allows it.
-  Commands and Appearance restore focus to their opener. Task navigation
-  focuses the heading so the next controls follow in reading order.
+  Commands, Appearance, and Package artwork restore focus to their opener.
+  Task navigation focuses the heading so the next controls follow in reading order.
 - **Needs attention** shows unresolved required warnings. Review choices
   remain with their findings when you page, filter, or go back.
 
@@ -38,8 +38,9 @@ validation, needs a separate Windows assistive-technology pass.
 
 Standard, Large and Extra large use 100%, 125% and 150% text zoom. The
 640 × 480 logical minimum is tested with populated controls, long paths,
-and paged review. A long path can wrap in the field and opens in a full-value
-dialog when more room is needed. A copy action is available in that dialog.
+the artwork tabs, and paged review. A long path can wrap in the field and
+opens in a full-value dialog when more room is needed. A copy action is
+available in that dialog.
 
 At minimum size the capture task stays in one column so file paths have the
 full width. Prerequisites sit with the capture controls. The wizard uses

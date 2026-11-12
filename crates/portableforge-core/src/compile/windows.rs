@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::windows::fs::MetadataExt;
@@ -10,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{installer_settings, package_settings, safe_name, Package};
+use crate::artwork;
 use crate::paf::Distribution;
 use crate::snapshot::pe_arch;
 
@@ -34,6 +36,13 @@ const TOOLS: &[(&str, &str)] = &[
         "c4d270ddcebd77df693f5cb9112cc5b5372cd1d19a3aec601320d9e982747b6d",
     ),
 ];
+const ARTWORK_EXTRACTOR: &str = "App/7zip/7z.exe";
+const ARTWORK_EXTRACTOR_SHA256: &str =
+    "285e5220d6d4240b6a4bdb6357d427e457313376e3464d3cb973637a384ed02a";
+const ARTWORK_EXTRACTOR_LIBRARY: &str = "App/7zip/7z.dll";
+const ARTWORK_EXTRACTOR_LIBRARY_SHA256: &str =
+    "c6989259a78960805b8b646843d2ef3a8a19e5533359e8a252aad2f3cc78c844";
+const EMBEDDED_SIDEBAR: &str = r"$PLUGINSDIR\modern-wizard.bmp";
 const TIMEOUT_MILLIS: u32 = 120_000;
 const INSTALLER_SCRIPT: &str = "PortableApps.comInstaller.nsi";
 const REPARSE_POINT: u32 = 0x400;
@@ -46,6 +55,8 @@ pub struct CompileReport {
     pub sha256: String,
     pub application_icon_sha256: String,
     pub embedded_icons_verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installer_artwork: Option<InstallerArtworkEvidence>,
     pub installer_version: &'static str,
     pub verified_executables: &'static [(&'static str, &'static str)],
     pub source_package: PathBuf,
@@ -54,6 +65,16 @@ pub struct CompileReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<ProfileBuildEvidence>,
     pub steps: Vec<BuildStep>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct InstallerArtworkEvidence {
+    pub sha256: String,
+    pub embedded_verified: bool,
+    pub extractor_sha256: String,
+    pub extractor_library_sha256: String,
+    pub verification_log: PathBuf,
+    pub verification_exit_code: i32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -105,6 +126,8 @@ pub struct VerifiedBuild {
     pub sha256: String,
     pub application_icon_sha256: String,
     pub installer_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installer_artwork: Option<InstallerArtworkEvidence>,
     pub verified_executables: Vec<(String, String)>,
     pub profile: Option<ProfileBuildEvidence>,
     pub compiler_exit_codes: [i32; 2],
@@ -120,6 +143,7 @@ pub struct BuildComparison {
     pub same_configuration: Option<bool>,
     pub same_icon_set: Option<bool>,
     pub same_primary_icon: bool,
+    pub same_installer_artwork: Option<bool>,
     pub same_installer_support: Option<bool>,
     pub same_staged_file_times: Option<bool>,
     pub same_pinned_executables: bool,
@@ -135,6 +159,7 @@ struct BuildResultManifest {
     sha256: String,
     application_icon_sha256: String,
     embedded_icons_verified: bool,
+    installer_artwork: Option<InstallerArtworkEvidence>,
     installer_version: String,
     verified_executables: Vec<(String, String)>,
     redistribution_asserted: bool,
@@ -200,6 +225,17 @@ pub fn verify_build_result(result_directory: &Path) -> Result<VerifiedBuild, Str
             .profile
             .as_ref()
             .is_some_and(|profile| !valid_profile(profile))
+        || manifest.installer_artwork.as_ref().is_some_and(|artwork| {
+            !artwork.embedded_verified
+                || !valid_digest(&artwork.sha256)
+                || !artwork
+                    .extractor_sha256
+                    .eq_ignore_ascii_case(ARTWORK_EXTRACTOR_SHA256)
+                || !artwork
+                    .extractor_library_sha256
+                    .eq_ignore_ascii_case(ARTWORK_EXTRACTOR_LIBRARY_SHA256)
+                || artwork.verification_exit_code != 0
+        })
         || manifest.verified_executables.len() != TOOLS.len()
         || manifest.verified_executables.iter().zip(TOOLS).any(
             |((file, digest), (known_file, known_digest))| {
@@ -237,6 +273,7 @@ pub fn verify_build_result(result_directory: &Path) -> Result<VerifiedBuild, Str
         sha256,
         application_icon_sha256: manifest.application_icon_sha256,
         installer_version: manifest.installer_version,
+        installer_artwork: manifest.installer_artwork,
         verified_executables: manifest.verified_executables,
         profile: manifest.profile,
         compiler_exit_codes: [manifest.steps[0].exit_code, manifest.steps[1].exit_code],
@@ -267,6 +304,11 @@ pub fn compare_build_results(left: &Path, right: &Path) -> Result<BuildCompariso
         same_primary_icon: left
             .application_icon_sha256
             .eq_ignore_ascii_case(&right.application_icon_sha256),
+        same_installer_artwork: match (&left.installer_artwork, &right.installer_artwork) {
+            (None, None) => None,
+            (Some(left), Some(right)) => Some(left.sha256.eq_ignore_ascii_case(&right.sha256)),
+            _ => Some(false),
+        },
         same_installer_support: same(|inputs| &inputs.installer_support_sha256),
         same_staged_file_times: stable_inputs.and_then(|(left, right)| {
             left.staged_file_times_sha256
@@ -434,7 +476,7 @@ fn compile_in(
         }
     }
     let appinfo = stage.join("App/AppInfo");
-    let (metadata, installer_ini) = preflight_package(&stage)?;
+    let (metadata, installer_ini, sidebar) = preflight_package(&stage)?;
     #[cfg(target_arch = "x86_64")]
     if approval
         .as_ref()
@@ -484,6 +526,12 @@ fn compile_in(
     }
     fs::copy(&app_icon, source.join("PortableApps.comInstaller.ico"))
         .map_err(|e| format!("Could not replace the staged installer icon: {e}"))?;
+    if let Some(sidebar) = &sidebar {
+        let bitmap = source.join("PortableApps.comInstaller.bmp");
+        require_regular_path(&bitmap, &stage)?;
+        fs::write(&bitmap, sidebar)
+            .map_err(|error| format!("Could not replace the staged installer artwork: {error}"))?;
+    }
     fs::remove_file(&initial_artifact).map_err(|e| {
         format!("Could not remove the first installer from the working folder: {e}")
     })?;
@@ -502,6 +550,10 @@ fn compile_in(
         return Err("The final compiler produced an unexpected installer name.".into());
     }
     super::icons::verify(&app_icon, &artifact)?;
+    let installer_artwork = sidebar
+        .as_deref()
+        .map(|sidebar| verify_embedded_artwork(&artifact, sidebar, &staged_tools, &work))
+        .transpose()?;
     let size_bytes = metadata_at(&artifact)?.len();
     let digest = sha256(&artifact)?;
     let delivery = work.join("delivery");
@@ -516,6 +568,7 @@ fn compile_in(
         sha256: digest,
         application_icon_sha256: icon_hash,
         embedded_icons_verified: true,
+        installer_artwork,
         installer_version: TOOL_VERSION,
         verified_executables: TOOLS,
         source_package: package.into(),
@@ -538,7 +591,72 @@ fn compile_in(
     Ok(report)
 }
 
-fn preflight_package(stage: &Path) -> Result<(Package, String), String> {
+fn read_sidebar(package: &Path) -> Result<Option<Vec<u8>>, String> {
+    let path = package.join(artwork::SIDEBAR_PATH);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => read_canonical_sidebar(&path, package).map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Could not check installer artwork: {error}")),
+    }
+}
+
+fn read_canonical_sidebar(path: &Path, root: &Path) -> Result<Vec<u8>, String> {
+    let bytes = crate::profile::read_small(path, root, artwork::BMP_BYTES)?;
+    artwork::validate_sidebar_bmp(&bytes)?;
+    Ok(bytes)
+}
+
+fn verify_embedded_artwork(
+    artifact: &Path,
+    expected: &[u8],
+    tools: &Path,
+    work: &Path,
+) -> Result<InstallerArtworkEvidence, String> {
+    for (name, digest) in [
+        (ARTWORK_EXTRACTOR, ARTWORK_EXTRACTOR_SHA256),
+        (ARTWORK_EXTRACTOR_LIBRARY, ARTWORK_EXTRACTOR_LIBRARY_SHA256),
+    ] {
+        let path = tools.join(name);
+        require_regular_path(&path, tools)?;
+        if sha256(&path)? != digest {
+            return Err(
+                "The pinned installer artwork verifier differs from the trusted tool.".into(),
+            );
+        }
+    }
+    let destination = work.join("embedded-artwork");
+    create_dir(&destination)?;
+    let log = work.join("artwork-verification.log");
+    let mut output_option = OsString::from("-o");
+    output_option.push(&destination);
+    let step = run_step(
+        &tools.join(ARTWORK_EXTRACTOR),
+        vec![
+            "x".into(),
+            "-y".into(),
+            "-bd".into(),
+            output_option.into(),
+            artifact.into(),
+            EMBEDDED_SIDEBAR.into(),
+        ],
+        &destination,
+        &log,
+    )?;
+    let embedded = read_canonical_sidebar(&destination.join(EMBEDDED_SIDEBAR), &destination)?;
+    if embedded != expected {
+        return Err("The installer does not contain the reviewed sidebar artwork.".into());
+    }
+    Ok(InstallerArtworkEvidence {
+        sha256: crate::snapshot::sha256_hex(&embedded),
+        embedded_verified: true,
+        extractor_sha256: ARTWORK_EXTRACTOR_SHA256.into(),
+        extractor_library_sha256: ARTWORK_EXTRACTOR_LIBRARY_SHA256.into(),
+        verification_log: log,
+        verification_exit_code: step.exit_code,
+    })
+}
+
+fn preflight_package(stage: &Path) -> Result<(Package, String, Option<Vec<u8>>), String> {
     let appinfo = stage.join("App/AppInfo");
     let metadata = package_settings(&ini_text(&appinfo.join("appinfo.ini"))?)?;
     require_signature(&stage.join(&metadata.launcher), is_pe, "a Windows launcher")?;
@@ -570,11 +688,15 @@ fn preflight_package(stage: &Path) -> Result<(Package, String), String> {
     } else {
         String::new()
     };
-    Ok((metadata, installer_settings(&original)?))
+    Ok((
+        metadata,
+        installer_settings(&original)?,
+        read_sidebar(stage)?,
+    ))
 }
 
 pub(crate) fn preflight_profile_package(stage: &Path) -> Result<String, String> {
-    let (package, _) = preflight_package(stage)?;
+    let (package, _, _) = preflight_package(stage)?;
     if !safe_name(&package.base_app_name)
         || ["AppInfo", "DefaultData"]
             .iter()

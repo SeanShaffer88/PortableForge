@@ -920,6 +920,7 @@ impl WizardApp {
         match result {
             #[cfg(all(windows, target_arch = "x86_64"))]
             Ok(JobResult::Captured(capture)) => {
+                self.artwork = Default::default();
                 let CaptureComplete {
                     layout,
                     outcome,
@@ -1403,12 +1404,34 @@ impl WizardApp {
                 &mut self.profile_flow.profile_destination,
                 FieldKind::NewFolder("PortableForge Profile", &[]),
             );
+            ui.horizontal_wrapped(|ui| {
+                let edit = ui.add_enabled(
+                    self.profile_flow.captured && self.layout.is_some(),
+                    egui::Button::new("Edit package artwork…"),
+                );
+                if edit.clicked() {
+                    if let Some(layout) = &self.layout {
+                        self.artwork.open(edit.id, None);
+                        self.artwork.load_captured_icon(
+                            ui.ctx(),
+                            layout.root.clone(),
+                            PathBuf::from(self.main_exe.trim()),
+                        );
+                    }
+                }
+                ui.weak(if self.artwork.artwork().is_some() {
+                    "Custom artwork"
+                } else {
+                    "Default artwork"
+                });
+            });
         });
         self.profile_flow.show_feedback(ui);
     }
 
     pub(super) fn profile_save_ready(&self) -> bool {
         !self.profile_flow.busy()
+            && !self.artwork.is_open()
             && self.profile_flow.captured
             && !self.profile_flow.launcher_tools.trim().is_empty()
             && !self.profile_flow.profile_destination.trim().is_empty()
@@ -1434,9 +1457,17 @@ impl WizardApp {
         let review = self.review.clone();
         let tools = entered(&self.profile_flow.launcher_tools);
         let destination = entered(&self.profile_flow.profile_destination);
+        let artwork = self.artwork.artwork().cloned();
         self.profile_flow
             .start(ctx, "Preparing and saving your profile…", move |_| {
-                save_job(&session, &meta, &review, &tools, &destination)
+                save_job(
+                    &session,
+                    &meta,
+                    &review,
+                    &tools,
+                    &destination,
+                    artwork.as_ref(),
+                )
             });
     }
 
@@ -1621,6 +1652,7 @@ impl WizardApp {
     }
 
     fn begin_profile_update(&mut self, ctx: &egui::Context, approval: SavedProfileApproval) {
+        self.artwork = Default::default();
         self.profile_flow.update_base = Some(approval);
         self.profile_flow.update_details = None;
         self.profile_flow.profile_actions_open = false;
@@ -2457,15 +2489,17 @@ fn save_job(
     review: &portableforge_core::review::Review,
     tools: &Path,
     destination: &Path,
+    artwork: Option<&portableforge_core::artwork::Artwork>,
 ) -> Result<JobResult, String> {
     #[cfg(all(windows, target_arch = "x86_64"))]
     {
-        let result = portableforge_core::wizard_package::save_reviewed_profile(
+        let result = portableforge_core::wizard_package::save_reviewed_profile_with_artwork(
             session,
             meta,
             review,
             tools,
             destination,
+            artwork,
         )?;
         let folder = result
             .manifest
@@ -2484,7 +2518,7 @@ fn save_job(
     }
     #[cfg(not(all(windows, target_arch = "x86_64")))]
     {
-        let _ = (session, meta, review, tools, destination);
+        let _ = (session, meta, review, tools, destination, artwork);
         Err("Saving this capture needs 64-bit Windows on an x64 computer.".into())
     }
 }
@@ -2983,6 +3017,33 @@ mod tests {
             assert_controls_fit(
                 build,
                 &["Build details", "Next ›", "Copy full text", "Done"],
+                dense::MIN_CONTENT,
+                scale,
+            );
+        }
+    }
+
+    #[test]
+    fn save_page_exposes_artwork_without_displacing_save() {
+        for scale in [1.0, 1.25, 1.5] {
+            let mut wizard = WizardApp::default();
+            wizard.enter_verified_capture();
+            wizard.step = 9;
+            wizard.profile_flow.captured = true;
+            wizard.profile_flow.launcher_tools = r"C:\Tools\PortableAppsLauncherGenerator".into();
+            wizard.profile_flow.profile_destination = r"C:\Builds\Profile".into();
+            wizard.layout = Some(portableforge_core::orchestrate::session_layout(
+                Path::new(r"C:\Captures"),
+                "artwork-test",
+            ));
+            assert_controls_fit(
+                wizard,
+                &[
+                    "New profile folder",
+                    "Edit package artwork…",
+                    "Default artwork",
+                    "Save profile",
+                ],
                 dense::MIN_CONTENT,
                 scale,
             );

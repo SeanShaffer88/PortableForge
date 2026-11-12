@@ -13,6 +13,7 @@ use portableforge_core::review::Review;
 use portableforge_core::session::Phase;
 use portableforge_core::settings::{self, WizardDraft, WizardSettings};
 
+mod artwork_ui;
 mod dense;
 mod profiles;
 mod shell;
@@ -20,6 +21,7 @@ mod theme;
 
 pub struct WizardApp {
     profile_flow: profiles::ProfileFlow,
+    artwork: artwork_ui::Editor,
     theme_state: theme::State,
     shell: shell::State,
     step: usize,
@@ -90,6 +92,7 @@ impl Default for WizardApp {
             .unwrap_or(false);
         Self {
             profile_flow: profiles::ProfileFlow::default(),
+            artwork: artwork_ui::Editor::default(),
             theme_state: theme::State::default(),
             shell: shell::State::default(),
             step: 0,
@@ -288,6 +291,7 @@ fn card(ui: &egui::Ui) -> egui::Frame {
 impl WizardApp {
     fn setup_changed(&mut self) {
         self.profile_flow.detach_capture();
+        self.artwork = artwork_ui::Editor::default();
         self.layout = None;
         self.session_mode = None;
         self.review = Review::default();
@@ -1063,7 +1067,9 @@ impl eframe::App for WizardApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         self.persist_if_due();
-        self.handle_shell_keys(ctx);
+        if !self.artwork.is_open() {
+            self.handle_shell_keys(ctx);
+        }
         self.update_heading_focus(ctx);
         if self.profile_flow.replay_open {
             self.show_profile_replay(ctx);
@@ -1752,6 +1758,7 @@ impl eframe::App for WizardApp {
             let _ = self.phase();
         });
         self.show_shell_popup(ctx);
+        self.artwork.show(ctx);
     }
 }
 
@@ -1912,6 +1919,7 @@ mod tests {
             .lines()
             .chain(include_str!("wizard/profiles.rs").lines())
             .chain(include_str!("wizard/dense.rs").lines())
+            .chain(include_str!("wizard/artwork_ui.rs").lines())
         {
             if !line.trim_start().starts_with("//") {
                 cleaned.push_str(line);
