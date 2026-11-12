@@ -1,5 +1,7 @@
 //! Dedicated Sandboxie capture sessions that can be sealed into a profile.
 
+mod runtime;
+mod sources;
 mod windows;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,9 +23,14 @@ use crate::profile::{fingerprint, inventory, local_file, read_small, tree_sha256
 use crate::regfile::{decode_reg_export, parse_reg_with_report};
 use crate::snapshot::{normalise_path, sha256_hex, FileEntry, Snapshot};
 use crate::{Phase, SandboxMode, Session};
-use windows::{Sandboxie, VerifiedExit};
+pub use runtime::{test_built_paf, RuntimeDataStatus, RuntimeReport, RuntimeRequest};
+use sources::{setup_args_sha256, PreparedSetup};
+pub(crate) use sources::{verify_capture_sources, SetupCompanion};
+pub use windows::CancellationToken;
+use windows::{LaunchArguments, RunLimits, Sandboxie, VerifiedExit};
 
 pub(crate) const RECEIPT_FILE: &str = "sandboxie-receipt.json";
+pub(crate) const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 const VERSION: &str = "1.18.8";
 const ROOT_NAME: &str = "box";
 const MAX_NOTE_BYTES: usize = 32 * 1024 * 1024;
@@ -51,6 +58,14 @@ pub(crate) struct Receipt {
     exercise_pid: u32,
     exercise_exit_code: u32,
     cleanup_verified: bool,
+    #[serde(default)]
+    setup_name: Option<String>,
+    #[serde(default)]
+    pub(crate) setup_args_sha256: Option<String>,
+    #[serde(default)]
+    installed_application: Option<PathBuf>,
+    #[serde(default)]
+    pub(crate) companions: Vec<SetupCompanion>,
 }
 
 pub(crate) fn verify_receipt(
@@ -59,10 +74,10 @@ pub(crate) fn verify_receipt(
     setup_sha256: &str,
     note_sha256: [&str; 3],
     harvest_sha256: &str,
-) -> Result<(), String> {
+) -> Result<Receipt, String> {
     let receipt: Receipt = serde_json::from_slice(bytes)
         .map_err(|e| format!("Invalid Sandboxie capture receipt: {e}"))?;
-    if receipt.schema_version != 1
+    if !sources::valid_receipt_sources(&receipt)
         || receipt.sandboxie_plus_version != VERSION
         || receipt.session_id != session_id
         || !valid_box_name(&receipt.box_name)
@@ -77,7 +92,53 @@ pub(crate) fn verify_receipt(
     {
         return Err("The Sandboxie receipt does not match this capture or prove cleanup.".into());
     }
-    Ok(())
+    Ok(receipt)
+}
+
+/// Check the current pinned Sandboxie installation without changing its configuration.
+pub fn preflight() -> Result<(), String> {
+    Sandboxie::load()?.verify_global()
+}
+
+/// Verify a capture and return the selected app and the digest of its receipt.
+pub fn verify_capture_application(
+    session: &Path,
+    expected: Option<&str>,
+) -> Result<(Option<PathBuf>, String), String> {
+    let session = local_directory(session)?;
+    let id = session
+        .file_name()
+        .and_then(|part| part.to_str())
+        .ok_or("Invalid session name.")?;
+    let exchange = session.join("exchange");
+    verify_clean_storage(&session)?;
+    let bytes = read_small(&session.join(RECEIPT_FILE), &session, MAX_RECEIPT_BYTES)?;
+    let digest = sha256_hex(&bytes);
+    if expected.is_some_and(|expected| expected != digest) {
+        return Err("The capture receipt changed since approval.".into());
+    }
+    let input = session.join("input");
+    let rows = inventory(&input)?;
+    let [row] = rows.as_slice() else {
+        return Err("The capture must contain exactly one setup file in input.".into());
+    };
+    let setup = row
+        .file
+        .as_ref()
+        .ok_or("The capture setup is not a regular file.")?;
+    let mut notes = [String::new(), String::new(), String::new()];
+    for (index, name) in NOTE_FILES.iter().enumerate() {
+        notes[index] = sha256_hex(&read_small(&exchange.join(name), &session, MAX_NOTE_BYTES)?);
+    }
+    let receipt = verify_receipt(
+        &bytes,
+        id,
+        &setup.sha256,
+        notes.each_ref().map(String::as_str),
+        &tree_sha256(&exchange.join("harvest"))?,
+    )?;
+    verify_capture_sources(&session, &receipt)?;
+    Ok((receipt.installed_application, digest))
 }
 
 pub(crate) fn verify_clean_storage(session: &Path) -> Result<(), String> {
@@ -167,7 +228,10 @@ fn system_reg() -> Result<PathBuf, String> {
 
 struct BoxRoots {
     system_drive: PathBuf,
+    windows: PathBuf,
     user: [(PathBuf, PathBuf); 3],
+    common_roots: Vec<PathBuf>,
+    excluded_trees: Vec<PathBuf>,
 }
 
 impl BoxRoots {
@@ -176,18 +240,94 @@ impl BoxRoots {
             let path = std::env::var_os(name).ok_or_else(|| format!("Missing {name}."))?;
             local_directory(Path::new(&path))
         }
+        let system_drive = reg
+            .ancestors()
+            .last()
+            .ok_or("Could not determine the system drive.")?
+            .to_path_buf();
+        let windows = reg
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("Could not determine the Windows directory.")?
+            .to_path_buf();
+        let user = [
+            ("user/current".into(), environment_directory("USERPROFILE")?),
+            ("user/all".into(), environment_directory("ProgramData")?),
+            ("user/public".into(), environment_directory("PUBLIC")?),
+        ];
+        let profile = &user[0].1;
+        let mut common_roots: Vec<_> = user.iter().map(|(_, host)| host.clone()).collect();
+        common_roots.extend(
+            [
+                "Users",
+                "ProgramData",
+                "Program Files",
+                "Program Files (x86)",
+            ]
+            .map(|name| system_drive.join(name)),
+        );
+        common_roots.extend(
+            [
+                "AppData",
+                r"AppData\Local",
+                r"AppData\LocalLow",
+                r"AppData\Roaming",
+                r"AppData\Local\Programs",
+                "Desktop",
+                "Downloads",
+                "Documents",
+            ]
+            .map(|name| profile.join(name)),
+        );
+        common_roots.extend(
+            [
+                "ProgramFiles",
+                "ProgramFiles(x86)",
+                "ProgramW6432",
+                "LOCALAPPDATA",
+                "APPDATA",
+            ]
+            .into_iter()
+            .filter_map(|name| std::env::var_os(name).map(PathBuf::from)),
+        );
+        let mut excluded_trees = vec![
+            system_drive.join(r"Program Files\Common Files"),
+            system_drive.join(r"Program Files (x86)\Common Files"),
+            profile.join(r"AppData\Local\Temp"),
+        ];
+        excluded_trees.extend(
+            [
+                "CommonProgramFiles",
+                "CommonProgramFiles(x86)",
+                "CommonProgramW6432",
+                "TEMP",
+            ]
+            .into_iter()
+            .filter_map(|name| std::env::var_os(name).map(PathBuf::from))
+            .filter(|path| path.is_absolute() && path.parent().is_some()),
+        );
         Ok(Self {
-            system_drive: reg
-                .ancestors()
-                .last()
-                .ok_or("Could not determine the system drive.")?
-                .to_path_buf(),
-            user: [
-                ("user/current".into(), environment_directory("USERPROFILE")?),
-                ("user/all".into(), environment_directory("ProgramData")?),
-                ("user/public".into(), environment_directory("PUBLIC")?),
-            ],
+            system_drive,
+            windows,
+            user,
+            common_roots,
+            excluded_trees,
         })
+    }
+
+    fn dedicated_payload_parent(&self, parent: &Path) -> bool {
+        let allowed = |path: &Path| {
+            !within(path, &self.windows)
+                && !self
+                    .excluded_trees
+                    .iter()
+                    .any(|shared| within(path, shared))
+                && !self
+                    .common_roots
+                    .iter()
+                    .any(|shared| within(path, shared) && within(shared, path))
+        };
+        allowed(parent) && !local_directory(parent).is_ok_and(|resolved| !allowed(&resolved))
     }
 
     fn drive_mirror(drive_root: &Path) -> Result<PathBuf, String> {
@@ -388,10 +528,12 @@ struct ActiveCapture<'a> {
     roots: BoxRoots,
     reg: PathBuf,
     exports: String,
+    cancellation: &'a CancellationToken,
 }
 
 impl ActiveCapture<'_> {
     fn snapshot(&self, point: usize) -> Result<Snapshot, String> {
+        self.cancellation.check()?;
         self.sbie.quiescent(self.name, QUIET_TIMEOUT)?;
         let filename = NOTE_FILES[point];
         let mut snapshot = Snapshot::new(filename.trim_end_matches(".json"));
@@ -422,9 +564,12 @@ impl ActiveCapture<'_> {
                     self.name,
                     self.root,
                     &self.reg,
-                    &args,
+                    LaunchArguments::Tokens(&args),
                     &self.layout.input,
-                    EXPORT_TIMEOUT,
+                    RunLimits {
+                        timeout: EXPORT_TIMEOUT,
+                        cancellation: self.cancellation,
+                    },
                 )?,
                 "registry export",
             )?;
@@ -472,6 +617,7 @@ impl ActiveCapture<'_> {
 pub enum CaptureStage {
     Preparing,
     Installing,
+    SelectingApplication,
     Exercising,
     CleaningUp,
 }
@@ -497,7 +643,9 @@ pub fn capture(
             CaptureStage::Exercising => {
                 eprintln!("Try the installed app, then close it to finish the capture.");
             }
-            CaptureStage::Preparing | CaptureStage::CleaningUp => {}
+            CaptureStage::Preparing
+            | CaptureStage::SelectingApplication
+            | CaptureStage::CleaningUp => {}
         },
     )
 }
@@ -511,16 +659,65 @@ pub fn capture_with_progress(
     output: &Path,
     setup_args: &[OsString],
     timeout: Duration,
-    mut progress: impl FnMut(CaptureStage),
+    progress: impl FnMut(CaptureStage),
 ) -> Result<PathBuf, String> {
+    capture_with_options(
+        CaptureRequest {
+            setup,
+            installed: Some(installed),
+            output,
+            setup_args,
+            companions: &[],
+            timeout,
+        },
+        progress,
+        |_| Err("Choose an installed executable.".into()),
+        &CancellationToken::new()?,
+    )
+}
+
+pub struct CaptureRequest<'a> {
+    pub setup: &'a Path,
+    pub installed: Option<&'a Path>,
+    pub output: &'a Path,
+    pub setup_args: &'a [OsString],
+    pub companions: &'a [PathBuf],
+    pub timeout: Duration,
+}
+
+/// Capture a setup with explicitly staged files and an optional interactive
+/// choice of installed executable. The box is cleaned up on cancellation.
+pub fn capture_with_options(
+    request: CaptureRequest<'_>,
+    mut progress: impl FnMut(CaptureStage),
+    mut select: impl FnMut(&[PathBuf]) -> Result<PathBuf, String>,
+    cancellation: &CancellationToken,
+) -> Result<PathBuf, String> {
+    let CaptureRequest {
+        setup,
+        installed,
+        output,
+        setup_args,
+        companions,
+        timeout,
+    } = request;
     let mut notify = |stage| {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| progress(stage)))
             .map_err(|_| format!("Could not report Sandboxie capture stage {stage:?}."))
     };
     notify(CaptureStage::Preparing)?;
+    cancellation.check()?;
     let setup = local_file(setup)?;
+    if setup
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("msi"))
+    {
+        return Err("Use Windows Sandbox for MSI capture. The Windows Installer service is not verified in Sandboxie.".into());
+    }
     logical_executable(&setup)?;
-    let installed = logical_executable(installed)?;
+    let installed = installed.map(logical_executable).transpose()?;
+    let setup_args_sha256 = setup_args_sha256(setup_args)?;
     let setup_fp = fingerprint(&setup)?;
     if setup_fp.size_bytes == 0 {
         return Err("The setup file is empty.".into());
@@ -544,20 +741,8 @@ pub fn capture_with_progress(
     mkdir(&layout.input)?;
     mkdir(&layout.exchange)?;
     mkdir(&layout.output)?;
-    let setup_copy = layout
-        .input
-        .join(setup.file_name().ok_or("Choose a setup file.")?);
-    let mut source = fs::File::open(&setup).map_err(|e| io_error(&setup, e))?;
-    let mut copy = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&setup_copy)
-        .map_err(|e| io_error(&setup_copy, e))?;
-    io::copy(&mut source, &mut copy).map_err(|e| io_error(&setup_copy, e))?;
-    drop(copy);
-    if fingerprint(&setup_copy)? != setup_fp {
-        return Err("Setup changed while preparing the capture.".into());
-    }
+    let source = PreparedSetup::stage(&setup, &setup_fp, companions, &layout)?;
+    cancellation.check()?;
     let root = layout.root.join(ROOT_NAME);
     expect_absent(&root)?;
     let exports = format!("{name}_Notes");
@@ -570,6 +755,7 @@ pub fn capture_with_progress(
         roots,
         reg,
         exports,
+        cancellation,
     };
     let owned = serde_json::to_vec_pretty(&serde_json::json!({ "box_name": name, "root": root }))
         .map_err(|e| e.to_string())?;
@@ -584,7 +770,7 @@ pub fn capture_with_progress(
         fs::create_dir_all(&notes).map_err(|e| io_error(&notes, e))?;
         local_directory(&notes)?;
         let before = active.snapshot(0)?;
-        if fingerprint(&setup_copy)? != setup_fp {
+        if fingerprint(&source.image)? != setup_fp {
             return Err("Setup bytes changed before launch.".into());
         }
         notify(CaptureStage::Installing)?;
@@ -592,47 +778,64 @@ pub fn capture_with_progress(
             sbie.run(
                 &name,
                 &root,
-                &setup_copy,
-                setup_args,
-                &layout.input,
-                timeout,
+                &source.image,
+                LaunchArguments::Tokens(setup_args),
+                &source.cwd,
+                RunLimits {
+                    timeout,
+                    cancellation,
+                },
             )?,
             "setup",
         )?;
         let after_install = active.snapshot(1)?;
-        active.roots.logical_file(&root, &installed)?;
+        let installed = match installed {
+            Some(installed) => installed,
+            None => {
+                notify(CaptureStage::SelectingApplication)?;
+                let candidates = application_candidates(&active, &before, &after_install)?;
+                let selected =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| select(&candidates)))
+                        .map_err(|_| "Could not select the boxed application.")??;
+                cancellation.check()?;
+                if !candidates.contains(&selected) {
+                    return Err("Choose an executable from the captured applications.".into());
+                }
+                selected
+            }
+        };
+        payload_parent(&active.roots, &root, &installed)?;
         notify(CaptureStage::Exercising)?;
         let app_args = [
             OsString::from("__sandboxie-exercise"),
             OsString::from(&name),
             root.clone().into_os_string(),
+            sbie.runtime_root().as_os_str().to_os_string(),
             installed.clone().into_os_string(),
         ];
         let exercise = checked_exit(
-            sbie.run(&name, &root, &host, &app_args, &layout.input, timeout)?,
+            sbie.run(
+                &name,
+                &root,
+                &host,
+                LaunchArguments::Tokens(&app_args),
+                &layout.input,
+                RunLimits {
+                    timeout,
+                    cancellation,
+                },
+            )?,
             "application exercise",
         )?;
         let after_runtime = active.snapshot(2)?;
-        let physical = active.roots.logical_file(&root, &installed)?;
-        let payload = physical
-            .parent()
-            .ok_or("Could not determine the installed app folder.")?;
-        if payload
-            .strip_prefix(&root)
-            .map_err(|e| e.to_string())?
-            .components()
-            .count()
-            < 3
-        {
-            return Err("Choose an executable in a dedicated application folder.".into());
-        }
+        let payload = payload_parent(&active.roots, &root, &installed)?;
         let harvest = layout.exchange.join("harvest");
-        let expected = tree_sha256(payload)?;
-        copy_tree(payload, &harvest)?;
+        let expected = tree_sha256(&payload)?;
+        copy_tree(&payload, &harvest)?;
         if tree_sha256(&harvest)? != expected {
             return Err("The boxed payload changed during capture.".into());
         }
-        if fingerprint(&setup_copy)? != setup_fp {
+        if fingerprint(&source.image)? != setup_fp {
             return Err("Setup bytes changed during capture.".into());
         }
         Ok::<_, String>((
@@ -640,11 +843,12 @@ pub fn capture_with_progress(
             expected,
             setup_exit,
             exercise,
+            installed,
         ))
     })();
     let notified = notify(CaptureStage::CleaningUp);
-    let cleaned = cleanup(&active);
-    let (mut snapshots, harvest_sha256, setup_exit, exercise) = match (
+    let cleaned = cleanup(&sbie, &name, &root, &layout);
+    let (mut snapshots, harvest_sha256, setup_exit, exercise, installed) = match (
         captured.and_then(|result| notified.map(|()| result)),
         cleaned,
     ) {
@@ -661,6 +865,7 @@ pub fn capture_with_progress(
         }
     };
 
+    cancellation.check()?;
     retain_registry_changes(&mut snapshots);
     let mut note_sha256 = [String::new(), String::new(), String::new()];
     for (point, snapshot) in snapshots.into_iter().enumerate() {
@@ -682,7 +887,7 @@ pub fn capture_with_progress(
     write_new(&layout.session_path, session.to_json().as_bytes())?;
     post_capture(&layout)?;
     let receipt = Receipt {
-        schema_version: 1,
+        schema_version: 2,
         sandboxie_plus_version: VERSION.into(),
         session_id: id.into(),
         box_name: name,
@@ -694,39 +899,113 @@ pub fn capture_with_progress(
         exercise_pid: exercise.pid,
         exercise_exit_code: exercise.exit_code,
         cleanup_verified: true,
+        setup_name: Some(source.name),
+        setup_args_sha256: Some(setup_args_sha256),
+        installed_application: Some(installed),
+        companions: source.companions,
     };
+    verify_capture_sources(&layout.root, &receipt)?;
     let receipt = serde_json::to_vec_pretty(&receipt).map_err(|e| e.to_string())?;
+    if receipt.len() > MAX_RECEIPT_BYTES {
+        return Err("The Sandboxie capture receipt exceeds its size limit.".into());
+    }
+    cancellation.check()?;
     write_new(&layout.root.join(RECEIPT_FILE), &receipt)?;
     Ok(layout.root)
 }
 
-fn cleanup(active: &ActiveCapture<'_>) -> Result<(), String> {
-    active.sbie.stop(active.name, active.root)?;
+fn payload_parent(roots: &BoxRoots, root: &Path, logical: &Path) -> Result<PathBuf, String> {
+    let logical_parent = logical
+        .parent()
+        .ok_or("Could not determine the installed app folder.")?;
+    if !roots.dedicated_payload_parent(logical_parent) {
+        return Err("Choose an executable in a dedicated application folder.".into());
+    }
+    let physical = roots.logical_file(root, logical)?;
+    let payload = physical
+        .parent()
+        .ok_or("Could not determine the installed app folder.")?;
+    if payload
+        .strip_prefix(root)
+        .map_err(|e| e.to_string())?
+        .components()
+        .count()
+        < 3
+    {
+        return Err("Choose an executable in a dedicated application folder.".into());
+    }
+    Ok(payload.to_path_buf())
+}
+
+fn application_candidates(
+    active: &ActiveCapture<'_>,
+    before: &Snapshot,
+    after: &Snapshot,
+) -> Result<Vec<PathBuf>, String> {
+    let prior: BTreeMap<_, _> = before
+        .files
+        .iter()
+        .map(|file| (&file.path, &file.sha256))
+        .collect();
+    let mut candidates = Vec::new();
+    for file in &after.files {
+        let path = Path::new(&file.path);
+        if prior
+            .get(&file.path)
+            .is_some_and(|hash| **hash == file.sha256)
+            || logical_executable(path).is_err()
+            || payload_parent(&active.roots, active.root, path).is_err()
+        {
+            continue;
+        }
+        candidates.push(path.to_path_buf());
+        if candidates.len() > 128 {
+            return Err("More than 128 installed executables were captured. Specify the app path explicitly.".into());
+        }
+    }
+    if candidates.is_empty() {
+        return Err("No installed executables were found in a dedicated app folder.".into());
+    }
+    Ok(candidates)
+}
+
+fn cleanup(
+    sbie: &Sandboxie,
+    name: &str,
+    root: &Path,
+    layout: &SessionLayout,
+) -> Result<(), String> {
+    sbie.stop(name, root)?;
     // Verify the entire owned storage path before recursive removal. No
     // reparse points or oversized/unsupported trees are traversed.
-    if active.root != active.layout.root.join(ROOT_NAME) {
+    if root != layout.root.join(ROOT_NAME) {
         return Err("The box root differs from this session's owned path.".into());
     }
-    active.sbie.remove(active.name, active.root)?;
-    if optional_directory(active.root)? {
-        let root = local_directory(active.root)?;
-        if root != active.root {
+    sbie.remove(name, root)?;
+    if optional_directory(root)? {
+        let verified = local_directory(root)?;
+        if verified != root {
             return Err("The owned box path changed before removal.".into());
         }
-        inventory(&root)?;
-        fs::remove_dir_all(&root).map_err(|error| io_error(&root, error))?;
+        inventory(&verified)?;
+        fs::remove_dir_all(&verified).map_err(|error| io_error(&verified, error))?;
     }
-    expect_absent(active.root)
+    expect_absent(root)
 }
 
 /// Internal subcommand entered only from a driver-verified process.
-pub fn exercise_boxed(name: &str, root: &Path, program: &Path) -> Result<(), String> {
+pub fn exercise_boxed(
+    name: &str,
+    root: &Path,
+    runtime_root: &Path,
+    program: &Path,
+) -> Result<(), String> {
     if !valid_box_name(name) {
         return Err("Invalid dedicated box identity.".into());
     }
     let program = logical_executable(program)?;
     let helper = std::env::current_exe().map_err(|error| error.to_string())?;
-    Sandboxie::verify_current(name, root, &helper)?;
+    Sandboxie::verify_current(name, root, runtime_root, &helper)?;
     let status = Command::new(&program)
         .current_dir(program.parent().ok_or("Choose an installed app folder.")?)
         .stdin(Stdio::null())
@@ -757,6 +1036,10 @@ mod tests {
             exercise_pid: 2,
             exercise_exit_code: 0,
             cleanup_verified: true,
+            setup_name: None,
+            setup_args_sha256: None,
+            installed_application: None,
+            companions: vec![],
         };
         let args = ["a", "b", "c"];
         let encode = |receipt: &Receipt| serde_json::to_vec(receipt).unwrap();
@@ -777,6 +1060,51 @@ mod tests {
     }
 
     #[test]
+    fn receipt_v2_binds_safe_setup_source_names_and_explicit_app() {
+        let mut receipt = Receipt {
+            schema_version: 2,
+            sandboxie_plus_version: VERSION.into(),
+            session_id: "session".into(),
+            box_name: format!("PF_{}", "1".repeat(28)),
+            setup_sha256: "setup".into(),
+            note_sha256: ["a".into(), "b".into(), "c".into()],
+            harvest_sha256: "payload".into(),
+            setup_pid: 1,
+            setup_exit_code: 0,
+            exercise_pid: 2,
+            exercise_exit_code: 0,
+            cleanup_verified: true,
+            setup_name: Some("Setup.exe".into()),
+            setup_args_sha256: Some(
+                setup_args_sha256(&[OsString::from("/owned-fixture")]).unwrap(),
+            ),
+            installed_application: Some(PathBuf::from(r"C:\Widget\Widget.exe")),
+            companions: vec![SetupCompanion {
+                name: "input.cab".into(),
+                sha256: "f".repeat(64),
+                size_bytes: 8,
+            }],
+        };
+        let verify = |receipt: &Receipt| {
+            verify_receipt(
+                &serde_json::to_vec(receipt).unwrap(),
+                "session",
+                "setup",
+                ["a", "b", "c"],
+                "payload",
+            )
+        };
+        assert!(verify(&receipt).is_ok());
+        receipt.companions[0].name = "SETUP.EXE".into();
+        assert!(verify(&receipt).is_err());
+        receipt.companions[0].name = "../input.cab".into();
+        assert!(verify(&receipt).is_err());
+        receipt.companions.clear();
+        receipt.installed_application = None;
+        assert!(verify(&receipt).is_err());
+    }
+
+    #[test]
     fn installed_executable_paths_must_be_absolute_local_paths() {
         assert!(logical_executable(Path::new(r"C:\Program Files\Widget\Widget.exe")).is_ok());
         for invalid in [
@@ -787,6 +1115,27 @@ mod tests {
         ] {
             assert!(logical_executable(Path::new(invalid)).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn shared_payload_roots_are_rejected_but_dedicated_app_folders_are_allowed() {
+        let roots = BoxRoots::new(Path::new(r"C:\Windows\System32\reg.exe")).unwrap();
+        for shared in [
+            r"C:\Program Files",
+            r"C:\ProgramData",
+            r"C:\Program Files (x86)",
+            r"C:\Program Files\Common Files",
+            r"C:\Program Files (x86)\Common Files\Vendor",
+            r"C:\Windows\System32",
+        ] {
+            assert!(
+                !roots.dedicated_payload_parent(Path::new(shared)),
+                "{shared}"
+            );
+        }
+        assert!(roots.dedicated_payload_parent(Path::new(r"C:\Program Files\Widget")));
+        let local_vendor = roots.user[0].1.join(r"AppData\Local\Vendor\bin");
+        assert!(roots.dedicated_payload_parent(&local_vendor));
     }
 
     #[test]

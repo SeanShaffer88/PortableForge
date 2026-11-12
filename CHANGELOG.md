@@ -3,9 +3,22 @@
 ## [Unreleased]
 
 ### Added
-- Compact VaporGrid wizard with a subtle tread-plate background, full-width
-  paths, and paged findings and details. Standard, Large, and Extra large
-  text sizes retain the primary controls at the minimum logical window size.
+- Bundle the extracted Sandboxie-Plus 1.18.8 x64 portable files.
+  **Open bundled test box folder** and **Portable test box instructions**
+  guide manual startup and cleanup through the vendor's manager.
+- Check prerequisites before capture, supply setup arguments and selected
+  companion files, choose an installed app after setup, and cancel or
+  reopen a cleaned capture. **Needs attention** filters unresolved warnings.
+- Search and relocate saved profiles, compare an update with an earlier
+  approval, and build approved apps one at a time from the queue. Build
+  history includes verified receipt comparison and a guided installer
+  test in a dedicated Sandboxie-Plus box.
+- Guided MSI capture in Windows Sandbox on supported Windows editions,
+  with explicitly selected companion files and standard package output.
+- TesselGUI revision 2 wizard with System, GitHub Dark and GitHub Light
+  appearance, Windows contrast theme colors, a keyboard command dialog,
+  phase navigation, and one finding per review page. Paths and diagnostics
+  have full-value views at all three text sizes.
 - In the wizard, capture a trusted setup in the verified quick test
   box, save the reviewed profile and rebuild its `.paf.exe` with a
   matching setup file. The wizard remembers the approval separately

@@ -6,7 +6,7 @@ PortableForge helps turn a Windows app into a PortableApps.com package. Capture 
 
 ## Who it is for
 
-The desktop wizard guides capture, review, and packaging. Use **Status and details** for diagnostics and choose one of three text sizes.
+The desktop wizard guides capture, review, and packaging. **Appearance** offers System, GitHub Dark and GitHub Light, plus three text sizes. Use **Commands** or **Ctrl+K** to find an action and **Status and details** for diagnostics.
 
 ## What you need
 
@@ -27,12 +27,27 @@ In the standard package flow, select a setup file and review the system checks. 
 
 ## Reuse a reviewed capture in the wizard
 
-1. On the first page choose **Capture with Sandboxie-Plus**. This needs Windows x64 and Sandboxie-Plus 1.18.8 x64. Choose a trusted, self-contained setup `.exe` that runs with its default invocation and needs no separate files, extra arguments, network access, elevation, or restart. Enter the full path where it will install the app's main `.exe`.
-2. Confirm that you trust both files and choose **Start capture**. Finish setup inside the box, try the installed app, then close it. The review opens after PortableForge confirms cleanup.
-3. Review the suggested fixes. Enter the portable copy's name, publisher, full HTTP or HTTPS homepage, and a short description. Confirm that you have permission to bundle the app. Select the official PortableApps.com Launcher Generator 2.2.9 folder and a new profile folder, then choose **Save profile**.
-4. Choose **Build installer**, or open **Rebuild from a saved profile** from the first page later. Select the same setup file, the official PortableApps.com Installer 3.9.19 folder, and a new build folder. The wizard checks the setup SHA-256 against the saved capture and checks the profile against the approval it stored separately. A successful build shows the `.paf.exe` and can open its folder.
+1. On the first page choose **Capture with Sandboxie-Plus**. This needs Windows x64 and Sandboxie-Plus 1.18.8 x64. Choose a trusted setup `.exe` that can finish offline without elevation or a restart. In **Setup options**, enter one argument per line and explicitly choose any companion files. Enter the installed app path or leave it blank to pick an app after setup.
+2. Use **Check prerequisites**, confirm that you trust the selected inputs and installed app, and choose **Start capture**. If the dedicated box is unavailable, the wizard offers the portable test box folder and setup instructions. Finish setup inside the dedicated box, choose the installed app if prompted, then try and close it. **Cancel capture** requests cleanup of the dedicated box.
+3. The review opens after cleanup is confirmed. **Needs attention** shows unresolved warnings. If you close the wizard after a cleaned capture, **Pick up where I left off** rechecks its saved receipt and opens the review so you can recheck the choices. Captures whose receipts predate the selected app field need a fresh capture to reopen in the wizard.
+4. Enter the portable copy's name, publisher, full HTTP or HTTPS homepage, and a short description. Confirm permission to bundle the app. Select the official PortableApps.com Launcher Generator 2.2.9 folder and a new profile folder, then choose **Save profile**.
+5. Choose **Build installer**, or choose **Open saved profiles** on the first page later. Select the matching setup, the official PortableApps.com Installer 3.9.19 folder, and a new build folder. The build checks the setup bytes, saved profile approval, staged package, and installer tools before publishing the installer and receipt.
 
-Use printable ASCII for the capture and build paths. Leave out `$`, `%`, single and double quotes, and backticks. Use **Capture location** if your default path contains one of these characters.
+Use printable ASCII for the capture and build paths. Leave out `$`, `%`, single and double quotes, and backticks. Use **Setup options** to pick a capture folder if the default path contains one of these characters.
+
+### Start the bundled portable test box
+
+PortableForge reuses a compatible running Sandboxie-Plus engine for verified capture and installer testing. To start the bundled Sandboxie-Plus 1.18.8 x64 portable files, choose **Open bundled test box folder** and copy the whole folder to a new protected local location under Program Files. Open `SandMan.exe` from that copy and approve its administrator prompts to start the Sandboxie-Plus service and driver. Return to **Capture with Sandboxie-Plus** and choose **Check prerequisites**. After using the portable engine, close SandMan and approve its service cleanup prompt. [Sandboxie-Plus portable startup and cleanup](https://github.com/sandboxie-plus/Sandboxie/blob/v1.18.8/SandboxiePlus/SandMan/SandMan.cpp)
+
+### Manage profiles and builds
+
+- **Saved profiles** supports searches by name, version, or saved setup fingerprint. **Profile actions** shows the profile and can verify or relocate it. **Capture an update** compares the new capture with the earlier approval before you save a fresh profile.
+- **Add to queue** holds an approved build request for this wizard session. **Build queued apps** processes one app at a time. A failed entry keeps its error and any generated working files. Retry it in a fresh output folder.
+- **Build results** shows saved builds. **Compare builds** verifies both receipts and displays both installer SHA-256s, input differences, and staged file times before normalization when recorded. **Test installer** verifies the chosen receipt and installer again before opening a dedicated Sandboxie-Plus test box. Follow the prompts to complete setup and try the app twice.
+
+### Capture an MSI in Windows Sandbox
+
+Select a trusted `.msi` in the standard wizard and choose **Check Windows Sandbox**. On a supported Windows edition, choose any companion files in **Setup options**, confirm trust, and start Windows Sandbox. Wait for the clean note, then open the staged MSI inside the guest and finish the guided capture steps. This flow prepares a standard package folder. The reusable profile wizard uses the verified Sandboxie-Plus EXE flow above.
 
 ## Safety, in plain words
 
@@ -55,7 +70,13 @@ Your answer is written into the package's notes, so anyone can see which kind of
 
 - **100% Rust** for everything PortableForge itself is made of — the window, the helper that works inside the test box, and all the thinking in between. No scripts, no second languages to install.
 - The official PortableApps.com Launcher and Installer tools are used at the building step (they are separate programs, kept under their own licenses — see the notes inside any package PortableForge makes). They are checked by fingerprint before every use.
-- Compact VaporGrid layout with deep crimson controls, a subtle square tread-plate background, and pages for long reviews.
+- TesselGUI revision 2 uses flat task surfaces, one finding per review page, and a consistent status and action strip. The generated Rust tokens are used under the project's MIT license. [Pinned TesselGUI source](https://github.com/SeanShaffer88/TesselGUI/tree/a689a5e3bfadf9e1e77a3acea826bea5cc717e94)
+
+## Packaging roadmap
+
+The planned workspace puts package tools and icon preparation within reach
+of the capture and review steps. Signing and publishing are planned as
+explicit actions with user-selected credentials and destinations.
 
 ## Command line (optional)
 
@@ -220,12 +241,10 @@ Every release has exactly two downloads:
   the test box. A short `PORTABLE.txt` inside the zip says the
   same in fewer words.
 
-Both downloads also carry a `bundled` folder with the official
-Sandboxie-Plus installer (about 24 MB, the maker's own file,
-untouched — its licenses and a note sit beside it). That is what
-PortableForge offers to open when a computer has no test box yet,
-so the quick test box can be set up. It is the reason the
-downloads are the size they are; PortableForge itself is small.
+New release packages carry the extracted Sandboxie-Plus 1.18.8 x64
+portable files under `bundled/Sandboxie-Plus`. The folder contains the
+vendor manager, engine files, and applicable notices. Opening this
+folder from PortableForge shows the files in Explorer.
 
 **Check your download is genuine.** The release notes list a
 fingerprint (a long line of letters and numbers) for each file.

@@ -13,6 +13,12 @@
 
 use crate::paf::Distribution;
 
+pub const SETUP_REQUIRED: &str = "Choose a setup file to continue.";
+pub const SETUP_MISSING: &str =
+    "We could not find or open that setup file. Check the path or browse to it.";
+pub const SETUP_FOLDER: &str = "That path is a folder. Choose the setup file inside it.";
+pub const SETUP_UNSUPPORTED: &str = "Choose a Windows setup file ending in .exe or .msi.";
+
 /// Dark UI design tokens (SEAN's black/red family, dark only —
 /// PortableForge has no light theme).
 pub mod theme {
@@ -51,9 +57,9 @@ pub const STEPS: &[GuideStep] = &[
     GuideStep {
         id: "pick",
         title: "Choose a setup file",
-        what_happens: "Select the setup file for the app you want to package.",
+        what_happens: "Pick the installer for the app you want to make portable.",
         what_you_do: "Browse, paste a path, or drag the file into the window.",
-        expert_detail: "Accepts .exe / .msi / .zip installers, a download URL (online package), or an installed folder.",
+        expert_detail: "Choose a local .exe or .msi setup file. The guided MSI route uses Windows Sandbox.",
     },
     GuideStep {
         id: "safety",

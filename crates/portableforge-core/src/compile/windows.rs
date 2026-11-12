@@ -6,7 +6,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{installer_settings, package_settings, safe_name, Package};
@@ -41,6 +41,7 @@ const REPARSE_POINT: u32 = 0x400;
 #[derive(Debug, Serialize)]
 pub struct CompileReport {
     pub artifact: PathBuf,
+    pub app_id: String,
     pub size_bytes: u64,
     pub sha256: String,
     pub application_icon_sha256: String,
@@ -55,20 +56,34 @@ pub struct CompileReport {
     pub steps: Vec<BuildStep>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProfileBuildEvidence {
     pub manifest_sha256: String,
     pub setup_sha256: String,
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<BuildInputEvidence>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct BuildInputEvidence {
+    pub setup_identity_sha256: String,
+    pub package_sha256: String,
+    pub payload_sha256: String,
+    pub configuration_sha256: String,
+    pub icons_sha256: String,
+    pub installer_support_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_file_times_sha256: Option<String>,
 }
 
 pub(crate) struct CompileApproval<'a> {
     pub evidence: ProfileBuildEvidence,
-    pub verify_staged: &'a dyn Fn(&Path) -> Result<(), String>,
-    pub verify_tool_support: Option<VerifyToolSupport>,
+    pub verify_staged: &'a dyn Fn(&Path) -> Result<String, String>,
+    pub verify_tool_support: &'a dyn Fn(&Path) -> Result<(), String>,
+    #[cfg(target_arch = "x86_64")]
+    pub wizard_checks: bool,
 }
-
-pub(crate) type VerifyToolSupport = fn(&Path) -> Result<(), String>;
 
 #[derive(Debug, Serialize)]
 pub struct BuildStep {
@@ -77,6 +92,245 @@ pub struct BuildStep {
     working_directory: PathBuf,
     log: PathBuf,
     exit_code: i32,
+}
+
+/// A local result whose artifact bytes match the selected build manifest.
+/// This readback does not grant permission to launch the installer.
+#[derive(Debug, Serialize)]
+pub struct VerifiedBuild {
+    pub artifact: PathBuf,
+    pub manifest_sha256: String,
+    pub app_id: Option<String>,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub application_icon_sha256: String,
+    pub installer_version: String,
+    pub verified_executables: Vec<(String, String)>,
+    pub profile: Option<ProfileBuildEvidence>,
+    pub compiler_exit_codes: [i32; 2],
+}
+
+#[derive(Debug, Serialize)]
+pub struct BuildComparison {
+    pub left: VerifiedBuild,
+    pub right: VerifiedBuild,
+    pub same_setup: Option<bool>,
+    pub same_package: Option<bool>,
+    pub same_payload: Option<bool>,
+    pub same_configuration: Option<bool>,
+    pub same_icon_set: Option<bool>,
+    pub same_primary_icon: bool,
+    pub same_installer_support: Option<bool>,
+    pub same_staged_file_times: Option<bool>,
+    pub same_pinned_executables: bool,
+    pub same_compiler_exit_codes: bool,
+    pub same_artifact: bool,
+}
+
+#[derive(Deserialize)]
+struct BuildResultManifest {
+    artifact: PathBuf,
+    app_id: Option<String>,
+    size_bytes: u64,
+    sha256: String,
+    application_icon_sha256: String,
+    embedded_icons_verified: bool,
+    installer_version: String,
+    verified_executables: Vec<(String, String)>,
+    redistribution_asserted: bool,
+    profile: Option<ProfileBuildEvidence>,
+    steps: Vec<RecordedStep>,
+}
+
+#[derive(Deserialize)]
+struct RecordedStep {
+    executable: PathBuf,
+    exit_code: i32,
+}
+
+/// Verify an installer under the selected result directory against its
+/// bounded build manifest. Manifest paths cannot select another directory.
+pub fn verify_build_result(result_directory: &Path) -> Result<VerifiedBuild, String> {
+    let result = local_directory(result_directory)?;
+    let path = result.join("build-manifest.json");
+    require_regular_path(&path, &result)?;
+    const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+    let mut bytes = Vec::new();
+    File::open(&path)
+        .and_then(|file| file.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err("The build manifest exceeds its size limit.".into());
+    }
+    let manifest: BuildResultManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Invalid build manifest: {error}"))?;
+    let valid_digest =
+        |value: &str| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let valid_profile = |profile: &ProfileBuildEvidence| {
+        valid_digest(&profile.manifest_sha256)
+            && valid_digest(&profile.setup_sha256)
+            && !profile.session_id.trim().is_empty()
+            && profile.inputs.as_ref().is_none_or(|inputs| {
+                [
+                    &inputs.setup_identity_sha256,
+                    &inputs.package_sha256,
+                    &inputs.payload_sha256,
+                    &inputs.configuration_sha256,
+                    &inputs.icons_sha256,
+                    &inputs.installer_support_sha256,
+                ]
+                .into_iter()
+                .all(|digest| valid_digest(digest))
+                    && inputs
+                        .staged_file_times_sha256
+                        .as_deref()
+                        .is_none_or(valid_digest)
+            })
+    };
+    if !manifest.embedded_icons_verified
+        || !manifest.redistribution_asserted
+        || manifest.installer_version != TOOL_VERSION
+        || !valid_digest(&manifest.sha256)
+        || !valid_digest(&manifest.application_icon_sha256)
+        || manifest
+            .app_id
+            .as_ref()
+            .is_some_and(|id| !safe_name(id) || !crate::paf::valid_app_id(id))
+        || manifest
+            .profile
+            .as_ref()
+            .is_some_and(|profile| !valid_profile(profile))
+        || manifest.verified_executables.len() != TOOLS.len()
+        || manifest.verified_executables.iter().zip(TOOLS).any(
+            |((file, digest), (known_file, known_digest))| {
+                file != known_file || !digest.eq_ignore_ascii_case(known_digest)
+            },
+        )
+        || manifest.steps.len() != 2
+        || manifest
+            .steps
+            .iter()
+            .zip([MAKER, "makensis.exe"])
+            .any(|(step, expected)| {
+                step.exit_code != 0
+                    || step.executable.file_name().and_then(|name| name.to_str()) != Some(expected)
+            })
+    {
+        return Err("The manifest does not describe a verified PortableForge build.".into());
+    }
+    let artifact = find_artifact(&result)?;
+    if artifact.file_name() != manifest.artifact.file_name() {
+        return Err("The installer name differs from the build manifest.".into());
+    }
+    if metadata_at(&artifact)?.len() != manifest.size_bytes {
+        return Err("The installer size differs from the build manifest.".into());
+    }
+    let (sha256, size_bytes) = file_digest(&artifact)?;
+    if size_bytes != manifest.size_bytes || !sha256.eq_ignore_ascii_case(&manifest.sha256) {
+        return Err("The installer bytes differ from the build manifest.".into());
+    }
+    Ok(VerifiedBuild {
+        artifact,
+        manifest_sha256: crate::snapshot::sha256_hex(&bytes),
+        app_id: manifest.app_id,
+        size_bytes,
+        sha256,
+        application_icon_sha256: manifest.application_icon_sha256,
+        installer_version: manifest.installer_version,
+        verified_executables: manifest.verified_executables,
+        profile: manifest.profile,
+        compiler_exit_codes: [manifest.steps[0].exit_code, manifest.steps[1].exit_code],
+    })
+}
+
+/// Compare independently read-back results. Missing input evidence from
+/// older reports stays unknown. Artifact equality is a separate field.
+pub fn compare_build_results(left: &Path, right: &Path) -> Result<BuildComparison, String> {
+    let left = verify_build_result(left)?;
+    let right = verify_build_result(right)?;
+    fn inputs(build: &VerifiedBuild) -> Option<&BuildInputEvidence> {
+        build
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.inputs.as_ref())
+    }
+    let stable_inputs = inputs(&left).zip(inputs(&right));
+    let same = |field: fn(&BuildInputEvidence) -> &str| {
+        stable_inputs.map(|(left, right)| field(left).eq_ignore_ascii_case(field(right)))
+    };
+    Ok(BuildComparison {
+        same_setup: same(|inputs| &inputs.setup_identity_sha256),
+        same_package: same(|inputs| &inputs.package_sha256),
+        same_payload: same(|inputs| &inputs.payload_sha256),
+        same_configuration: same(|inputs| &inputs.configuration_sha256),
+        same_icon_set: same(|inputs| &inputs.icons_sha256),
+        same_primary_icon: left
+            .application_icon_sha256
+            .eq_ignore_ascii_case(&right.application_icon_sha256),
+        same_installer_support: same(|inputs| &inputs.installer_support_sha256),
+        same_staged_file_times: stable_inputs.and_then(|(left, right)| {
+            left.staged_file_times_sha256
+                .as_deref()
+                .zip(right.staged_file_times_sha256.as_deref())
+                .map(|(left, right)| left.eq_ignore_ascii_case(right))
+        }),
+        same_pinned_executables: left.verified_executables == right.verified_executables,
+        same_compiler_exit_codes: left.compiler_exit_codes == right.compiler_exit_codes,
+        same_artifact: left.sha256 == right.sha256,
+        left,
+        right,
+    })
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+    use crate::snapshot::sha256_hex;
+
+    #[test]
+    fn build_readback_uses_selected_folder_and_rejects_changed_bytes() {
+        let result = std::env::temp_dir().join(format!("pf-build-readback-{}", std::process::id()));
+        fs::create_dir(&result).unwrap();
+        let mut pe = vec![0; 80];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3c] = 64;
+        pe[64..70].copy_from_slice(b"PE\0\0\x4c\x01");
+        let installer = result.join("Widget.paf.exe");
+        fs::write(&installer, &pe).unwrap();
+        let manifest = serde_json::json!({
+            "artifact": r"C:\Earlier location\Widget.paf.exe",
+            "size_bytes": pe.len(),
+            "sha256": sha256_hex(&pe),
+            "application_icon_sha256": sha256_hex(b"icon"),
+            "embedded_icons_verified": true,
+            "installer_version": TOOL_VERSION,
+            "verified_executables": TOOLS,
+            "redistribution_asserted": true,
+            "steps": [
+                { "executable": MAKER, "exit_code": 0 },
+                { "executable": COMPILER, "exit_code": 0 }
+            ],
+        });
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let manifest = result.join("build-manifest.json");
+        fs::write(&manifest, &bytes).unwrap();
+        let verified = verify_build_result(&result).unwrap();
+        assert_eq!(
+            verified.artifact,
+            local_directory(&result).unwrap().join("Widget.paf.exe")
+        );
+        assert_eq!(verified.manifest_sha256, sha256_hex(&bytes));
+        assert!(verified.app_id.is_none());
+        let compare = compare_build_results(&result, &result).unwrap();
+        assert!(compare.same_artifact);
+        assert!(compare.same_package.is_none());
+        pe[79] = 1;
+        fs::write(&installer, pe).unwrap();
+        assert!(verify_build_result(&result).is_err());
+        fs::remove_file(installer).unwrap();
+        fs::remove_file(manifest).unwrap();
+        fs::remove_dir(result).unwrap();
+    }
 }
 
 /// Build an offline installer from a trusted prepared package and trusted
@@ -116,11 +370,8 @@ pub(crate) fn compile_installer_checked(
     }
 
     check_tools(&tool_root)?;
-    if let Some(verify_support) = approval
-        .as_ref()
-        .and_then(|approval| approval.verify_tool_support)
-    {
-        verify_support(&tool_root)?;
+    if let Some(approval) = &approval {
+        (approval.verify_tool_support)(&tool_root)?;
     }
     // Reserve the entire run directory with a single exclusive create. A failed
     // attempt retains its work and cannot be mistaken for a fresh attempt.
@@ -163,7 +414,7 @@ fn compile_in(
     tool_root: &Path,
     output: &Path,
     redistribution_asserted: bool,
-    approval: Option<CompileApproval<'_>>,
+    mut approval: Option<CompileApproval<'_>>,
 ) -> Result<CompileReport, String> {
     let work = output.join("work");
     create_dir(&work)?;
@@ -176,16 +427,19 @@ fn compile_in(
     let initial = package_settings(&ini_text(&initial_appinfo)?)?;
     let stage = package_work.join(&initial.app_id);
     copy_tree(package, &stage)?;
-    if let Some(approval) = &approval {
-        (approval.verify_staged)(&stage)?;
+    if let Some(approval) = &mut approval {
+        let file_times = (approval.verify_staged)(&stage)?;
+        if let Some(inputs) = &mut approval.evidence.inputs {
+            inputs.staged_file_times_sha256 = Some(file_times);
+        }
     }
     let appinfo = stage.join("App/AppInfo");
     let (metadata, installer_ini) = preflight_package(&stage)?;
-    let verify_support = approval
-        .as_ref()
-        .and_then(|approval| approval.verify_tool_support);
     #[cfg(target_arch = "x86_64")]
-    if verify_support.is_some() {
+    if approval
+        .as_ref()
+        .is_some_and(|approval| approval.wizard_checks)
+    {
         preflight_wizard_details(&metadata.appinfo).map_err(|error| {
             format!("{error} Save a new reviewed profile with these details before rebuilding.")
         })?;
@@ -208,8 +462,8 @@ fn compile_in(
     copy_new_file(&tool_root.join(MAKER), &staged_tools.join(MAKER))?;
     copy_tree(&tool_root.join("App"), &staged_tools.join("App"))?;
     check_tools(&staged_tools)?;
-    if let Some(verify_support) = verify_support {
-        verify_support(&staged_tools)?;
+    if let Some(approval) = &approval {
+        (approval.verify_tool_support)(&staged_tools)?;
     }
     let maker = run_step(
         &staged_tools.join(MAKER),
@@ -234,8 +488,8 @@ fn compile_in(
         format!("Could not remove the first installer from the working folder: {e}")
     })?;
     check_tools(&staged_tools)?;
-    if let Some(verify_support) = verify_support {
-        verify_support(&staged_tools)?;
+    if let Some(approval) = &approval {
+        (approval.verify_tool_support)(&staged_tools)?;
     }
     let compiler = run_step(
         &staged_tools.join(COMPILER),
@@ -257,6 +511,7 @@ fn compile_in(
     let result = output.join("result");
     let report = CompileReport {
         artifact: result.join(filename),
+        app_id: metadata.app_id,
         size_bytes,
         sha256: digest,
         application_icon_sha256: icon_hash,
@@ -582,7 +837,7 @@ pub(crate) fn file_digest(path: &Path) -> Result<(String, u64), String> {
     Ok((format!("{:x}", digest.finalize()), size))
 }
 
-fn check_tools(root: &Path) -> Result<(), String> {
+pub(crate) fn check_tools(root: &Path) -> Result<(), String> {
     for (relative, expected) in TOOLS {
         let file = root.join(relative);
         require_regular_path(&file, root)?;

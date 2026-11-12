@@ -1,16 +1,17 @@
 use std::ffi::{c_void, OsStr, OsString};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::compile::windows::{file_digest, local_directory, require_regular_path};
 
-const INSTALL: &str = r"C:\Program Files\Sandboxie-Plus";
 const TOOLS: &[(&str, &str)] = &[
     (
         "SbieDll.dll",
@@ -128,6 +129,7 @@ extern "system" {
     fn QueryDosDeviceW(device: *const u16, target: *mut u16, size: u32) -> u32;
     fn GetCurrentProcessId() -> u32;
     fn GetCurrentProcess() -> Handle;
+    fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> Handle;
     fn GetProcessId(process: Handle) -> u32;
     fn GetProcessIdOfThread(thread: Handle) -> u32;
     fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> i32;
@@ -138,7 +140,20 @@ extern "system" {
         size: *mut u32,
     ) -> i32;
     fn ResumeThread(thread: Handle) -> u32;
+    fn CreateEventW(
+        attributes: Handle,
+        manual_reset: i32,
+        initial: i32,
+        name: *const u16,
+    ) -> Handle;
+    fn SetEvent(event: Handle) -> i32;
     fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+    fn WaitForMultipleObjects(
+        count: u32,
+        handles: *const Handle,
+        all: i32,
+        milliseconds: u32,
+    ) -> u32;
     fn GetExitCodeProcess(process: Handle, exit: *mut u32) -> i32;
     fn TerminateProcess(process: Handle, exit: u32) -> i32;
     fn CloseHandle(handle: Handle) -> i32;
@@ -148,7 +163,19 @@ extern "system" {
 extern "system" {
     fn OpenSCManagerW(machine: *const u16, database: *const u16, access: u32) -> Handle;
     fn OpenServiceW(manager: Handle, name: *const u16, access: u32) -> Handle;
-    fn QueryServiceStatus(service: Handle, status: *mut u32) -> i32;
+    fn QueryServiceStatusEx(
+        service: Handle,
+        info_level: u32,
+        buffer: *mut u8,
+        size: u32,
+        needed: *mut u32,
+    ) -> i32;
+    fn QueryServiceConfigW(
+        service: Handle,
+        config: *mut ServiceConfig,
+        size: u32,
+        needed: *mut u32,
+    ) -> i32;
     fn CloseServiceHandle(handle: Handle) -> i32;
     fn RegOpenKeyExW(
         key: Handle,
@@ -182,6 +209,19 @@ impl Drop for ProcessHandle {
 
 struct ServiceHandle(Handle);
 
+#[repr(C)]
+struct ServiceConfig {
+    service_type: u32,
+    start_type: u32,
+    error_control: u32,
+    binary_path: *const u16,
+    load_order_group: *const u16,
+    tag: u32,
+    dependencies: *const u16,
+    start_name: *const u16,
+    display_name: *const u16,
+}
+
 impl Drop for ServiceHandle {
     fn drop(&mut self) {
         // SAFETY: this wrapper owns a non-null handle from the SCM.
@@ -189,7 +229,56 @@ impl Drop for ServiceHandle {
     }
 }
 
+/// A single-use cancellation signal shared by the caller and its capture worker.
+#[derive(Clone)]
+pub struct CancellationToken(Arc<OwnedHandle>);
+
+impl CancellationToken {
+    pub fn new() -> Result<Self, String> {
+        // SAFETY: create one unnamed, non-inheritable, manual-reset event.
+        let event = unsafe { CreateEventW(null_mut(), 1, 0, null()) };
+        if event.is_null() {
+            return Err(os_error("create a capture cancellation event"));
+        }
+        // SAFETY: the successful call transferred ownership of this handle.
+        Ok(Self(Arc::new(unsafe {
+            OwnedHandle::from_raw_handle(event)
+        })))
+    }
+
+    pub fn cancel(&self) -> Result<(), String> {
+        // SAFETY: the Arc retains a valid event handle.
+        if unsafe { SetEvent(self.0.as_raw_handle()) } == 0 {
+            return Err(os_error("signal capture cancellation"));
+        }
+        Ok(())
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        // SAFETY: the Arc retains a valid event handle. Fail closed if waiting fails.
+        unsafe { WaitForSingleObject(self.0.as_raw_handle(), 0) != 258 }
+    }
+
+    pub(super) fn check(&self) -> Result<(), String> {
+        if self.is_cancelled() {
+            return Err("The operation was cancelled.".into());
+        }
+        Ok(())
+    }
+}
+
+pub(super) enum LaunchArguments<'a> {
+    Tokens(&'a [OsString]),
+    PafDestination(&'a Path),
+}
+
+pub(super) struct RunLimits<'a> {
+    pub(super) timeout: Duration,
+    pub(super) cancellation: &'a CancellationToken,
+}
+
 pub(super) struct Sandboxie {
+    runtime_root: PathBuf,
     version: Version,
     driver_info: DriverInfo,
     home: Home,
@@ -204,6 +293,7 @@ pub(super) struct Sandboxie {
     enumerate: Enumerate,
     kill: Kill,
     _library: Library,
+    _runtime_files: Vec<File>,
 }
 
 pub(super) struct VerifiedExit {
@@ -220,9 +310,8 @@ struct Paths {
 
 impl Sandboxie {
     pub(super) fn load() -> Result<Self, String> {
-        service_running("SbieSvc")?;
-        service_running("SbieDrv")?;
-        let (driver, install) = Self::open()?;
+        let runtime_root = active_runtime_root()?;
+        let driver = Self::open(&runtime_root)?;
         let mut version = [0; 16];
         let mut abi = 0;
         // SAFETY: both writable outputs have the vendor ABI's required sizes.
@@ -245,37 +334,63 @@ impl Sandboxie {
                 "Sandboxie did not activate supported isolation for this Windows build.".into(),
             );
         }
+        driver.verify_home()?;
+        Ok(driver)
+    }
+
+    pub(super) fn runtime_root(&self) -> &Path {
+        &self.runtime_root
+    }
+
+    fn verify_home(&self) -> Result<(), String> {
         let mut home = [0; PATH_CHARS];
         // SAFETY: the DOS path output is a writable WCHAR buffer of the given length.
         checked("query the Sandboxie driver installation path", unsafe {
-            (driver.home)(null_mut(), 0, home.as_mut_ptr(), PATH_CHARS as u32)
+            (self.home)(null_mut(), 0, home.as_mut_ptr(), PATH_CHARS as u32)
         })?;
-        if local_directory(Path::new(&text(&home)?))? != install {
+        if local_directory(Path::new(&text(&home)?))? != self.runtime_root {
             return Err(
                 "The running Sandboxie driver uses a different installation folder.".into(),
             );
         }
-        Ok(driver)
+        Ok(())
     }
 
-    fn open() -> Result<(Self, PathBuf), String> {
+    fn open(runtime_root: &Path) -> Result<Self, String> {
         if !cfg!(target_arch = "x86_64") {
             return Err(
                 "This Sandboxie workflow requires x64 PortableForge and Sandboxie-Plus 1.18.8."
                     .into(),
             );
         }
-        let install = local_directory(Path::new(INSTALL))?;
+        let install = local_directory(runtime_root)?;
+        if install != runtime_root {
+            return Err("The verified Sandboxie runtime folder changed.".into());
+        }
         let dll = install.join("SbieDll.dll");
-        // Hold read-only sharing while checking the DLL and taking the loader reference.
-        let _lock = OpenOptions::new()
-            .read(true)
-            .share_mode(1)
-            .open(&dll)
-            .map_err(|e| format!("Could not hold the installed Sandboxie library: {e}"))?;
+        let mut runtime_files = Vec::with_capacity(TOOLS.len() + 1);
+        runtime_files.push(
+            OpenOptions::new()
+                .read(true)
+                .share_mode(3)
+                .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS permits a directory handle.
+                .open(&install)
+                .map_err(|e| {
+                    format!("Could not hold the verified Sandboxie runtime folder: {e}")
+                })?,
+        );
         for (name, digest) in TOOLS {
             let path = install.join(name);
             require_regular_path(&path, &install)?;
+            runtime_files.push(
+                OpenOptions::new()
+                    .read(true)
+                    .share_mode(1)
+                    .open(&path)
+                    .map_err(|e| {
+                        format!("Could not hold the verified Sandboxie file {name}: {e}")
+                    })?,
+            );
             if file_digest(&path)?.0 != *digest {
                 return Err(format!(
                     "The installed Sandboxie file {name} differs from supported Plus 1.18.8 x64."
@@ -283,9 +398,9 @@ impl Sandboxie {
             }
         }
         let dll_name = wide(dll.as_os_str())?;
-        // SAFETY: absolute, verified DLL name, NUL terminated. Dependencies are
-        // resolved from its verified installation directory and System32 only.
-        let handle = unsafe { LoadLibraryExW(dll_name.as_ptr(), null_mut(), 0x100 | 0x800) };
+        // SAFETY: absolute, verified DLL name, NUL terminated. The pinned
+        // x64 library imports only ntdll.dll and KERNEL32.dll from Windows.
+        let handle = unsafe { LoadLibraryExW(dll_name.as_ptr(), null_mut(), 0x800) };
         if handle.is_null() {
             return Err(os_error("load the verified Sandboxie library"));
         }
@@ -320,25 +435,24 @@ impl Sandboxie {
                 unsafe { std::mem::transmute::<*const c_void, $kind>(address) }
             }};
         }
-        Ok((
-            Self {
-                version: export!("SbieApi_GetVersionEx", Version),
-                driver_info: export!("SbieApi_QueryDrvInfo", DriverInfo),
-                home: export!("SbieApi_GetHomePath", Home),
-                conf: export!("SbieApi_QueryConf", Conf),
-                update: export!("SbieDll_UpdateConf", Update),
-                enabled: export!("SbieApi_IsBoxEnabled", Enabled),
-                box_path: export!("SbieApi_QueryBoxPath", BoxPath),
-                process_path: export!("SbieApi_QueryProcessPath", ProcessPath),
-                launch: export!("SbieDll_RunSandboxed", Run),
-                query: export!("SbieApi_QueryProcess", Query),
-                info: export!("SbieApi_QueryProcessInfo", Info),
-                enumerate: export!("SbieApi_EnumProcessEx", Enumerate),
-                kill: export!("SbieDll_KillAll", Kill),
-                _library: library,
-            },
-            install,
-        ))
+        Ok(Self {
+            runtime_root: install,
+            version: export!("SbieApi_GetVersionEx", Version),
+            driver_info: export!("SbieApi_QueryDrvInfo", DriverInfo),
+            home: export!("SbieApi_GetHomePath", Home),
+            conf: export!("SbieApi_QueryConf", Conf),
+            update: export!("SbieDll_UpdateConf", Update),
+            enabled: export!("SbieApi_IsBoxEnabled", Enabled),
+            box_path: export!("SbieApi_QueryBoxPath", BoxPath),
+            process_path: export!("SbieApi_QueryProcessPath", ProcessPath),
+            launch: export!("SbieDll_RunSandboxed", Run),
+            query: export!("SbieApi_QueryProcess", Query),
+            info: export!("SbieApi_QueryProcessInfo", Info),
+            enumerate: export!("SbieApi_EnumProcessEx", Enumerate),
+            kill: export!("SbieDll_KillAll", Kill),
+            _library: library,
+            _runtime_files: runtime_files,
+        })
     }
 
     pub(super) fn provision(&self, name: &str, root: &Path) -> Result<(), String> {
@@ -393,10 +507,11 @@ impl Sandboxie {
         name: &str,
         root: &Path,
         image: &Path,
-        args: &[OsString],
+        args: LaunchArguments<'_>,
         cwd: &Path,
-        timeout: Duration,
+        limits: RunLimits<'_>,
     ) -> Result<VerifiedExit, String> {
+        limits.cancellation.check()?;
         let paths = self.verify_box(name, root)?;
         let image_parent = image
             .parent()
@@ -412,7 +527,7 @@ impl Sandboxie {
         let dir = wide(local_directory(cwd)?.as_os_str())?;
         let command = command_line(image.as_os_str(), args)?;
         let name_wide = box_name(name)?;
-        let milliseconds = timeout.as_millis().min((u32::MAX - 1) as u128) as u32;
+        let milliseconds = limits.timeout.as_millis().min((u32::MAX - 1) as u128) as u32;
         // SAFETY: Win32 STARTUPINFOW/PROCESS_INFORMATION are C layouts with a
         // valid all-zero initial state. The service accepts these flags.
         let mut startup: StartupInfo = unsafe { std::mem::zeroed() };
@@ -453,6 +568,9 @@ impl Sandboxie {
         if let Err(error) = self.verify_process(name, &paths, process.pid, child.0, &image, false) {
             return Err(reject_child(child.0, error));
         }
+        if let Err(error) = limits.cancellation.check() {
+            return Err(reject_child(child.0, error));
+        }
         // SAFETY: driver membership, configured roots, isolation flags and the
         // exact retained process image have been checked while still suspended.
         let count = unsafe { ResumeThread(primary.0) };
@@ -462,10 +580,13 @@ impl Sandboxie {
                 format!("Unexpected Sandboxie thread suspension count {count}."),
             ));
         }
-        // SAFETY: the service returned a retained, waitable process handle.
-        let wait = unsafe { WaitForSingleObject(child.0, milliseconds) };
+        let handles = [limits.cancellation.0.as_raw_handle(), child.0];
+        // SAFETY: both handles stay live until the wait completes. Cancellation
+        // is first so concurrent process exit cannot publish a cancelled result.
+        let wait = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, milliseconds) };
         match wait {
-            0 => {
+            0 => Err("The operation was cancelled. The owned box needs cleanup.".into()),
+            1 => {
                 let mut exit = 0;
                 // SAFETY: the process is signaled and the exit-code output is writable.
                 if unsafe { GetExitCodeProcess(child.0, &mut exit) } == 0 {
@@ -483,8 +604,14 @@ impl Sandboxie {
         }
     }
 
-    pub(super) fn verify_current(name: &str, root: &Path, image: &Path) -> Result<(), String> {
-        let (driver, _) = Self::open()?;
+    pub(super) fn verify_current(
+        name: &str,
+        root: &Path,
+        runtime_root: &Path,
+        image: &Path,
+    ) -> Result<(), String> {
+        let driver = Self::open(runtime_root)?;
+        driver.verify_home()?;
         // The host launch checked the full effective policy before resuming
         // this helper. Some configuration queries are restricted in the box.
         let paths = driver.roots(name, root)?;
@@ -629,7 +756,7 @@ impl Sandboxie {
         self.roots(name, root)
     }
 
-    fn verify_global(&self) -> Result<(), String> {
+    pub(super) fn verify_global(&self) -> Result<(), String> {
         // Driver-enforced defaults from the pinned vendor installation are
         // supported. Explicit local/global compatibility exceptions are not.
         for key in self.setting_names(Some("GlobalSettings"))? {
@@ -957,7 +1084,7 @@ fn text(buffer: &[u16]) -> Result<String, String> {
     String::from_utf16(&buffer[..end]).map_err(|_| "Sandboxie returned malformed text.".into())
 }
 
-fn command_line(image: &OsStr, args: &[OsString]) -> Result<Vec<u16>, String> {
+fn command_line(image: &OsStr, args: LaunchArguments<'_>) -> Result<Vec<u16>, String> {
     fn quote(value: &OsStr, out: &mut Vec<u16>) -> Result<(), String> {
         let slash = b'\\' as u16;
         let quote = b'"' as u16;
@@ -986,11 +1113,35 @@ fn command_line(image: &OsStr, args: &[OsString]) -> Result<Vec<u16>, String> {
     }
     let mut out = Vec::new();
     quote(image, &mut out)?;
-    for arg in args {
-        out.push(b' ' as u16);
-        quote(arg, &mut out)?;
-        if out.len() >= 32_767 {
-            return Err("The boxed process command line is too long.".into());
+    match args {
+        LaunchArguments::Tokens(args) => {
+            for arg in args {
+                out.push(b' ' as u16);
+                // Keep simple flags visible to installers that parse the raw
+                // command line, such as NSIS. Escape all other arguments.
+                if !arg.is_empty()
+                    && arg.encode_wide().all(|ch| {
+                        ch != 0
+                            && ch != b'"' as u16
+                            && !char::from_u32(u32::from(ch)).is_some_and(char::is_whitespace)
+                    })
+                {
+                    out.extend(arg.encode_wide());
+                } else {
+                    quote(arg, &mut out)?;
+                }
+                if out.len() >= 32_767 {
+                    return Err("The boxed process command line is too long.".into());
+                }
+            }
+        }
+        LaunchArguments::PafDestination(destination) => {
+            // PortableApps.comInstaller.nsi uses NSIS GetOptions on the raw
+            // command line and appends AppID to this directory. GetOptions
+            // ignores option prefixes inside quotes.
+            let destination = validate_root(destination)?;
+            box_name(&destination[3..])?;
+            out.extend(format!(" /DESTINATION={destination}\\").encode_utf16());
         }
     }
     out.push(0);
@@ -1006,15 +1157,68 @@ fn current_session() -> Result<u32, String> {
     Ok(session)
 }
 
-fn service_running(name: &str) -> Result<(), String> {
-    let service_name = wide(OsStr::new(name))?;
-    // SAFETY: connect to the local SCM, requesting only connect/query access.
+fn active_runtime_root() -> Result<PathBuf, String> {
+    // SAFETY: connect to the local SCM with SC_MANAGER_CONNECT only.
     let manager = unsafe { OpenSCManagerW(null(), null(), 1) };
     if manager.is_null() {
         return Err(os_error("open the local Windows service manager"));
     }
     let manager = ServiceHandle(manager);
-    let service = unsafe { OpenServiceW(manager.0, service_name.as_ptr(), 4) };
+    let service = active_service_image(&manager, "SbieSvc", 0x10)?;
+    let driver = active_service_image(&manager, "SbieDrv", 1)?;
+    let verified_parent = |path: &Path| -> Result<PathBuf, String> {
+        let root = local_directory(
+            path.parent()
+                .ok_or("The Sandboxie service image has no parent folder.")?,
+        )?;
+        require_regular_path(
+            &root.join(
+                path.file_name()
+                    .ok_or("Missing Sandboxie service filename.")?,
+            ),
+            &root,
+        )?;
+        Ok(root)
+    };
+    let root = verified_parent(&service)?;
+    if root != verified_parent(&driver)? {
+        return Err("The running Sandboxie service and driver use different folders.".into());
+    }
+    Ok(root)
+}
+
+fn service_status(service: &ServiceHandle, name: &str, expected_type: u32) -> Result<u32, String> {
+    let mut status = [0_u32; 9]; // SERVICE_STATUS_PROCESS is nine DWORDs.
+    let mut needed = 0;
+    // SAFETY: valid service handle, exact byte size, and writable native outputs.
+    if unsafe {
+        QueryServiceStatusEx(
+            service.0,
+            0,
+            status.as_mut_ptr().cast(),
+            std::mem::size_of_val(&status) as u32,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(os_error(&format!("query service {name}")));
+    }
+    if status[0] != expected_type || status[1] != 4 {
+        return Err(format!(
+            "Sandboxie service {name} is not running with the expected service type."
+        ));
+    }
+    Ok(status[7])
+}
+
+fn active_service_image(
+    manager: &ServiceHandle,
+    name: &str,
+    expected_type: u32,
+) -> Result<PathBuf, String> {
+    let service_name = wide(OsStr::new(name))?;
+    // SAFETY: valid SCM handle, NUL-terminated name, and only QUERY_CONFIG | QUERY_STATUS.
+    let service = unsafe { OpenServiceW(manager.0, service_name.as_ptr(), 1 | 4) };
     if service.is_null() {
         return Err(format!(
             "Sandboxie-Plus 1.18.8 x64 is required. {}",
@@ -1022,16 +1226,128 @@ fn service_running(name: &str) -> Result<(), String> {
         ));
     }
     let service = ServiceHandle(service);
-    let mut status = [0; 7]; // SERVICE_STATUS is seven DWORDs
-                             // SAFETY: valid owned service handle and output matching SERVICE_STATUS.
-    if unsafe { QueryServiceStatus(service.0, status.as_mut_ptr()) } == 0 {
-        return Err(os_error(&format!("query service {name}")));
+    let pid = service_status(&service, name, expected_type)?;
+    // QueryServiceConfigW bounds the complete output to 8 KiB. usize elements
+    // supply pointer alignment for the header on the native architecture.
+    let mut buffer = [0_usize; 8192 / std::mem::size_of::<usize>()];
+    let mut needed = 0;
+    let size = std::mem::size_of_val(&buffer);
+    // SAFETY: the pointer is aligned and the declared byte range is writable.
+    if unsafe {
+        QueryServiceConfigW(
+            service.0,
+            buffer.as_mut_ptr().cast(),
+            size as u32,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(os_error(&format!("read service configuration for {name}")));
     }
-    if status[1] != 4 {
-        // SERVICE_RUNNING
+    // SAFETY: the successful call initialized the native header in this buffer.
+    let config = unsafe { &*buffer.as_ptr().cast::<ServiceConfig>() };
+    if config.service_type != expected_type {
         return Err(format!(
-            "Sandboxie service {name} is installed but not running."
+            "Sandboxie service {name} has an unexpected configuration type."
         ));
+    }
+    let offset = (config.binary_path as usize)
+        .checked_sub(buffer.as_ptr() as usize)
+        .filter(|offset| {
+            *offset >= std::mem::size_of::<ServiceConfig>() && *offset < size && *offset % 2 == 0
+        })
+        .ok_or("The Windows service manager returned an invalid image path.")?;
+    // SAFETY: the validated even offset is within the aligned live buffer,
+    // and the slice covers only its remaining complete WCHAR elements.
+    let path = unsafe {
+        std::slice::from_raw_parts(
+            buffer.as_ptr().cast::<u8>().add(offset).cast::<u16>(),
+            (size - offset) / 2,
+        )
+    };
+    let raw = text(path)?;
+    let path = parse_service_image(&raw, expected_type == 0x10)?;
+    if expected_type == 0x10 {
+        verify_live_service_image(pid, &path)?;
+    }
+    if service_status(&service, name, expected_type)? != pid {
+        return Err(format!(
+            "Sandboxie service {name} changed while checking its image."
+        ));
+    }
+    Ok(path)
+}
+
+fn parse_service_image(value: &str, executable: bool) -> Result<PathBuf, String> {
+    let image = if executable {
+        value
+            .strip_prefix('"')
+            .and_then(|path| path.strip_suffix('"'))
+    } else {
+        value.strip_prefix(r"\??\")
+    }
+    .ok_or("The Sandboxie service image must use the exact native absolute-path form.")?;
+    let bytes = image.as_bytes();
+    if bytes.len() < 4
+        || !bytes[0].is_ascii_alphabetic()
+        || &bytes[1..3] != b":\\"
+        || image.contains('%')
+        || !image[3..].split('\\').all(crate::compile::safe_name)
+    {
+        return Err(
+            "The Sandboxie service image must be a local absolute path without arguments.".into(),
+        );
+    }
+    let expected = if executable {
+        "SbieSvc.exe"
+    } else {
+        "SbieDrv.sys"
+    };
+    if !image
+        .rsplit('\\')
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case(expected))
+    {
+        return Err("The Sandboxie service image filename differs from the pinned runtime.".into());
+    }
+    Ok(PathBuf::from(image))
+}
+
+fn verify_live_service_image(pid: u32, expected: &Path) -> Result<(), String> {
+    if pid == 0 {
+        return Err("Windows did not identify the running Sandboxie service process.".into());
+    }
+    // SAFETY: open the SCM-reported PID with PROCESS_QUERY_LIMITED_INFORMATION only.
+    let handle = unsafe { OpenProcess(0x1000, 0, pid) };
+    if handle.is_null() {
+        let error = io::Error::last_os_error();
+        // The ordinary token can read the SCM but may not open this SYSTEM
+        // process. The driver home and exact installed file pins still apply.
+        return if error.raw_os_error() == Some(5) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Could not open the running Sandboxie service image: {error}"
+            ))
+        };
+    }
+    let process = ProcessHandle(handle);
+    let mut buffer = [0_u16; PATH_CHARS];
+    let mut length = buffer.len() as u32;
+    // SAFETY: live query-only process handle and bounded writable outputs.
+    if unsafe { QueryFullProcessImageNameW(process.0, 0, buffer.as_mut_ptr(), &mut length) } == 0
+        || length == 0
+        || length as usize >= buffer.len()
+    {
+        return Err(os_error("read the running Sandboxie service image"));
+    }
+    let observed = PathBuf::from(OsString::from_wide(&buffer[..length as usize]));
+    let canonical = |path: &Path| {
+        fs::canonicalize(path)
+            .map_err(|e| format!("Could not resolve the Sandboxie service image: {e}"))
+    };
+    if canonical(&observed)? != canonical(expected)? {
+        return Err("The running Sandboxie service image differs from its configured path.".into());
     }
     Ok(())
 }
@@ -1087,20 +1403,83 @@ mod tests {
     use super::*;
 
     #[test]
+    fn service_image_paths_accept_installed_and_portable_native_forms() {
+        let installed = r#""C:\Program Files\Sandboxie-Plus\SbieSvc.exe""#;
+        assert_eq!(
+            parse_service_image(installed, true).unwrap(),
+            Path::new(r"C:\Program Files\Sandboxie-Plus\SbieSvc.exe")
+        );
+        let portable = r#""D:\Local Tools\Sandboxie-Plus\SbieSvc.exe""#;
+        let driver = r"\??\D:\Local Tools\Sandboxie-Plus\SbieDrv.sys";
+        assert_eq!(
+            parse_service_image(portable, true).unwrap().parent(),
+            parse_service_image(driver, false).unwrap().parent()
+        );
+    }
+
+    #[test]
+    fn service_image_paths_reject_arguments_indirection_and_wrong_images() {
+        for value in [
+            r#"C:\Sandboxie\SbieSvc.exe"#,
+            r#""C:\Sandboxie\SbieSvc.exe" -argument"#,
+            r#""C:\Sandboxie\..\SbieSvc.exe""#,
+            r#""C:\%Runtime%\SbieSvc.exe""#,
+            r#""\\server\share\SbieSvc.exe""#,
+            r#""C:\Sandboxie\Other.exe""#,
+        ] {
+            assert!(parse_service_image(value, true).is_err(), "{value}");
+        }
+        for value in [
+            r"C:\Sandboxie\SbieDrv.sys",
+            r"\??\C:\Sandboxie\SbieDrv.sys -argument",
+            r"\??\C:\Sandboxie\Other.sys",
+            r"\SystemRoot\Sandboxie\SbieDrv.sys",
+            r"\??\C:\Sandboxie\SbieDrv.sys:stream",
+        ] {
+            assert!(parse_service_image(value, false).is_err(), "{value}");
+        }
+    }
+
+    #[test]
     fn quoted_command_keeps_spaces_quotes_and_trailing_slashes_in_one_argument() {
         let command = command_line(
             OsStr::new(r"C:\Program Files\Setup.exe"),
-            &[
+            LaunchArguments::Tokens(&[
                 OsString::from(""),
+                OsString::from("/owned-fixture"),
                 OsString::from("a\"b"),
                 OsString::from(r"C:\Folder With Spaces\"),
-            ],
+            ]),
         )
         .unwrap();
         assert_eq!(
             text(&command).unwrap(),
-            r#""C:\Program Files\Setup.exe" "" "a\"b" "C:\Folder With Spaces\\""#
+            r#""C:\Program Files\Setup.exe" "" /owned-fixture "a\"b" "C:\Folder With Spaces\\""#
         );
+    }
+
+    #[test]
+    fn paf_destination_is_a_raw_owned_root_option() {
+        let installer = OsStr::new(r"C:\A Build\Fixture.paf.exe");
+        let destination = Path::new(r"C:\PF_0123456789ABCDEF");
+        let command =
+            command_line(installer, LaunchArguments::PafDestination(destination)).unwrap();
+        assert_eq!(
+            text(&command).unwrap(),
+            r#""C:\A Build\Fixture.paf.exe" /DESTINATION=C:\PF_0123456789ABCDEF\"#
+        );
+        let other = Path::new(r"C:\Other\PF_0123456789ABCDEF");
+        assert!(command_line(installer, LaunchArguments::PafDestination(other)).is_err());
+    }
+
+    #[test]
+    fn cancellation_stays_signaled_across_clones() {
+        let original = CancellationToken::new().unwrap();
+        let copy = original.clone();
+        assert!(!original.is_cancelled());
+        copy.cancel().unwrap();
+        assert!(original.is_cancelled());
+        assert!(copy.check().is_err());
     }
 
     #[test]

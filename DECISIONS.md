@@ -1,5 +1,53 @@
 # Decisions — PortableForge
 
+## 2026-11-12 — Bundle the portable test box files
+
+This replaces the October 25 setup executable bundle. Release packaging
+extracts the pinned official Sandboxie-Plus 1.18.8 x64 payload before it
+stages PortableForge. The wizard can open the folder in Explorer.
+Administrator prompts and the service lifecycle belong to the vendor
+manager that the user opens from a protected local copy. Verified
+capture and installer testing attach to a compatible running engine
+after checking its active service and driver identities.
+
+## 2026-11-12 — TesselGUI revision 2 for the wizard
+
+The wizard uses the GitHub palette and workflow patterns from TesselGUI
+revision 2. This replaces the October 23 dark-only decision. The
+generated Rust token file is copied verbatim from the pinned MIT code
+export. Both projects ship the same copyright and MIT license text.
+[Token source](https://github.com/SeanShaffer88/TesselGUI/blob/a689a5e3bfadf9e1e77a3acea826bea5cc717e94/dist/tessel.rs)
+
+Appearance is local wizard state. System follows the theme reported
+by egui and uses the dark palette when the desktop theme is unknown.
+Windows contrast themes take precedence over the saved preference and
+use native colors. The UI uses a compact single-column task at the
+minimum size, accessible full-value views, and a fixed action strip
+that keeps the next decision in reach. [Accessibility notes](docs/ACCESSIBILITY.md)
+
+## 2026-11-12 — Reopen capture evidence and replay saved approvals
+
+The wizard stores the receipt digest separately from the cleaned capture.
+Reopening checks that digest, the capture notes, and the harvested payload
+before returning to review. Changing setup detaches the previous capture
+and clears its trust and review state. Updating an app requires a fresh
+capture, comparison against the previous approval, and a separate saved
+profile.
+
+The queue freezes the approved profile, setup, tool folder, and output
+folder when an entry is added. It executes serially and records each
+result independently. Saved build identity includes the verified receipt
+digest, installer SHA-256, and app ID. Installer tests check all three
+before opening the dedicated box. Build comparisons retain both installer
+SHA-256s and track staged file times before normalization independently
+of the content hashes.
+
+Windows Installer packages use a guided Windows Sandbox guest flow.
+The clean guest note precedes opening setup, and the guest flow keeps
+network and clipboard sharing disabled. Windows Installer can involve
+a system service, so the Sandboxie-Plus reusable workflow is scoped to
+EXE setup.
+
 ## 2026-11-05 — Dedicated Sandboxie-Plus capture for reusable profiles
 
 The explicit Windows x64 capture command provisions an owned fresh

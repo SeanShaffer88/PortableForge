@@ -240,8 +240,27 @@ pub fn build_reviewed_profile(
         manifest_sha256,
         installer_tools,
         &output,
-        Some(verify_installer_support),
+        Some(INSTALLER_APP_SHA256),
     )
+}
+
+/// Read-only verification of the official Launcher Generator and its
+/// compiler inputs. No tool is launched.
+pub fn verify_launcher_toolchain(root: &Path) -> Result<(), String> {
+    let root = local_directory(root)?;
+    check_launcher_tools(&root)?;
+    for (name, digest) in PAL_TREES {
+        verify_launcher_tree(&root.join(name), name, digest)?;
+    }
+    Ok(())
+}
+
+/// Read-only verification of the official Installer executables and the
+/// compiler support tree used by wizard replay. No tool is launched.
+pub fn verify_installer_toolchain(root: &Path) -> Result<(), String> {
+    let root = local_directory(root)?;
+    crate::compile::windows::check_tools(&root)?;
+    verify_installer_support(&root)
 }
 
 fn verify_installer_support(root: &Path) -> Result<(), String> {
@@ -280,16 +299,21 @@ fn check_launcher_tools(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn verify_launcher_tree(path: &Path, name: &str, digest: &str) -> Result<(), String> {
+    if tree_sha256(path)? != digest {
+        return Err(format!(
+            "Select the official PortableApps.com Launcher Generator 2.2.9. Its {name} support files differ from the verified bundle."
+        ));
+    }
+    Ok(())
+}
+
 fn stage_launcher_tools(source: &Path, stage: &Path) -> Result<(), String> {
     create_dir(stage)?;
     for (name, sha256) in PAL_TREES {
         let source_tree = source.join(name);
         let stage_tree = stage.join(name);
-        if tree_sha256(&source_tree)? != sha256 {
-            return Err(format!(
-                "Select the official PortableApps.com Launcher Generator 2.2.9. Its {name} support files differ from the verified bundle."
-            ));
-        }
+        verify_launcher_tree(&source_tree, name, sha256)?;
         copy_tree(&source_tree, &stage_tree)?;
         if tree_sha256(&stage_tree)? != sha256 {
             return Err(format!(

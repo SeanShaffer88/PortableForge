@@ -1,22 +1,15 @@
-PortableForge — portable copy
-=============================
+PortableForge portable copy
+===========================
 
-Run portableforge.exe from this folder. Nothing is installed.
+Run portableforge.exe from this folder. Keep portableforge-agent.exe
+beside it. The helper works inside the test box during capture.
 
-Keep portableforge-agent.exe beside portableforge.exe: the helper
-is what works inside the safe test box during a conversion, and
-PortableForge looks for it next to the main program.
+PortableForge stores settings and runs in the PortableForge and
+PortableForge Sessions folders under your Windows user profile.
 
-Your settings and run folders live in your home folder (a
-"PortableForge" folder and "PortableForge Sessions"), not in this
-folder, so you can move or replace this folder freely.
+The bundled folder includes the Sandboxie-Plus 1.18.8 x64 portable payload at
+bundled\Sandboxie-Plus. Sandboxie-Plus portable mode starts a Windows
+service and driver with administrator approval. See SANDBOXIE-NOTICE.txt
+in the bundled folder for startup, cleanup, and licensing.
 
-The bundled folder carries the official Sandboxie-Plus
-installer, untouched, with its licenses and a note explaining
-why it is there (SANDBOXIE-NOTICE.txt). It is what PortableForge
-offers to open when a computer has no test box yet. You can
-delete the bundled folder if you like — the quick test box just
-will not be offered on computers that do not already have it.
-
-This build is unsigned. Windows SmartScreen will warn on first
-run; the release page lists the fingerprints of the genuine files.
+This build is unsigned. The release page lists the genuine file hashes.

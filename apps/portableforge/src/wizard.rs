@@ -15,17 +15,19 @@ use portableforge_core::settings::{self, WizardDraft, WizardSettings};
 
 mod dense;
 mod profiles;
-mod texture;
-
-const ALERT_TEXT: &str = guide::theme::TEXT;
-const CRIMSON: &str = "#76172A";
+mod shell;
+mod theme;
 
 pub struct WizardApp {
     profile_flow: profiles::ProfileFlow,
+    theme_state: theme::State,
+    shell: shell::State,
     step: usize,
     show_details: bool,
     detail_page: usize,
     review_page: usize,
+    review_needs_attention: bool,
+    msi_review_ready: bool,
     safety_page: usize,
     recent_page: usize,
     applied_layout_zoom: f32,
@@ -88,10 +90,14 @@ impl Default for WizardApp {
             .unwrap_or(false);
         Self {
             profile_flow: profiles::ProfileFlow::default(),
+            theme_state: theme::State::default(),
+            shell: shell::State::default(),
             step: 0,
             show_details: false,
             detail_page: 0,
             review_page: 0,
+            review_needs_attention: false,
+            msi_review_ready: false,
             safety_page: 0,
             recent_page: 0,
             applied_layout_zoom: 0.0,
@@ -146,6 +152,76 @@ fn picker_start_dir(current: &str) -> Option<std::path::PathBuf> {
 }
 
 /// A file size in plain words: `812 KB`, `14.2 MB`, `1.3 GB`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SetupKind {
+    Exe,
+    Msi,
+}
+
+impl SetupKind {
+    fn from_path(path: &std::path::Path) -> Option<Self> {
+        let extension = path.extension()?;
+        if extension.eq_ignore_ascii_case("exe") {
+            Some(Self::Exe)
+        } else if extension.eq_ignore_ascii_case("msi") {
+            Some(Self::Msi)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SetupInput {
+    Empty,
+    Missing,
+    Folder,
+    Unsupported,
+    Ready { kind: SetupKind, size: u64 },
+}
+
+impl SetupInput {
+    fn problem(self) -> Option<&'static str> {
+        match self {
+            Self::Empty => Some(guide::SETUP_REQUIRED),
+            Self::Missing => Some(guide::SETUP_MISSING),
+            Self::Folder => Some(guide::SETUP_FOLDER),
+            Self::Unsupported => Some(guide::SETUP_UNSUPPORTED),
+            Self::Ready { .. } => None,
+        }
+    }
+
+    fn allows_verified_picker(self) -> bool {
+        matches!(
+            self,
+            Self::Empty
+                | Self::Ready {
+                    kind: SetupKind::Exe,
+                    ..
+                }
+        )
+    }
+}
+
+fn setup_input(input: &str) -> SetupInput {
+    let input = input.trim();
+    if input.is_empty() {
+        return SetupInput::Empty;
+    }
+    let path = std::path::Path::new(input);
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => SetupInput::Folder,
+        Ok(metadata) if metadata.is_file() => {
+            SetupKind::from_path(path).map_or(SetupInput::Unsupported, |kind| SetupInput::Ready {
+                kind,
+                size: metadata.len(),
+            })
+        }
+        Ok(_) => SetupInput::Unsupported,
+        Err(_) => SetupInput::Missing,
+    }
+}
+
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1_000;
     const MB: u64 = 1_000_000;
@@ -202,103 +278,52 @@ fn test_state_root() -> Option<std::path::PathBuf> {
     }
 }
 
-fn color(hex: &str) -> egui::Color32 {
-    let (r, g, b) = guide::theme::rgb(hex);
-    egui::Color32::from_rgb(r, g, b)
-}
-
-pub fn dark_visuals() -> egui::Visuals {
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = color("#12141A");
-    v.window_fill = color("#12141A");
-    v.extreme_bg_color = color("#23252D");
-    v.faint_bg_color = color("#1C1E25");
-    v.override_text_color = Some(color(guide::theme::TEXT));
-    v.hyperlink_color = color(ALERT_TEXT);
-    v.selection.bg_fill = color(CRIMSON);
-    v.selection.stroke = egui::Stroke::new(1.0_f32, color(guide::theme::ACCENT_RED));
-    v.widgets.active.bg_fill = color(CRIMSON);
-    v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, color("#E5E5E8"));
-    v.widgets.hovered.bg_fill = color(guide::theme::HAIRLINE);
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::TEXT_FAINT));
-    v.widgets.inactive.bg_fill = color("#242630");
-    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::HAIRLINE));
-    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, color(guide::theme::HAIRLINE));
-    let radius = egui::CornerRadius::same(6);
-    for w in [
-        &mut v.widgets.inactive,
-        &mut v.widgets.hovered,
-        &mut v.widgets.active,
-        &mut v.widgets.open,
-        &mut v.widgets.noninteractive,
-    ] {
-        w.corner_radius = radius;
-    }
-    v
-}
-
-/// The whole window style: family colours, rounded widgets,
-/// Fluent-rhythm spacing (4/8/16/24), readable text sizes, and a
-/// short animation time so hovers, scrolls and state changes glide
-/// instead of snapping. Presentation only — no wording lives here.
-pub fn polished_style() -> egui::Style {
-    let mut style = egui::Style {
-        visuals: dark_visuals(),
-        ..Default::default()
-    };
-    style.animation_time = 0.15;
-    style.spacing.item_spacing = egui::vec2(8.0, 4.0);
-    style.spacing.button_padding = egui::vec2(12.0, 5.0);
-    style.spacing.indent = 20.0;
-    style.spacing.interact_size = egui::vec2(42.0, 26.0);
-    style.spacing.slider_width = 180.0;
-    style.text_styles = [
-        (
-            egui::TextStyle::Heading,
-            egui::FontId::new(26.0, egui::FontFamily::Proportional),
-        ),
-        (
-            egui::TextStyle::Body,
-            egui::FontId::new(15.5, egui::FontFamily::Proportional),
-        ),
-        (
-            egui::TextStyle::Button,
-            egui::FontId::new(15.0, egui::FontFamily::Proportional),
-        ),
-        (
-            egui::TextStyle::Small,
-            egui::FontId::new(12.5, egui::FontFamily::Proportional),
-        ),
-        (
-            egui::TextStyle::Monospace,
-            egui::FontId::new(13.5, egui::FontFamily::Monospace),
-        ),
-    ]
-    .into();
-    style
-}
-
-/// A content card: panel fill, hairline edge, soft corners,
-/// comfortable padding. Step controls live on cards so the window
-/// reads as grouped panels instead of text floating on black.
-pub fn card() -> egui::Frame {
+fn card(ui: &egui::Ui) -> egui::Frame {
     egui::Frame::new()
-        .fill(color("#1C1E25"))
-        .stroke(egui::Stroke::new(1.0_f32, color(guide::theme::HAIRLINE)))
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(9))
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .inner_margin(egui::Margin::same(8))
 }
 
 impl WizardApp {
+    fn setup_changed(&mut self) {
+        self.profile_flow.detach_capture();
+        self.layout = None;
+        self.session_mode = None;
+        self.review = Review::default();
+        self.review_page = 0;
+        self.review_needs_attention = false;
+        self.msi_review_ready = false;
+        self.sharing = None;
+        self.hints_applied = false;
+        self.main_exe.clear();
+        self.app_name.clear();
+        self.publisher.clear();
+        self.description.clear();
+        self.homepage.clear();
+        self.package_version = "1.0.0.0".into();
+        self.mark_dirty();
+    }
+
+    fn uses_guided_msi(&self) -> bool {
+        !self.profile_flow.selected_capture
+            && SetupKind::from_path(std::path::Path::new(self.installer_path.trim()))
+                == Some(SetupKind::Msi)
+    }
+
     /// Make the session folder, copy the setup file and the helper
     /// into it, ask the helper for the clean note, and start the test
     /// box (on Windows). Safe to press again — an existing session is
     /// kept and only the box start is retried.
     fn start_test_box(&mut self) {
-        if self.use_verified_capture() {
+        if self.use_verified_capture() || self.uses_guided_msi() {
             return;
         }
         if self.layout.is_none() {
+            if let Some(problem) = setup_input(&self.installer_path).problem() {
+                self.log.push(problem.into());
+                return;
+            }
             let stem = std::path::Path::new(self.installer_path.trim())
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -484,14 +509,17 @@ impl WizardApp {
         // for in order: after-install once its note is missing and the
         // clean note exists, after-runtime likewise.
         let exchange = &layout.exchange;
-        if exchange.join("after-install.json").is_file()
+        let guided_msi = self.uses_guided_msi();
+        if (!guided_msi || self.step == 5)
+            && exchange.join("after-install.json").is_file()
             && !exchange.join("after-runtime.json").is_file()
         {
             let _ = portableforge_core::orchestrate::request_snapshot(
                 &layout,
                 CapturePoint::AfterRuntime,
             );
-        } else if exchange.join("before.json").is_file()
+        } else if (!guided_msi || self.step == 3)
+            && exchange.join("before.json").is_file()
             && !exchange.join("after-install.json").is_file()
         {
             let _ = portableforge_core::orchestrate::request_snapshot(
@@ -535,36 +563,40 @@ impl WizardApp {
         }
     }
 
-    /// Where the bundled quick box installer sits, if this copy of
-    /// PortableForge carries one (release copies do).
-    fn bundled_sbie_path(&self) -> Option<std::path::PathBuf> {
-        let exe = std::env::current_exe().ok()?;
-        let dir = exe.parent()?;
-        portableforge_core::sbie::bundled_installer(dir)
-    }
-
-    /// Verify the bundled installer against its recorded
-    /// fingerprint, then open it. A file that does not match is
-    /// never run — that refusal is the point of carrying the
-    /// fingerprint.
-    fn install_bundled_sbie(&mut self, path: &std::path::Path) {
-        let pin =
-            portableforge_core::tools::pin(portableforge_core::tools::ToolId::SandboxieInstaller);
-        match portableforge_core::tools::verify_tool_file(path, pin) {
-            Ok(()) => match crate::run_program_file(path) {
-                Ok(()) => self.log.push(
-                    "The quick test box installer is opening. When it has finished, press Check again."
-                        .to_string(),
-                ),
-                Err(e) => self.log.push(e),
-            },
-            Err(e) => self.log.push(e),
-        }
+    pub(super) fn show_bundled_test_box_help(&mut self, ui: &mut egui::Ui) {
+        let folder = std::env::current_exe().ok().and_then(|exe| {
+            let folder = exe.parent()?.join("bundled").join("Sandboxie-Plus");
+            folder.join("SandMan.exe").is_file().then_some(folder)
+        });
+        ui.horizontal_wrapped(|ui| {
+            let open = ui
+                .add_enabled(folder.is_some(), egui::Button::new("Open bundled test box folder"))
+                .on_disabled_hover_text("The portable test box files are missing from this copy.");
+            if open.clicked() {
+                if let Some(folder) = folder {
+                    if let Err(error) = open_folder(&folder) {
+                        self.log.push(error);
+                    }
+                }
+            }
+            dense::view_text(
+                ui,
+                "Portable test box instructions",
+                "Start the bundled test box",
+                "Copy the whole bundled Sandboxie-Plus folder to a new protected local folder under Program Files.\n\nOpen SandMan.exe from that copy and approve its administrator prompts to start the Sandboxie-Plus service and driver.\n\nReturn to Capture with Sandboxie-Plus in PortableForge and choose Check prerequisites.\n\nWhen finished with the portable test box, close SandMan and choose Yes when it asks to clean up the services it created.",
+                true,
+            );
+        });
     }
 
     fn finish_capture(&mut self, layout: &portableforge_core::orchestrate::SessionLayout) {
         match portableforge_core::orchestrate::post_capture(layout) {
-            Ok(outcome) => self.apply_capture(outcome),
+            Ok(outcome) => {
+                self.apply_capture(outcome);
+                if self.uses_guided_msi() {
+                    self.msi_review_ready = true;
+                }
+            }
             Err(error) => self.log.push(error),
         }
     }
@@ -761,6 +793,8 @@ impl WizardApp {
         WizardDraft {
             step: if self.use_verified_capture() {
                 "pick"
+            } else if self.uses_guided_msi() && self.step > 1 {
+                "safety"
             } else {
                 STEPS[self.step].id
             }
@@ -775,6 +809,8 @@ impl WizardApp {
             online_url: self.online_url.clone(),
             online_sha: self.online_sha.clone(),
             force_sandbox: self.force_sandbox,
+            cleaned_capture: self.profile_flow.cleaned_capture.clone(),
+            profile_update_base: self.profile_flow.update_base.clone(),
         }
     }
 
@@ -806,7 +842,7 @@ impl WizardApp {
     }
 
     /// Take up the unfinished run the settings remembered.
-    fn resume_draft(&mut self) {
+    fn resume_draft(&mut self, ctx: &egui::Context) {
         let Some(draft) = self.settings.draft.clone() else {
             return;
         };
@@ -826,6 +862,13 @@ impl WizardApp {
             self.step = pos;
         }
         self.resume_offer = false;
+        self.profile_flow.update_base = draft.profile_update_base;
+        if let Some(capture) = draft.cleaned_capture {
+            self.restore_cleaned_capture(ctx, capture);
+        } else if self.profile_flow.update_base.is_some() {
+            self.enter_verified_capture();
+            self.check_prerequisites(ctx);
+        }
         self.mark_dirty();
         self.log
             .push("Picked up your unfinished run where you left it.".to_string());
@@ -862,14 +905,39 @@ impl WizardApp {
             && !self.profile_flow.busy()
             && !self.profile_flow.profile_saved()
             && !(self.use_verified_capture() && self.step == 2 && self.profile_flow.captured)
+            && !(self.uses_guided_msi() && self.step == 2 && self.layout.is_some())
     }
 
     fn can_advance(&self) -> bool {
         if self.profile_flow.busy() {
             return false;
         }
+        if self.step == 0 {
+            return matches!(setup_input(&self.installer_path), SetupInput::Ready { .. });
+        }
+        if self.uses_guided_msi() {
+            let note = |name| {
+                self.layout
+                    .as_ref()
+                    .is_some_and(|layout| layout.exchange.join(name).is_file())
+            };
+            match self.step {
+                1 => {
+                    return self
+                        .profile_flow
+                        .msi_ready
+                        .as_ref()
+                        .is_some_and(Result::is_ok)
+                }
+                2 => return note("before.json"),
+                3 => return note("after-install.json"),
+                5 => return self.msi_review_ready,
+                _ => {}
+            }
+        }
         match (self.use_verified_capture(), self.step) {
             (true, 2) => self.profile_flow.captured,
+            (true, 6) => self.review.all_acknowledged(),
             (true, 9) => self.profile_flow.profile_saved(),
             _ => true,
         }
@@ -894,22 +962,11 @@ impl WizardApp {
         }
         let blocked = match STEPS[self.step].id {
             "pick" => {
-                if self.installer_path.trim().is_empty() {
-                    self.log.push(
-                        "Pick the program's setup file first — type its full path above."
-                            .to_string(),
-                    );
-                    true
-                } else if !std::path::Path::new(self.installer_path.trim()).exists() {
-                    self.log.push(format!(
-                        "We could not find a file at {} — check the path and try again.",
-                        self.installer_path.trim()
-                    ));
-                    true
-                } else {
-                    self.settings.remember_installer(self.installer_path.trim());
-                    false
+                self.settings.remember_installer(self.installer_path.trim());
+                if self.uses_guided_msi() {
+                    self.force_sandbox = false;
                 }
+                false
             }
             "name" => {
                 if self.app_name.trim().is_empty() {
@@ -996,31 +1053,22 @@ impl WizardApp {
 
 impl eframe::App for WizardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.set_style(polished_style());
         self.apply_layout_zoom(ctx);
+        self.theme_state.apply(ctx, self.settings.appearance);
         if self.finished {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        self.poll_profile_work();
+        self.poll_profile_work(ctx);
         if self.profile_flow.busy() && ctx.input(|input| input.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         self.persist_if_due();
+        self.handle_shell_keys(ctx);
+        self.update_heading_focus(ctx);
         if self.profile_flow.replay_open {
             self.show_profile_replay(ctx);
+            self.show_shell_popup(ctx);
             return;
-        }
-
-        // Keyboard: Enter continues and Escape goes back — but never
-        // while the person is typing in a box, where those keys are
-        // theirs.
-        let typing = ctx.memory(|m| m.focused().is_some() || m.top_modal_layer().is_some());
-        if !typing && !self.show_details {
-            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                self.advance();
-            } else if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.go_back();
-            }
         }
 
         // Drag-and-drop: dropping the setup file anywhere on the pick
@@ -1031,7 +1079,7 @@ impl eframe::App for WizardApp {
                 self.installer_path = path.to_string_lossy().into_owned();
                 self.settings
                     .remember_installer(&self.installer_path.clone());
-                self.mark_dirty();
+                self.setup_changed();
                 self.log.push(format!(
                     "Setup file chosen: {}",
                     self.installer_path.clone()
@@ -1041,68 +1089,88 @@ impl eframe::App for WizardApp {
 
         let step = &STEPS[self.step];
         let verified = self.use_verified_capture();
-        let (title, what_happens, what_you_do) = match (verified, step.id) {
-            (_, "pick") => (
-                "Choose a setup file",
-                "Browse, paste a path, or drag in a setup file.",
-                "",
+        let guided_msi = self.uses_guided_msi();
+        let (title, what_happens, what_you_do) = match (guided_msi, step.id) {
+            (true, "safety") => (
+                "Check Windows Sandbox",
+                "MSI setup runs inside Windows Sandbox.",
+                "The guided steps prepare a package folder.",
             ),
             (true, "clean") => (
-                "Capture with Sandboxie-Plus",
-                "Run setup and the installed app in a dedicated Sandboxie-Plus box.",
-                "Review opens after cleanup is confirmed.",
+                "Prepare the MSI test box",
+                "Choose any companion files before starting Windows Sandbox.",
+                "Wait for the clean note before opening setup.",
             ),
-            (true, "changes") => (
-                "Review captured changes",
-                "Review the location and suggested fix for each change.",
-                "Select the settings the portable copy should keep.",
+            (true, "install") => (
+                "Install the app in Windows Sandbox",
+                r"Open the selected MSI from C:\PortableForge\Input inside the box.",
+                "Tell PortableForge when setup finishes.",
             ),
-            (true, "name") => (
-                "Name your portable copy",
-                "Review the app details that appear in the installer.",
-                "Enter a publisher, homepage and short description.",
+            (true, "try") => (
+                "Try the installed app",
+                "Open the app inside Windows Sandbox and try the settings you want to keep.",
+                "Continue when you are ready to close it.",
             ),
-            (true, "sharing") => (
-                "Confirm redistribution rights",
-                "Confirm that you have permission to include the app files.",
-                "A saved profile contains a copy of the app.",
+            (true, "close") => (
+                "Close the installed app",
+                "Keep Windows Sandbox open while PortableForge takes its last note.",
+                "Tell PortableForge when the app has closed.",
             ),
-            (true, "build") => (
-                "Save a reusable profile",
-                "Save the app files and fixes you approved.",
-                "Use the saved profile to build again from the same setup file.",
-            ),
-            (true, "done") => (
-                "Your profile is ready",
-                "The reviewed profile is saved.",
-                "Build installer becomes available when the approval is saved.",
-            ),
-            _ => (step.title, step.what_happens, step.what_you_do),
+            _ => match (verified, step.id) {
+                (_, "pick") => (step.title, step.what_happens, step.what_you_do),
+                (true, "clean") => (
+                    "Check your setup",
+                    "Check the dedicated box and packaging tools before starting capture.",
+                    "Review opens after cleanup is confirmed.",
+                ),
+                (true, "changes") => (
+                    "Review captured changes",
+                    "Review the location and suggested fix for each change.",
+                    "Select the settings the portable copy should keep.",
+                ),
+                (true, "name") => (
+                    "Name your portable copy",
+                    "Review the app details that appear in the installer.",
+                    "Enter a publisher, homepage and short description.",
+                ),
+                (true, "sharing") => (
+                    "Confirm redistribution rights",
+                    "Confirm that you have permission to include the app files.",
+                    "A saved profile contains a copy of the app.",
+                ),
+                (true, "build") => (
+                    "Save a reusable profile",
+                    "Save the app files and fixes you approved.",
+                    "Use the saved profile to build again from the same setup file.",
+                ),
+                (true, "done") => (
+                    "Your profile is ready",
+                    "The reviewed profile is saved.",
+                    "Build installer becomes available when the approval is saved.",
+                ),
+                _ => (step.title, step.what_happens, step.what_you_do),
+            },
         };
         self.show_header(ctx, step.title, Some((self.step + 1, STEPS.len())));
-        self.show_navigation(ctx, step.id, verified);
+        self.show_navigation(ctx, what_you_do);
         egui::CentralPanel::default()
             .frame(dense::content_frame(ctx))
             .show(ctx, |ui| {
-            texture::paint(ui);
             if self.show_details {
                 self.show_step_details(ui, step);
                 return;
             }
             dense::heading(ui, title, what_happens);
-            if !what_you_do.is_empty() {
-                ui.label(egui::RichText::new(what_you_do).color(color(guide::theme::TEXT_MUTED)));
-            }
             // An unfinished run from last time is offered, never forced.
             if self.resume_offer && step.id == "pick" {
                 ui.horizontal(|ui| {
-                    ui.colored_label(color(ALERT_TEXT), "Unfinished run");
+                    ui.colored_label(ui.visuals().error_fg_color, "Unfinished run");
                     if ui
                         .button("Pick up where I left off")
                         .on_hover_text("Fill the steps back in with what you had entered.")
                         .clicked()
                     {
-                        self.resume_draft();
+                        self.resume_draft(ctx);
                     }
                     if ui
                         .button("Start again")
@@ -1115,7 +1183,7 @@ impl eframe::App for WizardApp {
             }
 
             // Compute the safety report the first time its step shows.
-            if step.id == "safety" && self.preflight.is_none() {
+            if step.id == "safety" && !guided_msi && self.preflight.is_none() {
                 let mut facts = crate::collect_preflight_facts();
                 facts.sandbox_override = self.force_sandbox;
                 self.preflight = Some(evaluate_preflight(&facts));
@@ -1124,16 +1192,17 @@ impl eframe::App for WizardApp {
 
             // Per-step intent collection (the core decides what it means).
             match step.id {
+                "safety" if guided_msi => self.show_msi_safety(ui),
                 "safety" => {
                     let mut override_change: Option<bool> = None;
                     if let Some(report) = &self.preflight {
-                        card().show(ui, |ui| {
+                        card(ui).show(ui, |ui| {
                         for index in dense::page(ui, &mut self.safety_page, report.checks.len(), 1, "Check") {
                             let check = &report.checks[index];
                             let col = if check.ok {
-                                color(guide::theme::TEXT)
+                                ui.visuals().text_color()
                             } else {
-                                color(ALERT_TEXT)
+                                ui.visuals().error_fg_color
                             };
                             // The tick / cross is DRAWN, not a
                             // character: the bundled font has no
@@ -1186,7 +1255,7 @@ impl eframe::App for WizardApp {
                             if !check.fix.is_empty() {
                                 ui.label(
                                     egui::RichText::new(format!("     {}", check.fix))
-                                        .color(color(guide::theme::TEXT_MUTED)),
+                                        .color(ui.visuals().weak_text_color()),
                                 );
                             }
                             if let Some(copy) = &check.copy_text {
@@ -1205,7 +1274,7 @@ impl eframe::App for WizardApp {
                         let (name, honesty) = report.best_mode.describe();
                         ui.label(format!("Way we will use: {name}"));
                         ui.label(
-                            egui::RichText::new(honesty).color(color(guide::theme::TEXT_MUTED)),
+                            egui::RichText::new(honesty).color(ui.visuals().weak_text_color()),
                         );
                         if report.best_mode != portableforge_core::wsb::SandboxMode::WindowsSandbox {
                             ui.add_space(6.0);
@@ -1230,35 +1299,16 @@ impl eframe::App for WizardApp {
                         self.mark_dirty();
                         self.persist_now();
                     }
-                    // The bundled way in: when this computer has no
-                    // quick test box yet, offer the installer
-                    // PortableForge carries with it (untouched,
-                    // fingerprint-checked before it ever runs) —
-                    // and a fresh check for afterwards.
                     let sbie_missing = self
                         .preflight_facts
                         .as_ref()
                         .map(|f| !f.sandboxie_present)
                         .unwrap_or(false);
                     if sbie_missing {
-                        ui.add_space(8.0);
-                        if let Some(bundled) = self.bundled_sbie_path() {
-                            if ui
-                                .button("Install the quick test box now")
-                                .on_hover_text("This opens the quick box's own installer, which PortableForge carries with it untouched. Windows will ask for an administrator's OK, because the quick box works deep in the system. When it has finished, press Check again.")
-                                .clicked()
-                            {
-                                self.install_bundled_sbie(&bundled);
-                            }
-                            ui.label(
-                                egui::RichText::new("The quick test box is a separate free program. PortableForge carries its installer untouched and checks its fingerprint before opening it.")
-                                    .color(color(guide::theme::TEXT_MUTED)),
-                            );
-                            ui.add_space(4.0);
-                        }
+                        self.show_bundled_test_box_help(ui);
                         if ui
                             .button("Check again")
-                            .on_hover_text("Look at this computer once more — for after the quick test box has been installed.")
+                            .on_hover_text("Refresh the standard wizard's system checks.")
                             .clicked()
                         {
                             let mut facts = crate::collect_preflight_facts();
@@ -1271,56 +1321,97 @@ impl eframe::App for WizardApp {
                     }
                 }
                 "changes" => {
+                    if verified {
+                        self.show_update_review(ui);
+                    }
                     if self.review.items.is_empty() {
                         ui.label(
                             egui::RichText::new(
                                 "Nothing here yet — this list fills in after the program has been tried in the test box.",
                             )
-                            .color(color(guide::theme::TEXT_MUTED)),
+                            .color(ui.visuals().weak_text_color()),
                         );
                     } else {
-                        ui.label(dense::review_counts(&self.review));
+                        if verified {
+                            let count = self.review.items.iter().filter(|item| {
+                                matches!(item.decision, portableforge_core::review::Decision::Acknowledge { seen: false })
+                            }).count();
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.selectable_label(!self.review_needs_attention, "All findings").clicked() {
+                                    self.review_needs_attention = false;
+                                    self.review_page = 0;
+                                }
+                                if ui.selectable_label(self.review_needs_attention, format!("Needs attention ({count})")).clicked() {
+                                    self.review_needs_attention = true;
+                                    self.review_page = 0;
+                                }
+                                ui.label(dense::review_counts(&self.review));
+                            });
+                        } else {
+                            ui.label(dense::review_counts(&self.review));
+                        }
                         let mut items = std::mem::take(&mut self.review.items);
-                        let per_page = ((ui.available_height() - 62.0) / 132.0).floor().max(1.0) as usize;
-                        let range = dense::page(ui, &mut self.review_page, items.len(), per_page, "Finding");
+                        let visible = items.iter().enumerate().filter_map(|(index, item)| {
+                            (!verified || !self.review_needs_attention || matches!(
+                                item.decision, portableforge_core::review::Decision::Acknowledge { seen: false }
+                            )).then_some(index)
+                        }).collect::<Vec<_>>();
+                        let range = dense::page(ui, &mut self.review_page, visible.len(), 1, "Finding");
+                        if visible.is_empty() {
+                            ui.label("All warnings have been reviewed.");
+                        }
                         for index in range {
-                            let item = &mut items[index];
-                            card().show(ui, |ui| {
+                            let item_index = visible[index];
+                            let item = &mut items[item_index];
+                            ui.push_id(("review-finding", item_index), |ui| {
+                            card(ui).show(ui, |ui| {
                             let (title, body) = guide::plain_card(&item.classification.finding);
+                            let excluded_fix = verified
+                                && matches!(item.decision, portableforge_core::review::Decision::Fix { .. })
+                                && !self.profile_flow.review_fix_supported(&item.classification.finding);
                             ui.label(egui::RichText::new(title).strong());
-                            ui.label(
-                                egui::RichText::new(body)
-                                    .color(color(guide::theme::TEXT_MUTED)),
-                            );
+                            if !excluded_fix {
+                                ui.label(
+                                    egui::RichText::new(body)
+                                        .color(ui.visuals().weak_text_color()),
+                                );
+                            }
                             if verified {
                                 use portableforge_core::classify::Finding;
 
-                                match &item.classification.finding {
-                                    Finding::DirectoriesMove { host_pattern, .. } => ui.label(host_pattern),
-                                    Finding::FilesMove { host_pattern, data_target } => {
-                                        ui.label(format!("{host_pattern}\\{data_target}"))
-                                    }
+                                let location = match &item.classification.finding {
+                                    Finding::DirectoriesMove { host_pattern, .. } => std::borrow::Cow::Borrowed(host_pattern.as_str()),
+                                    Finding::FilesMove { host_pattern, data_target } => std::borrow::Cow::Owned(format!("{host_pattern}\\{data_target}")),
                                     Finding::RegistryKey { key }
                                     | Finding::AssociationCandidate { key }
-                                    | Finding::UninstallMetadata { key } => ui.label(key),
+                                    | Finding::UninstallMetadata { key } => std::borrow::Cow::Borrowed(key.as_str()),
                                     Finding::AppFile { path }
-                                    | Finding::FileWriteRewrite { path, .. } => ui.label(path),
-                                    Finding::RedFlag { detail, .. } => ui.label(detail),
+                                    | Finding::FileWriteRewrite { path, .. } => std::borrow::Cow::Borrowed(path.as_str()),
+                                    Finding::RedFlag { detail, .. } => std::borrow::Cow::Borrowed(detail.as_str()),
                                 };
+                                if dense::path_needs_view(ui, &location, ui.available_width()) {
+                                    dense::view_text(ui, "View location", "Finding location", &location, true);
+                                } else {
+                                    ui.label(location.as_ref());
+                                }
                             }
                             match &mut item.decision {
                                 portableforge_core::review::Decision::Fix { on } => {
-                                    if verified && !self.profile_flow.review_fix_supported(&item.classification.finding) {
-                                        ui.label("This change will be excluded.");
+                                    if excluded_fix {
+                                        ui.label(self.profile_flow.exclusion_reason(&item.classification.finding));
                                     } else {
                                         ui.checkbox(on, "Apply this fix");
                                     }
                                 }
                                 portableforge_core::review::Decision::Acknowledge { seen } => {
+                                    if verified {
+                                        ui.label(self.profile_flow.exclusion_reason(&item.classification.finding));
+                                    }
                                     ui.checkbox(seen, "Acknowledge warning");
                                 }
                                 portableforge_core::review::Decision::Info => {}
                             }
+                            });
                             });
                         }
                         self.review.items = items;
@@ -1390,7 +1481,7 @@ impl eframe::App for WizardApp {
                                 &guide::WELCOME.join("\n"), true);
                         });
                     }
-                    let setup_label = ui.label("Where is the program's setup file?");
+                    let setup_label = ui.label("Setup file (.exe or .msi)");
                     ui.horizontal(|ui| {
                         let width = dense::width_with_button(ui, "Browse…");
                         let (response, view) = dense::path_edit(ui, &mut self.installer_path, width);
@@ -1401,7 +1492,7 @@ impl eframe::App for WizardApp {
                             )
                             .changed()
                         {
-                            self.mark_dirty();
+                            self.setup_changed();
                         }
                         if ui
                             .button("Browse…")
@@ -1410,8 +1501,7 @@ impl eframe::App for WizardApp {
                         {
                             let mut dialog = rfd::FileDialog::new()
                                 .set_title("Pick the program's setup file")
-                                .add_filter("Setup files", &["exe", "msi", "zip"])
-                                .add_filter("All files", &["*"]);
+                                .add_filter("Setup files", &["exe", "msi"]);
                             if let Some(dir) = picker_start_dir(&self.installer_path) {
                                 dialog = dialog.set_directory(dir);
                             }
@@ -1419,50 +1509,37 @@ impl eframe::App for WizardApp {
                                 self.installer_path = path.to_string_lossy().into_owned();
                                 self.settings
                                     .remember_installer(&self.installer_path.clone());
-                                self.mark_dirty();
+                                self.setup_changed();
                             }
                         }
                         dense::view_text(ui, "View path", "Setup path", &self.installer_path, view);
                     });
-                    // Say plainly what the typed path points at.
                     let typed = self.installer_path.trim().to_string();
-                    if !typed.is_empty() {
-                        match std::fs::metadata(&typed) {
-                            Ok(md) if md.is_file() => {
-                                let name = std::path::Path::new(&typed)
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_default();
-                                ui.label(format!(
-                                    "That file is {} — {}.",
-                                    format_size(md.len()),
-                                    name
-                                ));
-                            }
-                            Ok(_) => {
-                                ui.label(
-                                    egui::RichText::new(
-                                        "That path is a folder — pick the setup file inside it.",
-                                    )
-                                    .color(color(ALERT_TEXT)),
-                                );
-                            }
-                            Err(_) => {
-                                ui.label(
-                                    egui::RichText::new(
-                                        "We can't find a file there yet — check the path, or use Browse.",
-                                    )
-                                    .color(color(guide::theme::TEXT_MUTED)),
-                                );
-                            }
-                        }
+                    let input = setup_input(&typed);
+                    if let SetupInput::Ready { size, .. } = input {
+                        let name = std::path::Path::new(&typed).file_name().unwrap_or_default().to_string_lossy();
+                        let description = format!("Ready · {name} · {}", format_size(size));
+                        ui.add(egui::Label::new(&description).truncate()).on_hover_text(description);
+                    } else if let Some(problem) = input.problem() {
+                        let color = if input == SetupInput::Empty {
+                            ui.visuals().weak_text_color()
+                        } else {
+                            ui.visuals().error_fg_color
+                        };
+                        ui.colored_label(color, problem);
                     }
-                    ui.add_space(8.0);
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button("Capture with Sandboxie-Plus").clicked() {
+                        if !guided_msi
+                            && ui.add_enabled(input.allows_verified_picker(), egui::Button::new("Capture with Sandboxie-Plus")).clicked()
+                            && setup_input(&self.installer_path).allows_verified_picker()
+                        {
                             self.enter_verified_capture();
+                            self.check_prerequisites(ctx);
                         }
-                        if ui.button("Rebuild from a saved profile").clicked() {
+                        if ui.button("Open saved profiles")
+                            .on_hover_text("Rebuild with a saved profile and its original setup file.")
+                            .clicked()
+                        {
                             self.open_profile_replay(false);
                         }
                     });
@@ -1471,28 +1548,23 @@ impl eframe::App for WizardApp {
                     let others: Vec<&String> =
                         recents.iter().filter(|p| p.as_str() != typed).collect();
                     if !others.is_empty() {
-                        ui.add_space(6.0);
-                        ui.label(
-                            egui::RichText::new("Setup files you used lately:")
-                                .color(color(guide::theme::TEXT_MUTED)),
-                        );
-                        for index in dense::page(ui, &mut self.recent_page, others.len(), 1, "File") {
-                            let path = others[index];
-                            let name = std::path::Path::new(path)
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| path.clone());
-                            if ui
-                                .button(name)
-                                .on_hover_text(path.clone())
-                                .clicked()
-                            {
-                                self.installer_path = path.clone();
-                                self.mark_dirty();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new("Recent setup files").weak());
+                            for index in dense::page(ui, &mut self.recent_page, others.len(), 1, "File") {
+                                let path = others[index];
+                                let name = std::path::Path::new(path)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.clone());
+                                if ui.button(name).on_hover_text(path.clone()).clicked() {
+                                    self.installer_path = path.clone();
+                                    self.setup_changed();
+                                }
                             }
-                        }
+                        });
                     }
                 }
+                "clean" if guided_msi => self.show_msi_capture(ui),
                 "clean" => {
                     if verified {
                         self.show_verified_capture(ui);
@@ -1530,6 +1602,13 @@ impl eframe::App for WizardApp {
                         }
                     }
                 }
+                "install" | "close" if guided_msi => {
+                    let label = if self.step == 3 { "MSI setup finished" } else { "App is closed" };
+                    if ui.button(label).clicked() {
+                        self.check_test_box();
+                    }
+                }
+                "try" if guided_msi => {}
                 "install" | "try" | "close" => {
                     if ui
                         .button("Check on the test box")
@@ -1625,9 +1704,9 @@ impl eframe::App for WizardApp {
                         self.mark_dirty();
                     }
                     if let Some(error) = self.verified_metadata_error() {
-                        ui.colored_label(color(ALERT_TEXT), error);
+                        ui.colored_label(ui.visuals().error_fg_color, error);
                     } else if !portableforge_core::paf::valid_package_version(self.package_version.trim()) {
-                        ui.colored_label(color(ALERT_TEXT), "Use four numbers with dots between them, like 1.0.0.0.");
+                        ui.colored_label(ui.visuals().error_fg_color, "Use four numbers with dots between them, like 1.0.0.0.");
                     }
                     if !verified && self.show_icon_field(ui) {
                         self.mark_dirty();
@@ -1648,7 +1727,7 @@ impl eframe::App for WizardApp {
                         }
                         ui.label(
                             egui::RichText::new(option.explanation)
-                                .color(color(guide::theme::TEXT_MUTED)),
+                                .color(ui.visuals().weak_text_color()),
                         );
                         ui.add_space(4.0);
                     }
@@ -1672,6 +1751,7 @@ impl eframe::App for WizardApp {
 
             let _ = self.phase();
         });
+        self.show_shell_popup(ctx);
     }
 }
 
@@ -1686,13 +1766,124 @@ pub fn run_gui() -> eframe::Result<()> {
     eframe::run_native(
         "PortableForge",
         options,
-        Box::new(|_cc| Ok(Box::new(WizardApp::default()))),
+        Box::new(|cc| {
+            theme::install_fonts(&cc.egui_ctx);
+            Ok(Box::new(WizardApp::default()))
+        }),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pick_validation_controls_both_routes() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("portableforge-pick-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let exe = root.join("Example Setup.EXE");
+        let msi = root.join("Example Setup.MSI");
+        let zip = root.join("Example Setup.zip");
+        for path in [&exe, &msi, &zip] {
+            std::fs::write(path, b"inert test bytes").unwrap();
+        }
+        let missing = root.join("Missing Setup.exe");
+        let mut wizard = WizardApp {
+            settings: WizardSettings::default(),
+            ..Default::default()
+        };
+        for (path, expected, continue_ready, verified_picker) in [
+            (" ".into(), SetupInput::Empty, false, true),
+            (root.to_string_lossy(), SetupInput::Folder, false, false),
+            (missing.to_string_lossy(), SetupInput::Missing, false, false),
+            (zip.to_string_lossy(), SetupInput::Unsupported, false, false),
+            (
+                exe.to_string_lossy(),
+                SetupInput::Ready {
+                    kind: SetupKind::Exe,
+                    size: 16,
+                },
+                true,
+                true,
+            ),
+            (
+                msi.to_string_lossy(),
+                SetupInput::Ready {
+                    kind: SetupKind::Msi,
+                    size: 16,
+                },
+                true,
+                false,
+            ),
+        ] {
+            wizard.installer_path = path.into_owned();
+            let observed = setup_input(&wizard.installer_path);
+            assert_eq!(observed, expected);
+            assert_eq!(observed.allows_verified_picker(), verified_picker);
+            assert_eq!(observed.problem().is_none(), continue_ready);
+            assert_eq!(
+                wizard.current_wizard_action(),
+                Some((shell::WizardAction::Continue, continue_ready))
+            );
+            if !continue_ready {
+                assert!(!wizard.advance());
+                assert_eq!(wizard.step, 0);
+            }
+        }
+        assert!(wizard.advance());
+        assert_eq!(wizard.step, 1);
+        assert_eq!(
+            wizard.settings.recent_installers,
+            vec![msi.to_string_lossy()]
+        );
+        for path in [exe, msi, zip] {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn changing_setup_detaches_previous_capture_and_approval() {
+        let mut wizard = WizardApp::default();
+        wizard.profile_flow.captured = true;
+        wizard.profile_flow.cleaned_capture = Some(settings::CleanedCapture {
+            folder: "old-capture".into(),
+            receipt_sha256: "a".repeat(64),
+        });
+        wizard.main_exe = "old.exe".into();
+        wizard.sharing = Some(SharingAnswer::IMadeIt);
+        wizard.installer_path = "replacement.exe".into();
+        wizard.setup_changed();
+        assert!(!wizard.profile_flow.captured);
+        assert!(wizard.profile_flow.cleaned_capture.is_none());
+        assert!(wizard.main_exe.is_empty());
+        assert!(wizard.sharing.is_none());
+        assert_eq!(wizard.installer_path, "replacement.exe");
+    }
+
+    #[test]
+    fn guided_msi_requires_its_own_preflight_even_with_override() {
+        let mut wizard = WizardApp {
+            installer_path: "selected.MSI".into(),
+            step: 1,
+            force_sandbox: true,
+            ..Default::default()
+        };
+        assert!(wizard.uses_guided_msi());
+        assert!(!wizard.use_verified_capture());
+        assert!(!wizard.can_advance());
+        wizard.profile_flow.msi_ready = Some(Err("Windows Sandbox unavailable".into()));
+        assert!(!wizard.can_advance());
+        wizard.profile_flow.msi_ready = Some(Ok(()));
+        assert!(wizard.can_advance());
+        wizard.step = 2;
+        assert!(!wizard.can_advance());
+    }
 
     #[test]
     fn sizes_read_plainly() {
@@ -1789,6 +1980,7 @@ mod tests {
             let lower = lit
                 .to_ascii_lowercase()
                 .replace("sandboxie-plus", "")
+                .replace("windows sandbox", "")
                 .replace("launcher generator", "")
                 .replace("sha-256", "");
             for banned in portableforge_core::guide::BANNED_IN_PRIMARY {

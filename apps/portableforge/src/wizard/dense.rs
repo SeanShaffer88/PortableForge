@@ -2,27 +2,55 @@
 
 use eframe::egui;
 
-use super::{color, guide, picker_start_dir, WizardApp};
+use super::{guide, picker_start_dir, shell, theme, WizardApp};
 
 pub(super) const MIN_CONTENT: [f32; 2] = [640.0, 480.0];
 
 pub(super) fn content_frame(ctx: &egui::Context) -> egui::Frame {
-    egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(16, 8))
+    let style = ctx.style();
+    egui::Frame::central_panel(&style)
+        .fill(style.visuals.window_fill)
+        .inner_margin(style.spacing.window_margin)
 }
 
 pub(super) fn heading(ui: &mut egui::Ui, title: &str, description: &str) {
-    ui.heading(title);
-    ui.label(egui::RichText::new(description).color(color(guide::theme::TEXT_MUTED)));
+    let heading = ui.add(
+        egui::Label::new(egui::RichText::new(title).heading().strong())
+            .sense(egui::Sense::focusable_noninteractive()),
+    );
+    shell::register_heading(ui, &heading);
+    if !description.is_empty() {
+        ui.label(egui::RichText::new(description).weak());
+    }
 }
 
-pub(super) fn primary(label: &str) -> egui::Button<'_> {
-    egui::Button::new(
-        egui::RichText::new(label)
-            .strong()
-            .color(color(guide::theme::TEXT)),
-    )
-    .fill(color(super::CRIMSON))
-    .min_size(egui::vec2(150.0, 30.0))
+pub(super) fn primary_action(ui: &mut egui::Ui, enabled: bool, label: &str) -> egui::Response {
+    let palette = theme::palette(ui.ctx());
+    let response = ui
+        .scope(|ui| {
+            let visuals = &mut ui.style_mut().visuals;
+            for (widget, fill) in [
+                (&mut visuals.widgets.inactive, palette.action),
+                (&mut visuals.widgets.hovered, palette.action_hover),
+                (&mut visuals.widgets.active, palette.action_pressed),
+                (&mut visuals.widgets.open, palette.action_pressed),
+            ] {
+                widget.bg_fill = theme::rgb(fill);
+                widget.weak_bg_fill = theme::rgb(fill);
+                widget.bg_stroke = egui::Stroke::NONE;
+            }
+            ui.add_enabled(
+                enabled,
+                egui::Button::new(
+                    egui::RichText::new(label)
+                        .strong()
+                        .color(theme::rgb(palette.action_foreground)),
+                ),
+            )
+        })
+        .inner;
+    theme::focus_outline(ui, &response);
+    response
 }
 
 pub(super) fn width_with_button(ui: &egui::Ui, label: &str) -> f32 {
@@ -42,9 +70,12 @@ pub(super) fn button_width(ui: &egui::Ui, label: &str) -> f32 {
 
 pub(super) fn text_field(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
     let heading = ui.label(label);
-    ui.add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY))
-        .labelled_by(heading.id)
-        .changed()
+    ui.add_sized(
+        [ui.available_width(), ui.spacing().interact_size.y],
+        egui::TextEdit::singleline(value),
+    )
+    .labelled_by(heading.id)
+    .changed()
 }
 
 pub(super) fn review_counts(review: &portableforge_core::review::Review) -> String {
@@ -113,7 +144,7 @@ fn diagnostic_in_height(ui: &mut egui::Ui, text: &str, selected: &mut usize, hei
         fonts.layout(
             text.to_owned(),
             font,
-            color(guide::theme::TEXT),
+            ui.visuals().text_color(),
             ui.available_width(),
         )
     });
@@ -149,7 +180,7 @@ pub(super) fn path_edit(
     width: f32,
 ) -> (egui::Response, bool) {
     let mut layout = |ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32| {
-        let font = egui::TextStyle::Body.resolve(ui.style());
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
         let mut job = egui::text::LayoutJob::simple(
             text.as_str().to_owned(),
             font,
@@ -175,7 +206,12 @@ pub(super) fn path_edit(
     } else {
         egui::TextEdit::singleline(value)
     };
-    let response = ui.add(editor.desired_width(field_width));
+    let response = ui.add_sized(
+        [field_width, ui.spacing().interact_size.y],
+        editor
+            .font(egui::TextStyle::Monospace)
+            .desired_width(field_width),
+    );
     if response.changed() {
         value.retain(|c| !matches!(c, '\r' | '\n' | '\t'));
     }
@@ -235,115 +271,114 @@ impl WizardApp {
         section: &str,
         step: Option<(usize, usize)>,
     ) {
-        egui::TopBottomPanel::top("wizard-header").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("PortableForge")
-                        .strong()
-                        .color(color(super::ALERT_TEXT)),
-                );
-                if let Some((index, total)) = step {
-                    ui.label(egui::RichText::new(format!("Step {index} of {total}")).small());
-                } else {
-                    ui.label(egui::RichText::new(section).small());
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    for (label, value) in
-                        [("Extra large", 1.5f32), ("Large", 1.25), ("Standard", 1.0)]
-                    {
-                        if ui
-                            .selectable_label(self.settings.text_scale() == value, label)
-                            .on_hover_text("Set the wizard text size.")
-                            .clicked()
-                        {
-                            self.settings.text_scale = value;
-                            self.settings_dirty = true;
-                        }
+        let visuals = &ctx.style().visuals;
+        let frame = egui::Frame::new()
+            .fill(visuals.window_fill)
+            .stroke(visuals.widgets.noninteractive.bg_stroke)
+            .inner_margin(egui::Margin::symmetric(12, 4));
+        egui::TopBottomPanel::top("wizard-header")
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("PortableForge").strong());
+                    if step.is_none() {
+                        ui.label(egui::RichText::new(section).small().weak());
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let appearance =
+                            ui.button("Appearance").on_hover_text("Appearance · Ctrl+,");
+                        if appearance.clicked() {
+                            self.open_shell_popup(shell::Popup::Appearance, Some(appearance.id));
+                        }
+                        let commands = ui.button("Commands · Ctrl+K");
+                        shell::register_region(ui, shell::Region::Header, commands.id);
+                        if commands.clicked() {
+                            self.open_shell_popup(shell::Popup::Commands, Some(commands.id));
+                        }
+                    });
                 });
+                if let Some((index, total)) = step {
+                    self.show_phase_navigation(ui, index, total);
+                }
             });
-            if let Some((index, total)) = step {
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), 2.0),
-                    egui::Sense::hover(),
-                );
-                let mut fill = rect;
-                fill.max.x = rect.min.x + rect.width() * index as f32 / total as f32;
-                ui.painter()
-                    .rect_filled(rect, 0, color(guide::theme::HAIRLINE));
-                ui.painter().rect_filled(fill, 0, color(super::CRIMSON));
-            }
-        });
     }
 
-    pub(super) fn show_navigation(&mut self, ctx: &egui::Context, step: &str, verified: bool) {
-        egui::TopBottomPanel::bottom("wizard-actions").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if self.step > 0
-                    && ui
-                        .add_enabled(
-                            self.can_go_back() && !self.show_details,
-                            egui::Button::new("Back").min_size(egui::vec2(68.0, 30.0)),
-                        )
-                        .clicked()
-                {
-                    self.go_back();
-                }
-                if ui
-                    .add_enabled(
-                        !self.profile_flow.busy(),
-                        egui::Button::new(if self.show_details {
-                            "Back to step"
-                        } else {
-                            "Status and details"
-                        }),
-                    )
-                    .clicked()
-                {
-                    self.detail_page = 0;
-                    self.show_details = !self.show_details;
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (label, ready) = if self.show_details {
-                        ("", false)
-                    } else if verified && step == "clean" && !self.profile_flow.captured {
-                        ("Start capture", self.capture_ready())
-                    } else if verified && step == "build" && !self.profile_flow.profile_saved() {
-                        ("Save profile", self.profile_save_ready())
-                    } else if self.step + 1 == guide::STEPS.len() {
-                        ("Finish", self.can_advance())
-                    } else {
-                        ("Continue", self.can_advance())
-                    };
-                    if !label.is_empty() && ui.add_enabled(ready, primary(label)).clicked() {
-                        match label {
-                            "Start capture" => self.start_verified_capture(ctx),
-                            "Save profile" => self.start_profile_save(ctx),
-                            _ => {
-                                self.advance();
-                            }
-                        }
+    pub(super) fn show_navigation(&mut self, ctx: &egui::Context, hint: &str) {
+        let visuals = &ctx.style().visuals;
+        let frame = egui::Frame::new()
+            .fill(visuals.window_fill)
+            .stroke(visuals.widgets.noninteractive.bg_stroke)
+            .inner_margin(egui::Margin::symmetric(12, 4));
+        egui::TopBottomPanel::bottom("wizard-actions")
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let back = ui.add_enabled(
+                        self.can_go_back() && !self.show_details,
+                        egui::Button::new("Back"),
+                    );
+                    if back.clicked() {
+                        self.go_back();
+                        ctx.request_repaint();
                     }
+                    let details = ui
+                        .add_enabled(
+                            !self.profile_flow.busy(),
+                            egui::Button::new(if self.show_details {
+                                "Back to step"
+                            } else {
+                                "Status and details"
+                            }),
+                        )
+                        .on_hover_text("Status and details · F1");
+                    if details.clicked() {
+                        self.toggle_step_details();
+                        ctx.request_repaint();
+                    }
+                    let action = self.current_wizard_action();
+                    if matches!(action, Some((shell::WizardAction::BuildInstaller, _)))
+                        && ui.button("Finish").clicked()
+                    {
+                        self.advance();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some((action, ready)) = action {
+                            let response = primary_action(ui, ready, action.label());
+                            shell::register_region(
+                                ui,
+                                shell::Region::Footer,
+                                if ready { response.id } else { details.id },
+                            );
+                            if response.clicked() {
+                                self.run_wizard_action(ctx, action);
+                            }
+                        } else {
+                            shell::register_region(ui, shell::Region::Footer, details.id);
+                        }
+                        let status = self
+                            .log
+                            .last()
+                            .filter(|line| {
+                                !self.show_details
+                                    && !self.profile_flow.busy()
+                                    && !line.starts_with("Moved to: ")
+                                    && line.as_str() != "Welcome to PortableForge."
+                            })
+                            .map(String::as_str)
+                            .filter(|line| !line.trim().is_empty())
+                            .unwrap_or(hint);
+                        let status = if status.is_empty() {
+                            "Ctrl+K Commands · F6 Next region"
+                        } else {
+                            status
+                        };
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(status).small().weak()).truncate(),
+                        )
+                        .on_hover_text(status);
+                    });
                 });
             });
-            if let Some(last) = self.log.last().filter(|line| {
-                !self.show_details
-                    && !self.profile_flow.busy()
-                    && !line.starts_with("Moved to: ")
-                    && line.as_str() != "Welcome to PortableForge."
-            }) {
-                let summary = if last.chars().count() <= 126 {
-                    last
-                } else {
-                    "Run status updated. Open Status and details to read it."
-                };
-                ui.label(
-                    egui::RichText::new(summary)
-                        .small()
-                        .color(color(guide::theme::TEXT_MUTED)),
-                );
-            }
-        });
     }
 
     pub(super) fn show_step_details(&mut self, ui: &mut egui::Ui, step: &guide::GuideStep) {
@@ -392,7 +427,7 @@ impl WizardApp {
             && !std::path::Path::new(self.icon_path.trim()).is_file()
         {
             ui.colored_label(
-                color(super::ALERT_TEXT),
+                ui.visuals().error_fg_color,
                 "The picture file could not be found.",
             );
         }
@@ -438,6 +473,7 @@ mod tests {
 
     fn assert_page_fits(scale: f32, mut wizard: WizardApp, expected: &[&str]) {
         let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
         let mut frame = eframe::Frame::_new_kittest();
         assert_wizard_fits(&ctx, &mut frame, &mut wizard, scale, expected);
     }
@@ -494,6 +530,7 @@ mod tests {
     #[test]
     fn text_size_changes_keep_capture_controls_in_bounds() {
         let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
         let mut frame = eframe::Frame::_new_kittest();
         let mut wizard = WizardApp::default();
         wizard.enter_verified_capture();
@@ -505,7 +542,7 @@ mod tests {
                 scale,
                 &[
                     "Setup file",
-                    "Installed app path (.exe)",
+                    "Installed app path (optional)",
                     "I trust this setup file and the installed app.",
                     "Start capture",
                 ],
@@ -531,9 +568,28 @@ mod tests {
                 "Pick up where I left off",
                 "About this wizard",
                 "Capture with Sandboxie-Plus",
-                "Rebuild from a saved profile",
+                "Open saved profiles",
                 "first.exe",
                 "Continue",
+            ],
+        );
+    }
+
+    #[test]
+    fn prerequisite_results_fit_at_extra_large() {
+        let mut wizard = WizardApp::default();
+        wizard.enter_verified_capture();
+        wizard.profile_flow.populate_prerequisites_fixture();
+        assert_page_fits(
+            1.5,
+            wizard,
+            &[
+                "Check prerequisites",
+                "Sandboxie-Plus 1.18.8 · Needs attention",
+                "View prerequisite details",
+                "Open bundled test box folder",
+                "Portable test box instructions",
+                "Start capture",
             ],
         );
     }
@@ -546,6 +602,7 @@ mod tests {
             folder: r"C:\Profiles\Fixture".into(),
             label: "Fixture".into(),
             manifest_sha256: "a".repeat(64),
+            details: Default::default(),
         }];
         let mut paths = ["setup.exe", "PortableAppsInstaller", "FixtureInstaller"]
             .map(|name| format!(r"C:\{}\{name}", "Portable Forge Fixture\\".repeat(4)));
@@ -638,13 +695,14 @@ mod tests {
                     folder: r"C:\Profiles\Fixture".into(),
                     label: "Fixture".into(),
                     manifest_sha256: "a".repeat(64),
+                    details: Default::default(),
                 }];
                 let finish = replay.profile_flow.populate_layout_fixture(busy);
                 assert_page_fits(
                     scale,
                     replay,
                     &[
-                        "Saved profile",
+                        "Profile",
                         "Matching setup file",
                         "New build folder",
                         "View path",

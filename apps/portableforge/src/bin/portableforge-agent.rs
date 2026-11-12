@@ -358,6 +358,18 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("Cannot open the exchange folder: {e}"))?;
     let extra_roots = flag_all(args, "--root");
     let once = args.iter().any(|a| a == "--once");
+    let guided_msi = args.iter().any(|arg| arg == "--guided-msi");
+    let mut msi_setup = if guided_msi {
+        let record =
+            portableforge_core::orchestrate::GuidedMsi::read(Path::new(r"C:\PortableForge\Tools"))?;
+        let setup = Path::new(r"C:\PortableForge\Input").join(record.setup_name);
+        if !setup.is_file() {
+            return Err("The staged MSI could not be found inside Windows Sandbox.".into());
+        }
+        Some(setup)
+    } else {
+        None
+    };
     let state_path = exchange.join("state.json");
     let mut session = Session::new("in-box", SandboxMode::WindowsSandbox);
     // Version handshake: the host compares this against its own
@@ -371,6 +383,16 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
                 let _ = std::fs::remove_file(&cmd);
                 if let Err(e) = take_capture(&exchange, *point, &extra_roots, &mut session) {
                     session.say(format!("FAILED: {e}"));
+                } else if *point == CapturePoint::Before {
+                    if let Some(setup) = msi_setup.take() {
+                        println!(
+                            "Inside Windows Sandbox, open {} in File Explorer.",
+                            setup.display()
+                        );
+                        session.say(
+                            "The clean snapshot is ready. Open the staged MSI in Windows Sandbox.",
+                        );
+                    }
                 }
             }
         }
