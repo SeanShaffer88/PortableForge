@@ -6,6 +6,9 @@
 - Bundle the extracted Sandboxie-Plus 1.18.8 x64 portable files.
   **Open bundled test box folder** and **Portable test box instructions**
   guide manual startup and cleanup through the vendor's manager.
+- Edit the app icon and installer left pane before saving a reviewed profile.
+  Preview PNG or ICO imports, rotate or flip them, choose Fit or Crop, and
+  use the app icon over a custom background for the left pane.
 - Check prerequisites before capture, supply setup arguments and selected
   companion files, choose an installed app after setup, and cancel or
   reopen a cleaned capture. **Needs attention** filters unresolved warnings.

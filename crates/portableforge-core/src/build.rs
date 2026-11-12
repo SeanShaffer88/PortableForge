@@ -189,6 +189,29 @@ pub fn build_package(
     icon: Option<&Path>,
     force: bool,
 ) -> Result<BuildOutcome, String> {
+    build_package_with_customization(
+        root,
+        meta,
+        accepted,
+        app_files,
+        default_data,
+        icon,
+        force,
+        |_| Ok(()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_package_with_customization(
+    root: &Path,
+    meta: &PafMetadata,
+    accepted: &[Classification],
+    app_files: Option<&Path>,
+    default_data: Option<&Path>,
+    icon: Option<&Path>,
+    force: bool,
+    customize: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<BuildOutcome, String> {
     // Pre-flight: the full problem list up front, so the person fixes
     // everything in one pass instead of one error at a time.
     let meta_issues = validate_metadata(meta);
@@ -364,6 +387,7 @@ pub fn build_package(
             }
         }
     }
+    customize(root)?;
     outcome.issues = meta_warnings;
     outcome.issues.extend(validate_tree(root, &meta));
     if main_exe_not_a_program {

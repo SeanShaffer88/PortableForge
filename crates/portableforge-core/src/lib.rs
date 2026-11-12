@@ -10,6 +10,8 @@
 //! The GUI and the agent binaries render state and collect intent only;
 //! no business rules live in them.
 
+#[cfg(windows)]
+pub mod artwork;
 pub mod build;
 pub mod classify;
 #[cfg(any(windows, test))]

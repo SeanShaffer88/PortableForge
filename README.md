@@ -1,6 +1,6 @@
 ## TL;DR
 
-PortableForge helps turn a Windows app into a PortableApps.com package. Capture a trusted setup in an isolated test box, review the observed files and settings, and save the approved package as a reusable profile. The wizard can build a `.paf.exe` from that profile whenever the selected setup matches the original SHA-256.
+PortableForge is a PortableApps.com development workspace. Capture a trusted Windows setup in an isolated test box, review the observed files and settings, and prepare the package and its artwork in the wizard. Save the approved package as a reusable profile and build a `.paf.exe` whenever the selected setup matches the original SHA-256.
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
@@ -30,7 +30,7 @@ In the standard package flow, select a setup file and review the system checks. 
 1. On the first page choose **Capture with Sandboxie-Plus**. This needs Windows x64 and Sandboxie-Plus 1.18.8 x64. Choose a trusted setup `.exe` that can finish offline without elevation or a restart. In **Setup options**, enter one argument per line and explicitly choose any companion files. Enter the installed app path or leave it blank to pick an app after setup.
 2. Use **Check prerequisites**, confirm that you trust the selected inputs and installed app, and choose **Start capture**. If the dedicated box is unavailable, the wizard offers the portable test box folder and setup instructions. Finish setup inside the dedicated box, choose the installed app if prompted, then try and close it. **Cancel capture** requests cleanup of the dedicated box.
 3. The review opens after cleanup is confirmed. **Needs attention** shows unresolved warnings. If you close the wizard after a cleaned capture, **Pick up where I left off** rechecks its saved receipt and opens the review so you can recheck the choices. Captures whose receipts predate the selected app field need a fresh capture to reopen in the wizard.
-4. Enter the portable copy's name, publisher, full HTTP or HTTPS homepage, and a short description. Confirm permission to bundle the app. Select the official PortableApps.com Launcher Generator 2.2.9 folder and a new profile folder, then choose **Save profile**.
+4. Enter the portable copy's name, publisher, full HTTP or HTTPS homepage, and a short description. Confirm permission to bundle the app. Select the official PortableApps.com Launcher Generator 2.2.9 folder and a new profile folder. To customize the visuals, choose **Edit package artwork…**, then **Apply artwork**. Choose **Save profile** to approve the package.
 5. Choose **Build installer**, or choose **Open saved profiles** on the first page later. Select the matching setup, the official PortableApps.com Installer 3.9.19 folder, and a new build folder. The build checks the setup bytes, saved profile approval, staged package, and installer tools before publishing the installer and receipt.
 
 Use printable ASCII for the capture and build paths. Leave out `$`, `%`, single and double quotes, and backticks. Use **Setup options** to pick a capture folder if the default path contains one of these characters.
@@ -38,6 +38,12 @@ Use printable ASCII for the capture and build paths. Leave out `$`, `%`, single 
 ### Start the bundled portable test box
 
 PortableForge reuses a compatible running Sandboxie-Plus engine for verified capture and installer testing. To start the bundled Sandboxie-Plus 1.18.8 x64 portable files, choose **Open bundled test box folder** and copy the whole folder to a new protected local location under Program Files. Open `SandMan.exe` from that copy and approve its administrator prompts to start the Sandboxie-Plus service and driver. Return to **Capture with Sandboxie-Plus** and choose **Check prerequisites**. After using the portable engine, close SandMan and approve its service cleanup prompt. [Sandboxie-Plus portable startup and cleanup](https://github.com/sandboxie-plus/Sandboxie/blob/v1.18.8/SandboxiePlus/SandMan/SandMan.cpp)
+
+### Customize package artwork
+
+**App icon** previews a PNG or ICO import at the output icon sizes. **Installer left pane** accepts a PNG or ICO, or places the app icon over a chosen background. Use the rotate, flip, Fit and Crop controls to adjust either image. The left pane is 328 × 628 pixels. The editor can restore the captured icon and the default installer pane.
+
+**Apply artwork** keeps the edits in the current wizard session. **Save profile** seals the generated assets with the package, so building it later needs only the saved profile and the usual build inputs.
 
 ### Manage profiles and builds
 

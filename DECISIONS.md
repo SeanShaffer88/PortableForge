@@ -10,6 +10,15 @@ manager that the user opens from a protected local copy. Verified
 capture and installer testing attach to a compatible running engine
 after checking its active service and driver identities.
 
+## 2026-11-12 — Seal generated package artwork with the profile
+
+The artwork editor works on the current draft. Preview and packaging use
+the same image transforms. Saving a profile generates the app icon files
+and optional installer left pane before the package is fingerprinted. A
+saved profile carries the generated assets, so a later build has no
+dependency on the original image files. Applying artwork takes effect for
+the current wizard session, and editing stops when the profile is saved.
+
 ## 2026-11-12 — TesselGUI revision 2 for the wizard
 
 The wizard uses the GitHub palette and workflow patterns from TesselGUI

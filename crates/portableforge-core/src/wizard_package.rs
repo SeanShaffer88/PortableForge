@@ -5,12 +5,13 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::build::build_package;
+use crate::artwork::{self, Artwork, Raster};
+use crate::build::build_package_with_customization;
 use crate::compile::windows::{
     copy_new_file, copy_tree, local_directory, new_output_path, preflight_generated_settings,
     preflight_profile_package, run_step, within, CompileReport,
 };
-use crate::compile::{extract_application_icons, safe_name};
+use crate::compile::{extract_application_icons, read_application_icon, safe_name};
 use crate::profile::{
     self, fingerprint, inventory, local_file, tree_sha256, verify_capture, write_new,
 };
@@ -39,6 +40,35 @@ const PAL_TREES: [(&str, &str); 2] = [
     ),
 ];
 
+/// Read the selected application's icon from a verified capture without
+/// running the application or writing files.
+pub fn captured_icon_preview(session: &Path, main_exe: &Path) -> Result<Raster, String> {
+    let session = local_directory(session)?;
+    let name = main_exe
+        .file_name()
+        .and_then(|part| part.to_str())
+        .filter(|name| safe_name(name) && name.to_ascii_lowercase().ends_with(".exe"))
+        .ok_or("Choose the captured application to preview its icon.")?;
+    let (application, receipt) = crate::sbie_verified::verify_capture_application(&session, None)?;
+    if !application
+        .as_deref()
+        .and_then(Path::file_name)
+        .and_then(|part| part.to_str())
+        .is_some_and(|observed| observed.eq_ignore_ascii_case(name))
+    {
+        return Err("The selected application differs from the verified capture.".into());
+    }
+    let harvest = local_directory(&session.join("exchange/harvest"))?;
+    let executable = local_file(&harvest.join(name))?;
+    let before = fingerprint(&executable)?;
+    let icon = read_application_icon(&executable)?;
+    if fingerprint(&executable)? != before {
+        return Err("The selected application changed during the icon preview.".into());
+    }
+    crate::sbie_verified::verify_capture_application(&session, Some(&receipt))?;
+    Ok(icon)
+}
+
 /// Save a profile for the exact capture and review. Invoke this after the
 /// operator explicitly approves the reviewed package and redistribution.
 /// Select a trusted, installed PortableApps.com Launcher Generator 2.2.9.
@@ -48,6 +78,19 @@ pub fn save_reviewed_profile(
     review: &Review,
     launcher_tools: &Path,
     profile_out: &Path,
+) -> Result<profile::SavedProfile, String> {
+    save_reviewed_profile_with_artwork(session, meta, review, launcher_tools, profile_out, None)
+}
+
+/// Save a newly approved profile with optional artwork. Source images and
+/// edits stay in memory until the package has its own private staging folder.
+pub fn save_reviewed_profile_with_artwork(
+    session: &Path,
+    meta: &PafMetadata,
+    review: &Review,
+    launcher_tools: &Path,
+    profile_out: &Path,
+    artwork: Option<&Artwork>,
 ) -> Result<profile::SavedProfile, String> {
     if !meta.shareable
         || meta.distribution
@@ -159,27 +202,71 @@ pub fn save_reviewed_profile(
     let result = (|| {
         let icons = work.join("icons");
         create_dir(&icons)?;
-        extract_application_icons(&main_exe, &icons)?;
-        if fingerprint(&main_exe)? != *main_entry {
-            return Err("The selected executable changed while its icons were read.".into());
+        let custom_icon = artwork.and_then(|choice| choice.icon.as_ref());
+        let icon_set = custom_icon.map(artwork::package_icons).transpose()?;
+        let icon_path = icons.join("appicon.ico");
+        if let Some(icon_set) = &icon_set {
+            write_new(&icon_path, &icon_set.ico)?;
+        } else {
+            extract_application_icons(&main_exe, &icons)?;
         }
-        let built = build_package(
+        if fingerprint(&main_exe)? != *main_entry {
+            return Err("The selected executable changed during package preparation.".into());
+        }
+        let built = build_package_with_customization(
             &package,
             meta,
             &accepted,
             Some(&capture.harvest),
             None,
-            Some(&icons.join("appicon.ico")),
+            Some(&icon_path),
             false,
+            |package| {
+                let app_info = package.join("App/AppInfo");
+                if let Some(icon_set) = &icon_set {
+                    // ExtractIcon supersedes authored icons in PortableApps.com
+                    // Menu. Omit it when a reviewed override supplies the files.
+                    let config = app_info.join("appinfo.ini");
+                    let text = fs::read_to_string(&config)
+                        .map_err(|error| format!("Could not read appinfo.ini: {error}"))?;
+                    let mut normalized = String::new();
+                    for line in text
+                        .lines()
+                        .filter(|line| !line.starts_with("ExtractIcon="))
+                    {
+                        normalized.push_str(line);
+                        normalized.push('\n');
+                    }
+                    fs::write(&config, normalized)
+                        .map_err(|error| format!("Could not select the authored icon: {error}"))?;
+                    for (size, bytes) in &icon_set.png {
+                        write_new(&app_info.join(format!("appicon_{size}.png")), bytes)?;
+                    }
+                } else {
+                    for name in ["appicon_16.png", "appicon_32.png"] {
+                        copy_new_file(&icons.join(name), &app_info.join(name))?;
+                    }
+                }
+                if let Some(sidebar) = artwork.and_then(|choice| choice.sidebar.as_ref()) {
+                    let fallback = if sidebar.source.is_some() {
+                        None
+                    } else if let Some(icon) = custom_icon {
+                        Some(artwork::render_icon(icon, 256)?)
+                    } else {
+                        Some(Raster::load(&icon_path)?)
+                    };
+                    write_new(
+                        &package.join(artwork::SIDEBAR_PATH),
+                        &artwork::sidebar_bmp(sidebar, fallback.as_ref())?,
+                    )?;
+                }
+                Ok(())
+            },
         )?;
         if built.has_errors() || !built.skipped.is_empty() {
             return Err(
                 "The capture could not be packaged without errors or skipped files.".into(),
             );
-        }
-        let app_info = package.join("App").join("AppInfo");
-        for name in ["appicon_16.png", "appicon_32.png"] {
-            copy_new_file(&icons.join(name), &app_info.join(name))?;
         }
         let payload = package.join("App").join(&meta.base_app_name);
         for directory in capture

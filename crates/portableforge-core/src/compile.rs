@@ -236,13 +236,16 @@ mod icons;
 #[cfg(windows)]
 pub(crate) use icons::extract_application_icons;
 
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub(crate) use icons::read_application_icon;
+
 #[cfg(windows)]
 pub(crate) mod windows;
 
 #[cfg(windows)]
 pub use windows::{
     compare_build_results, compile_installer, verify_build_result, BuildComparison, CompileReport,
-    VerifiedBuild,
+    InstallerArtworkEvidence, VerifiedBuild,
 };
 
 #[cfg(test)]
