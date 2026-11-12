@@ -1,5 +1,17 @@
 # Decisions — PortableForge
 
+## 2026-11-12 — Package ZIPs and selected app files
+
+Treat each drop as one source for one app. A ZIP or a same-folder selection of
+loose files is prepared in private temporary work and passed to the existing
+folder scanner. Preserve the included files and their layout. A setup file
+continues through capture. Avoid reading sibling files the user did not select.
+
+Guided and Autonomous use the same review, tool verification, sharing check,
+and atomic build. Autonomous starts a build when its required decisions have
+been made. Select a mode on the source screen; permission to include files
+applies to the current source only.
+
 ## 2026-11-12 — Build from an unpacked app folder
 
 Use the folder scan to propose an entry point and read app details. Require an

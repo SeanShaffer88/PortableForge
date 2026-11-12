@@ -58,6 +58,7 @@ jobs:
           Copy-Item target/release/portableforge.exe $portDir
           Copy-Item target/release/portableforge-agent.exe $portDir
           Copy-Item LICENSE $portDir
+          Copy-Item third-party/THIRD-PARTY-ARCHIVE-NOTICE.txt $portDir
           Copy-Item installer/PORTABLE.txt $portDir
           # The portable Sandboxie-Plus payload, fingerprints, licenses and
           # notice, in their own folder (see third-party/).
