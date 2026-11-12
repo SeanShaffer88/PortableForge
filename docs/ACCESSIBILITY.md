@@ -4,8 +4,8 @@
 
 PortableForge uses the GitHub palettes from TesselGUI revision 2. **Appearance**
 offers System, GitHub Dark, GitHub Light and three text sizes. The wizard
-remembers these choices locally. System uses the desktop scheme reported by egui
-and falls back to GitHub Dark.
+starts in GitHub Dark and remembers explicit choices locally. System uses the
+desktop scheme reported by egui and falls back to GitHub Dark.
 
 On Windows, a contrast theme takes precedence. PortableForge reads native
 window, control, text and highlight colors on startup, when focus returns,
@@ -55,3 +55,15 @@ progress appears as status text. Geometry tests establish layout fit for
 the exercised states. The fit tests cover up to 150%. Physical DPI
 transitions, 200% text scaling, Windows contrast theme switching, and
 Narrator interaction require separate live checks.
+
+## Build from a folder
+
+**Choose App Folder** provides a keyboard alternative to dragging a folder
+onto the first screen. App details, build tools and output, and folder
+findings use compact pages with a shared **Back** action. **F1** opens
+findings. Start-file choices and findings are paged, and **View Path**
+opens long paths in the full-value dialog. The wizard keeps **Build
+Installer** in the action strip on the review screen, and displays
+**Stop After This Step** while a running build can still be stopped.
+Geometry tests exercise the populated folder pages at 640 × 480 for
+Standard, Large, and Extra large text.

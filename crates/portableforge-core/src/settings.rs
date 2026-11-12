@@ -101,8 +101,8 @@ pub struct WizardSettings {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Appearance {
-    #[default]
     System,
+    #[default]
     Dark,
     Light,
 }
@@ -116,7 +116,7 @@ impl Default for WizardSettings {
         Self {
             recent_installers: Vec::new(),
             text_scale: 1.0,
-            appearance: Appearance::System,
+            appearance: Appearance::default(),
             draft: None,
             welcomed: false,
             saved_profiles: Vec::new(),
@@ -319,7 +319,20 @@ mod tests {
         .unwrap();
         assert!(settings.saved_profiles.is_empty());
         assert_eq!(settings.text_scale, 1.25);
-        assert_eq!(settings.appearance, Appearance::System);
+        assert_eq!(settings.appearance, Appearance::Dark);
+    }
+
+    #[test]
+    fn appearance_defaults_to_dark_and_preserves_explicit_choices() {
+        assert_eq!(WizardSettings::default().appearance, Appearance::Dark);
+        for (serialized, expected) in [
+            (r#"{"appearance":"system"}"#, Appearance::System),
+            (r#"{"appearance":"dark"}"#, Appearance::Dark),
+            (r#"{"appearance":"light"}"#, Appearance::Light),
+        ] {
+            let settings: WizardSettings = serde_json::from_str(serialized).unwrap();
+            assert_eq!(settings.appearance, expected);
+        }
     }
 
     #[test]
