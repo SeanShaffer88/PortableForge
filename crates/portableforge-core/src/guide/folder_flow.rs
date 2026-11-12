@@ -1,9 +1,30 @@
 //! Primary wording for packaging an unpacked app folder.
 
 pub const PICK_TITLE: &str = "Choose an App";
-pub const PICK_HELP: &str = "Drop an unpacked app folder or choose a setup file.";
+pub const PICK_HELP: &str = "Drop a ZIP, app folder, or the files for one app.";
 pub const CHOOSE_FOLDER: &str = "Choose App Folder…";
-pub const HEADER: &str = "Build From a Folder";
+pub const CHOOSE_FILES: &str = "Choose App Files…";
+pub const CHOOSE_SOURCE: &str = "Choose an App Source";
+pub const CHANGE_SOURCE: &str = "Change Source";
+pub const GUIDED: &str = "Guided";
+pub const AUTONOMOUS: &str = "Autonomous";
+pub const AUTONOMOUS_HELP: &str =
+    "Builds automatically once the app details, build settings, and permission are confirmed.";
+pub const AUTONOMOUS_HEADER: &str = "Autonomous Build";
+pub const CHECKING_SOURCE: &str = "Checking Your Source";
+pub const CHECKING_SELECTION: &str = "Checking the selected files…";
+pub const STAGING_SOURCE: &str = "Preparing the app files…";
+pub const STOP_INTAKE: &str = "Cancel Preparation";
+pub const INPUT_NOT_READY: &str =
+    "Choose one ZIP, one app folder, or files for one app from the same folder.";
+pub const SAVE_DROPPED_FILES: &str = "Save every dropped file to a local folder and try again.";
+pub const SOURCE_STOPPING: &str = "Stopping and cleaning up the app files…";
+pub const SOURCE_STOPPED: &str = "App file preparation stopped. Choose a source to try again.";
+pub const CLEANING_SOURCE: &str = "Removing temporary app files…";
+pub const CLEANING_SOURCE_TITLE: &str = "Cleaning Up App Files";
+pub const SOURCE_CLEANUP_FAILED: &str =
+    "Temporary app files could not be removed. Open Show Details for the location.";
+pub const HEADER: &str = "Build a Portable App";
 pub const REVIEW: &str = "Review Your App";
 pub const CHOOSE_PROGRAM: &str = "Choose the File That Starts the App";
 pub const PREPARED: &str = "Choose the Original App Folder";

@@ -1085,14 +1085,19 @@ impl eframe::App for WizardApp {
             self.log
                 .push(format!("Setup file chosen: {}", self.installer_path));
         }
-        if (self.profile_flow.busy() || self.folder_flow.busy())
-            && ctx.input(|input| input.viewport().close_requested())
+        let close_after_cleanup = self.folder_flow.take_close_request();
+        if close_after_cleanup {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if ctx.input(|input| input.viewport().close_requested())
+            && (self.profile_flow.busy() || self.folder_flow.defer_close())
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.request_repaint();
         }
         self.persist_if_due();
         let modal_open = self.artwork.is_open() || self.folder_flow.modal_open();
-        if !modal_open {
+        if !modal_open && !close_after_cleanup {
             self.handle_shell_keys(ctx);
         }
         self.update_heading_focus(ctx);
@@ -1106,19 +1111,19 @@ impl eframe::App for WizardApp {
         if (pick_step || self.folder_flow.open)
             && !self.folder_flow.busy()
             && !modal_open
+            && !close_after_cleanup
             && !ctx.memory(|memory| memory.top_modal_layer().is_some())
         {
-            let dropped = ctx.input_mut(|i| {
-                std::mem::take(&mut i.raw.dropped_files)
-                    .into_iter()
-                    .find_map(|file| file.path)
-            });
-            if let Some(path) = dropped {
-                self.inspect_app_folder(ctx, path, true);
+            let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
+            if !dropped.is_empty() {
+                self.inspect_dropped_files(ctx, dropped);
                 self.update_heading_focus(ctx);
             }
         }
         if self.folder_flow.open {
+            if !close_after_cleanup {
+                self.folder_flow.advance_autonomously(ctx);
+            }
             self.show_folder_flow(ctx);
             self.show_shell_popup(ctx);
             self.folder_flow.show_artwork(ctx);
@@ -1525,9 +1530,7 @@ impl eframe::App for WizardApp {
                                 &guide::WELCOME.join("\n"), true);
                         });
                     }
-                    if ui.button(folder_copy::CHOOSE_FOLDER).clicked() {
-                        self.choose_app_folder(ctx);
-                    }
+                    self.show_app_intake_picker(ui);
                     let setup_label = ui.label("Setup file (.exe or .msi)");
                     ui.horizontal(|ui| {
                         let width = dense::width_with_button(ui, "Browse…");

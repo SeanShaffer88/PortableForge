@@ -8,17 +8,18 @@ use super::super::dense;
 use super::super::installer_test::{self, BuildIdentity, InstallerTest, TestFailure};
 use super::{Delivery, Event, Failure, Flow, Outcome, Page};
 
+const TEST_DIALOG_ID: &str = "folder-installer-test";
+
 #[derive(Default)]
 pub(super) struct TestFlow {
     pub(super) prompt: Option<Confirmation>,
-    return_focus: Option<egui::Id>,
+    return_focus: bool,
     pub(super) cancellation: Option<CancellationToken>,
     pub(super) stopping: bool,
     pub(super) outcome: Option<Result<InstallerTest, TestFailure>>,
 }
 
 pub(super) struct Confirmation {
-    opener: egui::Id,
     focus_first: bool,
 }
 
@@ -46,28 +47,34 @@ impl Delivery {
 }
 
 impl Flow {
-    pub(super) fn open_test_confirmation(&mut self, opener: egui::Id) {
+    pub(super) fn open_test_confirmation(&mut self) {
         if self.page == Page::Done && self.result.is_some() && !self.busy() && !self.modal_open() {
-            self.runtime.prompt = Some(Confirmation {
-                opener,
-                focus_first: true,
-            });
+            self.runtime.prompt = Some(Confirmation { focus_first: true });
+        }
+    }
+
+    pub(super) fn restore_test_focus(&mut self, ui: &egui::Ui, button: &egui::Response) {
+        if !self.runtime.return_focus || !button.enabled() || !ui.is_rect_visible(button.rect) {
+            return;
+        }
+        let modal = ui.memory(|memory| memory.top_modal_layer());
+        if modal.is_none() {
+            // The result can render a different widget ID after the test.
+            button.request_focus();
+            self.runtime.return_focus = false;
+            ui.ctx().request_repaint();
+        } else if modal.is_some_and(|layer| layer.id == egui::Id::new(TEST_DIALOG_ID)) {
+            // egui reports the modal layer from the previous frame.
+            ui.ctx().request_repaint();
         }
     }
 
     pub(in crate::wizard) fn show_test_confirmation(&mut self, ctx: &egui::Context) {
         let Some(prompt) = &mut self.runtime.prompt else {
-            if let Some(opener) = self.runtime.return_focus {
-                if !self.busy() && ctx.memory(|memory| memory.top_modal_layer().is_none()) {
-                    ctx.memory_mut(|memory| memory.request_focus(opener));
-                    self.runtime.return_focus = None;
-                    ctx.request_repaint();
-                }
-            }
             return;
         };
 
-        let response = egui::Modal::new(egui::Id::new("folder-installer-test")).show(ctx, |ui| {
+        let response = egui::Modal::new(egui::Id::new(TEST_DIALOG_ID)).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 48.0).clamp(200.0, 460.0));
             ui.heading(copy::TEST_CONFIRM);
             ui.label(copy::TEST_TRUST_HELP);
@@ -91,7 +98,7 @@ impl Flow {
         });
         let cancelled = response.inner.0 || response.should_close();
         if cancelled || response.inner.1 {
-            self.runtime.return_focus = Some(prompt.opener);
+            self.runtime.return_focus = true;
             self.runtime.prompt = None;
             if !cancelled {
                 self.start_test(ctx);
@@ -214,9 +221,17 @@ mod tests {
 
         fn draw(&mut self, wizard: &mut WizardApp, mut input: egui::RawInput) -> egui::FullOutput {
             input.screen_rect = Some(self.bounds);
-            self.ctx.run(input, |ctx| {
+            let output = self.ctx.run(input, |ctx| {
                 eframe::App::update(wizard, ctx, &mut self.frame)
-            })
+            });
+            if let Some(update) = &output.platform_output.accesskit_update {
+                assert!(
+                    update.nodes.iter().any(|(id, _)| *id == update.focus),
+                    "AccessKit focused absent node {:?}",
+                    update.focus
+                );
+            }
+            output
         }
 
         fn click(&mut self, wizard: &mut WizardApp, label: &str) {
@@ -257,6 +272,27 @@ mod tests {
                 );
             }
         }
+
+        fn assert_test_focus(&mut self, wizard: &mut WizardApp) {
+            let mut focused_test_action = false;
+            for _ in 0..3 {
+                let update = self
+                    .draw(wizard, Default::default())
+                    .platform_output
+                    .accesskit_update
+                    .expect("AccessKit was enabled");
+                let focused = update
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| *id == update.focus)
+                    .expect("focused node is present");
+                focused_test_action |= focused.1.label() == Some(copy::TEST_INSTALLER);
+            }
+            assert!(
+                focused_test_action,
+                "focus did not return to Test Installer"
+            );
+        }
     }
 
     fn find<'a>(output: &'a egui::FullOutput, label: &str) -> &'a egui::epaint::ClippedShape {
@@ -289,16 +325,36 @@ mod tests {
         }
     }
 
+    fn completed_test() -> InstallerTest {
+        InstallerTest::checked(
+            RuntimeReport {
+                installer_sha256: "approved".into(),
+                install_exit: 0,
+                launch_exits: [0, 0],
+                data_files_created_or_changed: 1,
+                data_files_deleted: 0,
+                data_files_unchanged_on_reopen: 1,
+                data_status: RuntimeDataStatus::ObservedChangesRetained,
+                cleanup_verified: true,
+            },
+            PathBuf::from(r"C:\Tests\Installer-Test"),
+            "approved",
+        )
+        .unwrap()
+    }
+
     #[test]
     fn confirmation_cancel_does_no_work_and_start_keeps_the_failed_build_visible() {
         let mut wizard = fixture();
         let mut frame = Frame::new();
+        frame.ctx.enable_accesskit();
         frame.click(&mut wizard, copy::TEST_INSTALLER);
         assert!(wizard.folder_flow.modal_open());
         frame.click(&mut wizard, "Cancel");
         assert!(!wizard.folder_flow.modal_open());
         assert!(!wizard.folder_flow.busy());
         assert!(wizard.folder_flow.runtime.outcome.is_none());
+        frame.assert_test_focus(&mut wizard);
 
         frame.click(&mut wizard, copy::TEST_INSTALLER);
         frame.click(&mut wizard, copy::TEST_START);
@@ -316,6 +372,7 @@ mod tests {
             Some(Err(TestFailure::Identity(_)))
         ));
         assert!(wizard.folder_flow.result.is_some());
+        frame.assert_test_focus(&mut wizard);
         frame.fit(&mut wizard, &[copy::TEST_FAILED, "Open Output Folder"]);
     }
 
@@ -355,14 +412,32 @@ mod tests {
     }
 
     #[test]
+    fn successful_test_restores_focus_to_the_rendered_test_action() {
+        let mut wizard = fixture();
+        let mut frame = Frame::new();
+        frame.ctx.enable_accesskit();
+        frame.draw(&mut wizard, Default::default());
+
+        let (tx, rx) = mpsc::channel();
+        wizard.folder_flow.job = Some(rx);
+        wizard.folder_flow.runtime.cancellation = Some(CancellationToken::new().unwrap());
+        wizard.folder_flow.runtime.return_focus = true;
+        frame.draw(&mut wizard, Default::default());
+
+        let outcome = Outcome::Tested(Ok(completed_test()));
+        assert!(tx.send(Event::Finished(Box::new(Ok(outcome)))).is_ok());
+        let output = frame.draw(&mut wizard, Default::default());
+        find(&output, copy::TEST_FINISHED);
+        frame.assert_test_focus(&mut wizard);
+    }
+
+    #[test]
     fn test_prompt_and_outcomes_fit_at_every_supported_text_size() {
         for scale in [1.0, 1.25, 1.5] {
             let mut wizard = fixture();
             let mut frame = Frame::new();
             wizard.settings.text_scale = scale;
-            wizard
-                .folder_flow
-                .open_test_confirmation(egui::Id::new("test-installer"));
+            wizard.folder_flow.open_test_confirmation();
             frame.fit(
                 &mut wizard,
                 &[copy::TEST_CONFIRM, copy::TEST_START, "Cancel"],
@@ -382,22 +457,7 @@ mod tests {
                     matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == copy::TEST_FINISHED)
                 }));
             }
-            let result = InstallerTest::checked(
-                RuntimeReport {
-                    installer_sha256: "approved".into(),
-                    install_exit: 0,
-                    launch_exits: [0, 0],
-                    data_files_created_or_changed: 1,
-                    data_files_deleted: 0,
-                    data_files_unchanged_on_reopen: 1,
-                    data_status: RuntimeDataStatus::ObservedChangesRetained,
-                    cleanup_verified: true,
-                },
-                PathBuf::from(r"C:\Tests\Installer-Test"),
-                "approved",
-            )
-            .unwrap();
-            wizard.folder_flow.runtime.outcome = Some(Ok(result));
+            wizard.folder_flow.runtime.outcome = Some(Ok(completed_test()));
             frame.fit(
                 &mut wizard,
                 &[

@@ -7,16 +7,49 @@ use portableforge_core::paf::CATEGORIES;
 
 use super::super::{dense, open_folder, shell, theme, WizardApp};
 use super::draft::{suggested_id, Language};
-use super::{Failure, Flow, Page};
+use super::{Failure, Flow, IntakeMode, Page};
+
+enum SourcePicker {
+    Files,
+    Folder,
+}
 
 impl WizardApp {
+    pub(in crate::wizard) fn show_app_intake_picker(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            let guided =
+                ui.selectable_value(&mut self.folder_flow.mode, IntakeMode::Guided, copy::GUIDED);
+            theme::focus_outline(ui, &guided);
+            let autonomous = ui
+                .selectable_value(
+                    &mut self.folder_flow.mode,
+                    IntakeMode::Autonomous,
+                    copy::AUTONOMOUS,
+                )
+                .on_hover_text(copy::AUTONOMOUS_HELP);
+            theme::focus_outline(ui, &autonomous);
+            ui.separator();
+            if ui.button(copy::CHOOSE_FILES).clicked() {
+                self.choose_app_files(ui.ctx());
+            }
+            if ui.button(copy::CHOOSE_FOLDER).clicked() {
+                self.choose_app_folder(ui.ctx());
+            }
+        });
+    }
+
     pub(in crate::wizard) fn show_folder_flow(&mut self, ctx: &egui::Context) {
         let previous = (
             self.folder_flow.page,
             self.folder_flow.busy(),
             self.folder_flow.build_ready(),
         );
-        self.show_header(ctx, copy::HEADER, None);
+        let heading = if self.folder_flow.mode == IntakeMode::Autonomous {
+            copy::AUTONOMOUS_HEADER
+        } else {
+            copy::HEADER
+        };
+        self.show_header(ctx, heading, None);
         let visuals = &ctx.style().visuals;
         let frame = egui::Frame::new()
             .fill(visuals.window_fill)
@@ -58,7 +91,7 @@ impl WizardApp {
                                 }
                             }
                         } else if flow.page == Page::Done {
-                            let enabled = !flow.modal_open();
+                            let enabled = !flow.busy() && !flow.modal_open();
                             let open = dense::primary_action(ui, enabled, "Open Output Folder");
                             if enabled {
                                 shell::register_region(ui, shell::Region::Footer, open.id);
@@ -78,7 +111,11 @@ impl WizardApp {
                                 }
                             }
                         } else if flow.can_stop() {
-                            let stop = ui.button(copy::STOP);
+                            let stop = ui.button(if flow.intake_stop.is_some() {
+                                copy::STOP_INTAKE
+                            } else {
+                                copy::STOP
+                            });
                             shell::register_region(ui, shell::Region::Footer, stop.id);
                             if stop.clicked() {
                                 flow.stop();
@@ -107,8 +144,10 @@ impl WizardApp {
                         self.folder_flow.show_body(ui)
                     })
                     .inner;
-                if choose {
-                    self.choose_app_folder(ctx);
+                match choose {
+                    Some(SourcePicker::Files) => self.choose_app_files(ctx),
+                    Some(SourcePicker::Folder) => self.choose_app_folder(ctx),
+                    None => {}
                 }
             });
         if previous
@@ -124,13 +163,14 @@ impl WizardApp {
 }
 
 impl Flow {
-    /// The return value asks the wizard to open the shared input folder picker.
-    fn show_body(&mut self, ui: &mut egui::Ui) -> bool {
+    fn show_body(&mut self, ui: &mut egui::Ui) -> Option<SourcePicker> {
         if self.busy() {
             let title = if self.test_in_progress() {
                 copy::TEST_RUNNING
+            } else if self.discard_stage.is_some() || self.status == Some(copy::CLEANING_SOURCE) {
+                copy::CLEANING_SOURCE_TITLE
             } else if self.scan.is_none() {
-                "Checking Your Folder"
+                copy::CHECKING_SOURCE
             } else if self.page == Page::Program {
                 "Reading App Details"
             } else {
@@ -146,34 +186,34 @@ impl Flow {
                 if let Some(error) = &self.error {
                     ui.colored_label(ui.visuals().error_fg_color, error.message);
                 }
-            } else {
-                path_summary(ui, "Folder", &self.source);
+            } else if !self.source.as_os_str().is_empty() {
+                path_summary(ui, "Source", &self.source);
             }
-            return false;
+            return None;
         }
 
         if self.page == Page::Findings {
             self.show_findings(ui);
-            return false;
+            return None;
         }
 
         let choose = match self.page {
             Page::Review => self.show_review(ui),
             Page::Program => {
                 self.show_programs(ui);
-                false
+                None
             }
             Page::Files => {
                 self.show_files(ui);
-                false
+                None
             }
             Page::Done => {
                 self.show_delivery(ui);
-                false
+                None
             }
             _ => {
                 self.show_editor(ui);
-                false
+                None
             }
         };
         if let Some(error) = &self.error {
@@ -191,30 +231,53 @@ impl Flow {
         choose
     }
 
-    fn show_review(&mut self, ui: &mut egui::Ui) -> bool {
+    fn show_review(&mut self, ui: &mut egui::Ui) -> Option<SourcePicker> {
         let Some(scan) = self.scan.clone() else {
-            dense::heading(ui, "Choose an App Folder", "");
-            path_summary(ui, "Folder", &self.source);
-            return ui.button(copy::CHOOSE_FOLDER).clicked();
+            dense::heading(ui, copy::CHOOSE_SOURCE, "");
+            if !self.source.as_os_str().is_empty() {
+                path_summary(ui, "Source", &self.source);
+            }
+            return ui
+                .horizontal_wrapped(|ui| {
+                    if ui.button(copy::CHOOSE_FILES).clicked() {
+                        Some(SourcePicker::Files)
+                    } else if ui.button(copy::CHOOSE_FOLDER).clicked() {
+                        Some(SourcePicker::Folder)
+                    } else {
+                        None
+                    }
+                })
+                .inner;
         };
         if scan.is_prepared() {
             dense::heading(ui, copy::PREPARED, copy::PREPARED_HELP);
-            path_summary(ui, "Folder", &self.source);
-            return ui.button(copy::CHOOSE_FOLDER).clicked();
+            path_summary(ui, "Source", &self.source);
+            return ui
+                .button(copy::CHOOSE_FOLDER)
+                .clicked()
+                .then_some(SourcePicker::Folder);
         }
 
         dense::heading(ui, copy::REVIEW, "");
+        if !self.source_label.is_empty() {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("Source · {}", self.source_label)).weak(),
+                )
+                .truncate(),
+            )
+            .on_hover_text(self.source.display().to_string());
+        }
         if self.selected.is_some() {
             self.show_app_summary(ui);
             let selected = self.selected.as_deref().unwrap_or_else(|| Path::new(""));
             path_summary(ui, "Starts With", selected);
-        } else {
-            path_summary(ui, "Folder", &self.source);
+        } else if self.source_label.is_empty() {
+            path_summary(ui, "Source", &self.source);
         }
         if !self.draft.id.is_empty() && !self.output_parent.as_os_str().is_empty() {
             path_summary(ui, "Save To", &self.output());
         }
-        let mut choose = false;
         if self.selected.is_some() {
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Edit App Details").clicked() {
@@ -233,7 +296,10 @@ impl Flow {
             if self.selected.is_some() && ui.button("Build Tools and Output").clicked() {
                 self.page = Page::Files;
             }
-            choose = ui.button("Change App Folder").clicked();
+            if ui.button(copy::CHANGE_SOURCE).clicked() {
+                self.back();
+                ui.ctx().request_repaint();
+            }
         });
         ui.horizontal_wrapped(|ui| {
             if !scan.candidates.is_empty() {
@@ -271,7 +337,7 @@ impl Flow {
         } else {
             ui.label("Ready to build. Your original folder stays as it is.");
         }
-        choose
+        None
     }
 
     fn show_app_summary(&self, ui: &mut egui::Ui) {
@@ -286,7 +352,7 @@ impl Flow {
                 ui.add(egui::Label::new(egui::RichText::new(&self.draft.name).strong()).truncate())
                     .on_hover_text(&self.draft.name);
                 let details = match (self.draft.publisher.trim(), self.draft.version.trim()) {
-                    ("", "") if self.inferred_name => Some("Name suggested from the folder".into()),
+                    ("", "") if self.inferred_name => Some("Suggested app name".into()),
                     ("", "") => None,
                     ("", version) => Some(format!("Version {version}")),
                     (publisher, "") => Some(publisher.to_owned()),
@@ -475,7 +541,9 @@ impl Flow {
                 .push_id("folder-test-action", |ui| ui.button(copy::TEST_INSTALLER))
                 .inner;
             if test.clicked() {
-                self.open_test_confirmation(test.id);
+                self.open_test_confirmation();
+            } else {
+                self.restore_test_focus(ui, &test);
             }
         }
     }
