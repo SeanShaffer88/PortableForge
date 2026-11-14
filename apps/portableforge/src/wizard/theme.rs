@@ -15,7 +15,7 @@ pub(super) struct State {
     observed_system: Option<Option<egui::Theme>>,
     focused: bool,
     high_contrast: Option<Palette>,
-    applied: Option<(Palette, Density)>,
+    applied: Option<(Palette, Density, bool)>,
 }
 
 const HIGH_CONTRAST: Palette = Palette {
@@ -161,17 +161,18 @@ impl State {
         } else {
             tessel::COMPACT
         };
-        if self.applied != Some((chosen, density))
+        let larger_text = super::dense::room_for_both_rails(ctx);
+        if self.applied != Some((chosen, density, larger_text))
             || ctx.style().visuals.panel_fill != rgb(chosen.background)
         {
-            ctx.set_style(style(chosen, density, dark));
+            ctx.set_style(style(chosen, density, dark, larger_text));
             ctx.data_mut(|data| data.insert_temp(palette_id(), chosen));
-            self.applied = Some((chosen, density));
+            self.applied = Some((chosen, density, larger_text));
         }
     }
 }
 
-fn style(palette: Palette, density: Density, dark: bool) -> egui::Style {
+fn style(palette: Palette, density: Density, dark: bool, larger_text: bool) -> egui::Style {
     let mut visuals = if dark {
         egui::Visuals::dark()
     } else {
@@ -233,29 +234,30 @@ fn style(palette: Palette, density: Density, dark: bool) -> egui::Style {
     style.interaction.tooltip_delay = f32::INFINITY;
     style.spacing.interact_size = egui::vec2(32.0, density.control_min_height);
     style.spacing.window_margin = egui::Margin::same(density.panel_padding as i8);
+    let increase = if larger_text { 2.0 } else { 0.0 };
     style.text_styles = [
         (
             egui::TextStyle::Heading,
             egui::FontId::new(
-                tessel::FONT_SIZE_TITLE,
+                tessel::FONT_SIZE_TITLE + increase,
                 egui::FontFamily::Name(SEMIBOLD.into()),
             ),
         ),
         (
             egui::TextStyle::Body,
-            egui::FontId::proportional(tessel::FONT_SIZE_BODY),
+            egui::FontId::proportional(tessel::FONT_SIZE_BODY + increase),
         ),
         (
             egui::TextStyle::Button,
-            egui::FontId::proportional(tessel::FONT_SIZE_LABEL),
+            egui::FontId::proportional(tessel::FONT_SIZE_LABEL + increase),
         ),
         (
             egui::TextStyle::Small,
-            egui::FontId::proportional(tessel::FONT_SIZE_CAPTION),
+            egui::FontId::proportional(tessel::FONT_SIZE_CAPTION + increase),
         ),
         (
             egui::TextStyle::Monospace,
-            egui::FontId::monospace(tessel::FONT_SIZE_LABEL),
+            egui::FontId::monospace(tessel::FONT_SIZE_LABEL + increase),
         ),
     ]
     .into();
@@ -454,7 +456,7 @@ mod tests {
             (tessel::DARK, true),
             (tessel::LIGHT, false),
         ] {
-            let visuals = style(palette, tessel::COMPACT, dark).visuals;
+            let visuals = style(palette, tessel::COMPACT, dark, true).visuals;
             assert_eq!(visuals.text_color(), rgb(palette.foreground));
             assert_eq!(visuals.weak_text_color(), rgb(palette.muted));
             assert_eq!(

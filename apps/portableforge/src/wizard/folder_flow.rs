@@ -2005,7 +2005,7 @@ mod tests {
                     assert_visible_text(&output, bounds, label);
                 }
                 let roadmap = assert_visible_text(&output, bounds, "Review package");
-                for label in ["PortableForge", "Commands", "Activity", "Appearance"] {
+                for label in ["PortableForge", "Commands", "Appearance"] {
                     let header = assert_visible_text(&output, bounds, label);
                     assert!(
                         header.bottom() < roadmap.top(),
@@ -2017,49 +2017,22 @@ mod tests {
                 egui::Pos2::ZERO,
                 egui::Vec2::from(super::super::window_scale::CANVAS),
             );
-            let mut draw = |wizard: &mut WizardApp, events| {
+            let mut draw = |wizard: &mut WizardApp| {
                 ctx.run(
                     egui::RawInput {
                         screen_rect: Some(bounds),
-                        events,
                         ..Default::default()
                     },
                     |ctx| eframe::App::update(wizard, ctx, &mut frame),
                 )
             };
-            draw(&mut wizard, vec![]);
-            let output = draw(&mut wizard, vec![]);
-            let activity = output
-                .shapes
-                .iter()
-                .find(|shape| {
-                    matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Activity")
-                })
-                .expect("Activity toggle")
-                .shape
-                .visual_bounding_rect()
-                .center();
-            for pressed in [true, false] {
-                draw(
-                    &mut wizard,
-                    vec![
-                        egui::Event::PointerMoved(activity),
-                        egui::Event::PointerButton {
-                            pos: activity,
-                            button: egui::PointerButton::Primary,
-                            pressed,
-                            modifiers: egui::Modifiers::NONE,
-                        },
-                    ],
-                );
-            }
             for (page, labels) in pages {
                 wizard.folder_flow.page = page;
-                draw(&mut wizard, vec![egui::Event::PointerGone]);
-                let output = draw(&mut wizard, vec![]);
+                draw(&mut wizard);
+                let output = draw(&mut wizard);
                 for &label in labels
                     .iter()
-                    .chain(["Technical details", "Hide Activity"].iter())
+                    .chain(["Technical details", "Activity"].iter())
                 {
                     assert_visible_text(&output, bounds, label);
                 }

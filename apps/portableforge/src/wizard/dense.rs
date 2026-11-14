@@ -5,6 +5,19 @@ use eframe::egui;
 use super::{file_picker, guide, picker_start_dir, shell, theme, WizardApp};
 
 pub(super) const MIN_CONTENT: [f32; 2] = [640.0, 480.0];
+pub(super) const RAIL_WIDTH: f32 = 200.0;
+
+pub(super) fn room_for_both_rails(ctx: &egui::Context) -> bool {
+    ctx.content_rect().width() >= 1040.0
+}
+
+pub(super) fn rail_frame(ctx: &egui::Context) -> egui::Frame {
+    let palette = theme::palette(ctx);
+    egui::Frame::new()
+        .fill(theme::rgb(palette.background))
+        .stroke(ctx.style().visuals.window_stroke)
+        .inner_margin(egui::Margin::same(8))
+}
 
 pub(super) fn content_frame(ctx: &egui::Context) -> egui::Frame {
     let style = ctx.style();
@@ -244,17 +257,16 @@ pub(super) fn task_sidebar(ctx: &egui::Context, show: impl FnOnce(&mut egui::Ui)
     if !room_for_sidebar(ctx) {
         return;
     }
-    let palette = theme::palette(ctx);
-    let frame = egui::Frame::new()
-        .fill(theme::rgb(palette.background))
-        .inner_margin(egui::Margin::same(8));
     egui::SidePanel::left("wizard-roadmap")
-        .exact_width(136.0)
+        .exact_width(if room_for_both_rails(ctx) {
+            RAIL_WIDTH
+        } else {
+            136.0
+        })
         .resizable(false)
-        .frame(frame)
+        .frame(rail_frame(ctx))
         .show(ctx, |ui| {
-            ui.label(egui::RichText::new("Roadmap").strong());
-            ui.add_space(4.0);
+            ui.heading("Roadmap");
             show(ui);
         });
 }
@@ -535,7 +547,6 @@ impl WizardApp {
                         if appearance.clicked() {
                             self.open_shell_popup(shell::Popup::Appearance, Some(appearance.id));
                         }
-                        self.activity.toggle_button(ui);
                         let commands = explained(
                             ui.button("Commands"),
                             "Search for an action available in the current step.",
@@ -548,10 +559,7 @@ impl WizardApp {
                 });
                 if let Some((index, total)) = step.filter(|_| !room_for_sidebar(ctx)) {
                     self.show_phase_navigation(ui, index, total, false);
-                } else if self.folder_flow.open
-                    && !room_for_sidebar(ctx)
-                    && !self.activity.compact(ctx)
-                {
+                } else if self.folder_flow.open && !room_for_sidebar(ctx) {
                     self.folder_flow.show_compact_roadmap(ui);
                 }
             });
@@ -747,7 +755,6 @@ mod tests {
         expected: &[&str],
     ) {
         assert_wizard_fits_at(ctx, frame, wizard, scale, MIN_CONTENT, expected);
-        wizard.activity.open_for_layout_test();
         assert_wizard_fits_at(
             ctx,
             frame,
@@ -756,7 +763,6 @@ mod tests {
             super::super::window_scale::CANVAS,
             expected,
         );
-        wizard.activity = Default::default();
     }
 
     fn assert_wizard_fits_at(

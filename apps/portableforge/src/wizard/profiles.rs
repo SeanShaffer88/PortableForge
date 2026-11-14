@@ -3019,9 +3019,6 @@ mod tests {
     fn assert_library_controls_fit(tab: LibraryTab, labels: &[&str], size: [f32; 2], scale: f32) {
         let mut wizard = library_fixture();
         wizard.profile_flow.library_tab = tab;
-        if size == super::super::window_scale::CANVAS {
-            wizard.activity.open_for_layout_test();
-        }
         assert_controls_fit(wizard, labels, size, scale);
     }
 

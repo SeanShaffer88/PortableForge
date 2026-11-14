@@ -21,15 +21,11 @@ The desktop wizard guides capture, review, and packaging. Dark High Contrast is 
 - Shows the exact location and suggested handling for each captured finding.
 - Prepares a PortableApps.com Format 3.9 package, or uses a verified profile and the official tools to build a `.paf.exe`.
 
-The roadmap keeps the current step visible. On wider windows it sits on the
-left, with configuration on the right and actions at the bottom. Narrow
-windows move the roadmap above the configuration. Focus a field or point to it to read plain-language help in the bottom status bar.
-
-Choose **Activity** for project progress and **Technical details** for
-diagnostic messages. The panel opens on the right when space allows and
-uses the same workspace at smaller widths. File selection and review stay in
-PortableForge. During setup capture and installer testing, interact with the
-isolated setup or app when prompted.
+The roadmap stays on the left, **Activity** stays on the right, and actions
+stay at the bottom. Choose **Technical details** to see diagnostic messages.
+Focus a field or point to it for help in the status bar. File selection and
+review stay in PortableForge. During setup capture and installer testing,
+interact with the isolated setup or app when prompted.
 
 ## How it works
 
