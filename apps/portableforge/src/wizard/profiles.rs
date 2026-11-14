@@ -2975,7 +2975,11 @@ mod tests {
                     &["✓ Build recorded", "View build details", "Test installer"][..],
                 ),
             ] {
-                for size in [dense::MIN_CONTENT, [960.0, 540.0]] {
+                for size in [
+                    dense::MIN_CONTENT,
+                    [960.0, 540.0],
+                    super::super::window_scale::CANVAS,
+                ] {
                     assert_library_controls_fit(tab, expected, size, scale);
                     if size[0] >= 768.0 {
                         assert_library_controls_fit(
@@ -3015,6 +3019,9 @@ mod tests {
     fn assert_library_controls_fit(tab: LibraryTab, labels: &[&str], size: [f32; 2], scale: f32) {
         let mut wizard = library_fixture();
         wizard.profile_flow.library_tab = tab;
+        if size == super::super::window_scale::CANVAS {
+            wizard.activity.open_for_layout_test();
+        }
         assert_controls_fit(wizard, labels, size, scale);
     }
 

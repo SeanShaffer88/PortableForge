@@ -39,6 +39,11 @@ pub(super) struct Activity {
 }
 
 impl Activity {
+    #[cfg(test)]
+    pub(super) fn open_for_layout_test(&mut self) {
+        self.open = true;
+    }
+
     pub(super) fn wide(ctx: &egui::Context) -> bool {
         ctx.content_rect().width() >= WIDE_MIN
     }

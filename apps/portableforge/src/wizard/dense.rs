@@ -747,6 +747,16 @@ mod tests {
         expected: &[&str],
     ) {
         assert_wizard_fits_at(ctx, frame, wizard, scale, MIN_CONTENT, expected);
+        wizard.activity.open_for_layout_test();
+        assert_wizard_fits_at(
+            ctx,
+            frame,
+            wizard,
+            scale,
+            super::super::window_scale::CANVAS,
+            expected,
+        );
+        wizard.activity = Default::default();
     }
 
     fn assert_wizard_fits_at(

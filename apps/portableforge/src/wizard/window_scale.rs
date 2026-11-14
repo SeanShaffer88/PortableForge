@@ -1,6 +1,6 @@
 //! One logical canvas, scaled with the native client area.
 
-pub(super) const CANVAS: [f32; 2] = [1060.0, 680.0];
+pub(super) const CANVAS: [f32; 2] = [1060.0, 580.0];
 
 pub(super) fn fit(client: [f32; 2]) -> Option<f32> {
     let scale = (client[0] / CANVAS[0]).min(client[1] / CANVAS[1]);
@@ -272,9 +272,9 @@ mod native {
         #[test]
         fn corner_drag_preserves_the_opposite_corner_at_each_scale() {
             let metrics = Metrics {
-                window: rect(1000, 800, 2076, 1519),
+                window: rect(1000, 800, 2076, 1419),
                 work: rect(-1000, -400, 3700, 2600),
-                client: [1060, 680],
+                client: CANVAS.map(|dimension| dimension as i32),
                 frame: [16, 39],
                 dpi: 1.0,
             };
@@ -302,9 +302,9 @@ mod native {
         #[test]
         fn initial_and_corner_sizes_fit_a_work_area_smaller_than_the_nominal_minimum() {
             let metrics = Metrics {
-                window: rect(-380, -210, 695, 509),
+                window: rect(-380, -210, 695, 409),
                 work: rect(-400, -240, 240, 160),
-                client: [1060, 680],
+                client: CANVAS.map(|dimension| dimension as i32),
                 frame: [16, 39],
                 dpi: 1.25,
             };
