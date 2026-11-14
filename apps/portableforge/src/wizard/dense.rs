@@ -634,6 +634,7 @@ mod tests {
             let mut review = WizardApp::default();
             review.enter_verified_capture();
             review.step = 6;
+            review.setup_findings_open = true;
             review.review = Review::from_classifications(
                 (0..8)
                     .map(|i| Classification {
@@ -657,6 +658,47 @@ mod tests {
                     "Continue",
                 ],
             );
+
+            for (source, verified, next) in [
+                (
+                    "Sample Setup.exe",
+                    true,
+                    "Next · App Details → Sharing → Save Profile",
+                ),
+                (
+                    "Sample Setup.msi",
+                    false,
+                    "Next · App Details → Sharing → Build Package Folder",
+                ),
+            ] {
+                let mut overview = WizardApp::default();
+                if verified {
+                    overview.enter_verified_capture();
+                }
+                overview.step = 6;
+                overview.installer_path = format!(r"C:\{}\{source}", "Long Folder ".repeat(12));
+                overview.review = Review::from_classifications(vec![Classification {
+                    finding: Finding::RegistryKey {
+                        key: "Fixture".into(),
+                    },
+                    severity: Severity::Review,
+                    confidence: 1.0,
+                    why: "Fixture setting".into(),
+                }]);
+                let row = format!("Setup · {source}");
+                assert_page_fits(
+                    scale,
+                    overview,
+                    &[
+                        "Review Your Package",
+                        &row,
+                        "View Source",
+                        "Captured Findings (1)",
+                        next,
+                        "Review Findings",
+                    ],
+                );
+            }
 
             let mut name = WizardApp::default();
             name.enter_verified_capture();

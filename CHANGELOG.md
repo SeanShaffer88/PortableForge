@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Use the same review overview for a captured setup, a ZIP, an app folder, or selected app files. Each source keeps its own findings and package actions.
 - Drop a ZIP or select multiple files for one app in the packaging wizard. Guided mode lets you review and build; Autonomous starts when the launch choice, required details, build tools, and sharing permission are ready.
 - Test an installer built from an unpacked folder in a fresh Sandboxie-Plus box from the result page.
 - Edit the app icon and installer left pane when building from an unpacked app folder.
