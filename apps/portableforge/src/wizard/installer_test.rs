@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use portableforge_core::compile::{verify_build_result, VerifiedBuild};
 use portableforge_core::sbie_verified::{
-    preflight, test_built_paf, CancellationToken, RuntimeDataChangeKind, RuntimeDataReopenStatus,
-    RuntimeDataStatus, RuntimeReport, RuntimeRequest,
+    preflight, test_built_paf, CancellationToken, OutsideDataSection, RuntimeDataChangeKind,
+    RuntimeDataReopenStatus, RuntimeDataStatus, RuntimeReport, RuntimeRequest,
 };
 use portableforge_core::settings::SavedBuild;
 use portableforge_core::storage::display_path;
@@ -196,11 +196,65 @@ impl InstallerTest {
         if report.data_file_changes_omitted > 0 {
             let _ = write!(
                 details,
-                "\nAdditional changed files omitted · {}",
+                "\nAdditional changed files omitted · {}\n",
                 report.data_file_changes_omitted,
             );
         }
+        details.push_str(
+            "\nOutside Data\nLocations in the test box that differed from the post-install state after the app closed.\n",
+        );
+        append_outside_section(
+            &mut details,
+            "Files in the user profile’s standard AppData and Documents folders",
+            &report.outside_data.files,
+        );
+        append_outside_section(
+            &mut details,
+            "Current-user Software registry keys (excluding Classes)",
+            &report.outside_data.registry,
+        );
+        details.push_str("\nFor AppData locations, you can review redirection options before rebuilding. The report leaves package settings as you set them.\n");
         details
+    }
+}
+
+fn append_outside_section(details: &mut String, scope: &str, section: &OutsideDataSection) {
+    let _ = writeln!(details, "\n{scope}");
+    if section.unavailable {
+        details.push_str("This location could not be checked for both launches.\n");
+    } else if section.changes.is_empty() {
+        details.push_str("No changes were found in this location.\n");
+    }
+    for change in &section.changes {
+        let phase = match (change.after_first, change.after_second) {
+            (true, true) => "Observed after both launches",
+            (true, false) => "Observed after first launch",
+            (false, true) => "Observed after reopening",
+            (false, false) => continue,
+        };
+        details.push('\n');
+        for character in change.path.chars() {
+            if character.is_control()
+                || matches!(character, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            {
+                let _ = write!(details, "{}", character.escape_unicode());
+            } else {
+                details.push(character);
+            }
+        }
+        let noise = if change.noise {
+            " · Possible background activity"
+        } else {
+            ""
+        };
+        let _ = writeln!(details, "\n{phase}{noise}");
+    }
+    if section.omitted > 0 {
+        let _ = writeln!(
+            details,
+            "Additional locations omitted · {}",
+            section.omitted
+        );
     }
 }
 
@@ -357,6 +411,7 @@ mod tests {
             data_file_changes: Vec::new(),
             data_file_changes_omitted: 0,
             data_status: RuntimeDataStatus::NoDataFilesChanged,
+            outside_data: Default::default(),
             cleanup_verified,
         };
         for unsuccessful in [
@@ -403,6 +458,31 @@ mod tests {
                 },
             ],
             data_file_changes_omitted: 3,
+            outside_data: {
+                use portableforge_core::sbie_verified::{OutsideDataChange, OutsideDataReport};
+                OutsideDataReport {
+                    files: OutsideDataSection {
+                        changes: vec![OutsideDataChange {
+                            path: r"C:\Users\Example\AppData\Roaming\Widget\prefs.ini".into(),
+                            after_first: true,
+                            after_second: true,
+                            noise: false,
+                        }],
+                        omitted: 0,
+                        unavailable: false,
+                    },
+                    registry: OutsideDataSection {
+                        changes: vec![OutsideDataChange {
+                            path: r"HKEY_CURRENT_USER\Software\Widget\Preferences".into(),
+                            after_first: false,
+                            after_second: true,
+                            noise: false,
+                        }],
+                        omitted: 0,
+                        unavailable: false,
+                    },
+                }
+            },
             cleanup_verified: true,
         };
         let test = InstallerTest::checked(report, Path::new(""), "approved").unwrap();
@@ -425,5 +505,11 @@ mod tests {
         assert!(!long_path.contains('\u{202e}'));
         assert!(details.contains("Full paths are listed in sandboxie-runtime.json"));
         assert!(details.contains("Additional changed files omitted · 3"));
+        assert!(details.contains(
+            "C:\\Users\\Example\\AppData\\Roaming\\Widget\\prefs.ini\nObserved after both launches"
+        ));
+        assert!(details.contains(
+            "HKEY_CURRENT_USER\\Software\\Widget\\Preferences\nObserved after reopening"
+        ));
     }
 }

@@ -2,16 +2,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::compile::safe_name;
 use crate::compile::windows::{
-    compile_installer_checked, copy_tree, file_digest, local_directory, metadata_at,
-    new_output_path, preflight_profile_package, require_regular_path, within, BuildInputEvidence,
-    CompileApproval, CompileReport, ProfileBuildEvidence,
+    compile_installer_checked, copy_tree, local_directory, metadata_at, new_output_path,
+    preflight_profile_package, require_regular_path, within, BuildInputEvidence, CompileApproval,
+    CompileReport, ProfileBuildEvidence,
 };
 use crate::orchestrate::{read_capture, session_layout};
 use crate::paf::Distribution;
@@ -761,33 +762,71 @@ fn only_setup(input: &Path) -> Result<Fingerprint, String> {
 }
 
 pub(crate) fn fingerprint(path: &Path) -> Result<Fingerprint, String> {
+    fingerprint_with_limit(path, MAX_BYTES)
+}
+
+fn fingerprint_with_limit(path: &Path, limit: u64) -> Result<Fingerprint, String> {
     let before = metadata_at(path)?;
-    if !before.is_file() || before.len() > MAX_BYTES {
+    if !before.is_file() || before.len() > limit {
         return Err(format!(
-            "Expected a regular file of at most 32 GiB at {}.",
+            "Expected a regular file of at most {limit} bytes at {}.",
             path.display()
         ));
     }
-    let (sha256, size_bytes) = file_digest(path)?;
+    let mut reader = File::open(path)
+        .map_err(|e| format!("Could not open {}: {e}", path.display()))?
+        .take(limit.saturating_add(1));
+    let mut digest = Sha256::new();
+    let size_bytes = io::copy(&mut reader, &mut digest)
+        .map_err(|e| format!("Could not hash {}: {e}", path.display()))?;
     if size_bytes != before.len() {
         return Err(format!(
             "The file changed while it was being read: {}.",
             path.display()
         ));
     }
-    Ok(Fingerprint { sha256, size_bytes })
+    Ok(Fingerprint {
+        sha256: format!("{:x}", digest.finalize()),
+        size_bytes,
+    })
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct InventoryLimits {
+    pub(crate) entries: usize,
+    pub(crate) total_bytes: u64,
+    pub(crate) file_bytes: u64,
 }
 
 pub(crate) fn inventory(root: &Path) -> Result<Vec<TreeEntry>, String> {
+    inventory_with_limits(
+        root,
+        InventoryLimits {
+            entries: MAX_ENTRIES,
+            total_bytes: MAX_BYTES,
+            file_bytes: MAX_BYTES,
+        },
+        || Ok(()),
+    )
+}
+
+pub(crate) fn inventory_with_limits(
+    root: &Path,
+    limits: InventoryLimits,
+    check: impl Fn() -> Result<(), String>,
+) -> Result<Vec<TreeEntry>, String> {
+    check()?;
     let root = local_directory(root)?;
     let mut folders = vec![(root, String::new(), 0usize)];
     let mut seen = BTreeSet::new();
     let mut entries = Vec::new();
     let mut bytes = 0;
     while let Some((folder, prefix, depth)) = folders.pop() {
+        check()?;
         let listing = fs::read_dir(&folder)
             .map_err(|e| format!("Could not list {}: {e}", folder.display()))?;
         for item in listing {
+            check()?;
             let item = item.map_err(|e| format!("Could not list {}: {e}", folder.display()))?;
             let name = item.file_name();
             let name = name
@@ -804,7 +843,7 @@ pub(crate) fn inventory(root: &Path) -> Result<Vec<TreeEntry>, String> {
             } else {
                 format!("{prefix}/{name}")
             };
-            if entries.len() >= MAX_ENTRIES || depth >= MAX_DEPTH {
+            if entries.len() >= limits.entries || depth >= MAX_DEPTH {
                 return Err("The profile tree exceeds the entry or folder depth limit.".into());
             }
             if !seen.insert(path.to_uppercase()) {
@@ -816,13 +855,8 @@ pub(crate) fn inventory(root: &Path) -> Result<Vec<TreeEntry>, String> {
                 folders.push((absolute, path.clone(), depth + 1));
                 None
             } else {
-                if metadata.len() > MAX_BYTES - bytes {
-                    return Err("The profile tree exceeds the 32 GiB limit.".into());
-                }
-                let file = fingerprint(&absolute)?;
-                if file.size_bytes > MAX_BYTES - bytes {
-                    return Err("The profile tree exceeds the 32 GiB limit.".into());
-                }
+                let limit = limits.file_bytes.min(limits.total_bytes - bytes);
+                let file = fingerprint_with_limit(&absolute, limit)?;
                 bytes += file.size_bytes;
                 Some(file)
             };

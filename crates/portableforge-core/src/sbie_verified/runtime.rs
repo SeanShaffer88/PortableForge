@@ -22,7 +22,42 @@ pub struct RuntimeReport {
     pub data_status: RuntimeDataStatus,
     pub data_file_changes: Vec<RuntimeDataFileChange>,
     pub data_file_changes_omitted: usize,
+    pub outside_data: OutsideDataReport,
     pub cleanup_verified: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+pub struct OutsideDataReport {
+    pub files: OutsideDataSection,
+    pub registry: OutsideDataSection,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct OutsideDataSection {
+    pub changes: Vec<OutsideDataChange>,
+    pub omitted: usize,
+    pub unavailable: bool,
+}
+
+impl Default for OutsideDataSection {
+    fn default() -> Self {
+        Self {
+            changes: Vec::new(),
+            omitted: 0,
+            unavailable: true,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct OutsideDataChange {
+    /// Absolute logical Windows path or registry key, never a box backing path.
+    pub path: String,
+    /// Present and different from the post-install snapshot after the first close.
+    pub after_first: bool,
+    /// Present and different from the post-install snapshot after the second close.
+    pub after_second: bool,
+    pub noise: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -71,6 +106,74 @@ fn data_files(path: &Path) -> Result<BTreeMap<String, Fingerprint>, String> {
         .into_iter()
         .filter_map(|row| row.file.map(|file| (row.path, file)))
         .collect())
+}
+
+#[derive(Default)]
+struct OutsideDataSnapshot {
+    files: Option<BTreeMap<String, Fingerprint>>,
+    registry: Option<BTreeMap<String, u64>>,
+}
+
+fn outside_snapshot(
+    sbie: &Sandboxie,
+    name: &str,
+    root: &Path,
+    roots: &BoxRoots,
+    package_data: &Path,
+    cancellation: &CancellationToken,
+) -> Result<OutsideDataSnapshot, String> {
+    cancellation.check()?;
+    let files = roots
+        .outside_data_files(root, package_data, || cancellation.check())
+        .ok();
+    cancellation.check()?;
+    let registry = sbie.snapshot_owned_user_software(name, root).ok();
+    cancellation.check()?;
+    Ok(OutsideDataSnapshot { files, registry })
+}
+
+fn outside_changes<T: Eq>(
+    snapshots: [Option<BTreeMap<String, T>>; 3],
+    is_noise: impl Fn(&str) -> bool,
+) -> OutsideDataSection {
+    fn case_fold<T>(rows: BTreeMap<String, T>) -> Option<BTreeMap<String, (String, T)>> {
+        let mut folded = BTreeMap::new();
+        for (path, value) in rows {
+            if folded.insert(path.to_uppercase(), (path, value)).is_some() {
+                return None;
+            }
+        }
+        Some(folded)
+    }
+
+    let [Some(baseline), Some(first), Some(second)] =
+        snapshots.map(|snapshot| snapshot.and_then(case_fold))
+    else {
+        return OutsideDataSection::default();
+    };
+    let paths: BTreeSet<_> = first.keys().chain(second.keys()).collect();
+    let mut report = OutsideDataSection {
+        unavailable: false,
+        ..OutsideDataSection::default()
+    };
+    for path in paths {
+        let initial = baseline.get(path).map(|(_, value)| value);
+        let first = first.get(path).filter(|(_, value)| Some(value) != initial);
+        let second = second.get(path).filter(|(_, value)| Some(value) != initial);
+        if let Some((path, _)) = second.or(first) {
+            if report.changes.len() == MAX_DATA_FILE_CHANGES {
+                report.omitted += 1;
+            } else {
+                report.changes.push(OutsideDataChange {
+                    path: path.clone(),
+                    after_first: first.is_some(),
+                    after_second: second.is_some(),
+                    noise: is_noise(path),
+                });
+            }
+        }
+    }
+    report
 }
 
 #[derive(Default)]
@@ -253,9 +356,19 @@ pub fn test_built_paf(
             .ok_or("Missing installed app directory.")?
             .join("Data");
         let before = data_files(&data)?;
+        let logical_data = installed.join("Data");
+        let mut outside = [
+            outside_snapshot(&sbie, &name, &root, &roots, &logical_data, cancellation)?,
+            OutsideDataSnapshot::default(),
+            OutsideDataSnapshot::default(),
+        ];
         let mut launch_exits = [0; 2];
         let mut after = [BTreeMap::new(), BTreeMap::new()];
-        for (exit, files) in launch_exits.iter_mut().zip(&mut after) {
+        for ((exit, files), observed) in launch_exits
+            .iter_mut()
+            .zip(&mut after)
+            .zip(&mut outside[1..])
+        {
             expect_absent(&destination)?;
             roots.logical_file(&root, &launcher)?;
             let args = [
@@ -284,8 +397,20 @@ pub fn test_built_paf(
             expect_absent(&destination)?;
             cancellation.check()?;
             *files = data_files(&data)?;
+            *observed = outside_snapshot(&sbie, &name, &root, &roots, &logical_data, cancellation)?;
         }
         let observation = check_data(&before, &after[0], &after[1]);
+        let [baseline, first, second] = outside;
+        let outside_data = OutsideDataReport {
+            files: outside_changes(
+                [baseline.files, first.files, second.files],
+                crate::noise::is_noise_path,
+            ),
+            registry: outside_changes(
+                [baseline.registry, first.registry, second.registry],
+                |key| crate::noise::is_noise_reg(key, ""),
+            ),
+        };
         Ok::<_, String>(RuntimeReport {
             installer_sha256: fp.sha256,
             install_exit: install.exit_code,
@@ -296,6 +421,7 @@ pub fn test_built_paf(
             data_status: observation.first_launch_status(),
             data_file_changes: observation.changes,
             data_file_changes_omitted: observation.omitted,
+            outside_data,
             cleanup_verified: true,
         })
     })();
@@ -324,6 +450,28 @@ pub fn test_built_paf(
 mod tests {
     use super::*;
 
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(new_box_name().unwrap());
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn write(&self, path: &str) {
+            let path = self.0.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"fixture").unwrap();
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn files(rows: &[(&str, &str)]) -> BTreeMap<String, Fingerprint> {
         rows.iter()
             .map(|(path, content)| {
@@ -336,6 +484,140 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn outside_data_reads_only_scoped_box_mirrors_and_preserves_logical_names() {
+        let fixture = Fixture::new();
+        fixture.write(r"user\current\AppData\Roaming\Widget\Preferences.ini");
+        fixture.write(r"drive\C\Users\Fixture\Documents\Widget\Notes.txt");
+        fixture.write(r"drive\C\PF_Fixture\WidgetPortable\Data\Ignore.ini");
+        fixture.write(r"user\all\Widget\Common.ini");
+        let roots = BoxRoots {
+            system_drive: r"C:\".into(),
+            windows: r"C:\Windows".into(),
+            user: [
+                (r"user\current".into(), r"C:\Users\Fixture".into()),
+                (r"user\all".into(), r"C:\ProgramData".into()),
+                (r"user\public".into(), r"C:\Users\Public".into()),
+            ],
+            common_roots: Vec::new(),
+            excluded_trees: Vec::new(),
+        };
+        let package_data = Path::new(r"C:\PF_Fixture\WidgetPortable\Data");
+        let observed = roots
+            .outside_data_files(&fixture.0, package_data, || Ok(()))
+            .unwrap();
+        assert_eq!(
+            observed.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                r"C:\Users\Fixture\AppData\Roaming\Widget\Preferences.ini",
+                r"C:\Users\Fixture\Documents\Widget\Notes.txt",
+            ],
+        );
+        assert!(boxed_directory(&fixture.0, Path::new(r"..\elsewhere")).is_err());
+        assert!(roots
+            .outside_data_files(
+                &fixture.0,
+                Path::new(r"c:\users\fixture\documents\Data"),
+                || Ok(()),
+            )
+            .is_err());
+        // The same logical path in two mirrors cannot be attributed reliably.
+        fixture.write(r"drive\C\Users\Fixture\AppData\Roaming\Widget\preferences.ini");
+        assert!(roots
+            .outside_data_files(&fixture.0, package_data, || Ok(()))
+            .is_err());
+    }
+
+    #[test]
+    fn outside_data_inventory_is_bounded_and_cancelable() {
+        let fixture = Fixture::new();
+        fixture.write("Settings.ini");
+        let budget = InventoryLimits {
+            entries: 10,
+            total_bytes: 10,
+            file_bytes: 6,
+        };
+        assert!(inventory_with_limits(&fixture.0, budget, || Ok(()))
+            .unwrap_err()
+            .contains("at most 6 bytes"));
+        assert_eq!(
+            inventory_with_limits(&fixture.0, budget, || Err("Cancelled".into())).unwrap_err(),
+            "Cancelled",
+        );
+    }
+
+    #[test]
+    fn outside_data_records_presence_against_baseline_and_flags_noise() {
+        let updated = r"C:\Users\Fixture\AppData\Roaming\Widget\Prefs.ini";
+        let removed = r"C:\Users\Fixture\AppData\Roaming\Widget\Removed.ini";
+        let created = r"C:\Users\Fixture\Documents\Widget\First.txt";
+        let noise = r"C:\Users\Fixture\AppData\Local\Temp\New.tmp";
+        let before = files(&[(updated, "before"), (removed, "before")]);
+        let first = files(&[(updated, "updated"), (created, "first")]);
+        let second = files(&[(updated, "updated"), (noise, "second")]);
+        let report = outside_changes(
+            [Some(before), Some(first), Some(second)],
+            crate::noise::is_noise_path,
+        );
+        let actual: Vec<_> = report
+            .changes
+            .iter()
+            .map(|row| {
+                (
+                    row.path.as_str(),
+                    row.after_first,
+                    row.after_second,
+                    row.noise,
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                (noise, false, true, true),
+                (updated, true, true, false),
+                (created, true, false, false)
+            ],
+        );
+        assert!(!report.unavailable);
+    }
+
+    #[test]
+    fn outside_data_registry_limits_entries_and_distinguishes_missing_coverage() {
+        let baseline = BTreeMap::new();
+        let first: BTreeMap<_, _> = (0..103)
+            .map(|index| {
+                (
+                    format!(r"HKEY_CURRENT_USER\Software\Fixture\Key{index:03}"),
+                    10_u64,
+                )
+            })
+            .collect();
+        let missing = outside_changes([Some(baseline.clone()), None, Some(first.clone())], |_| {
+            false
+        });
+        assert_eq!(missing, OutsideDataSection::default());
+        let report = outside_changes([Some(baseline), Some(first.clone()), Some(first)], |_| {
+            false
+        });
+        assert_eq!(
+            (report.changes.len(), report.omitted, report.unavailable),
+            (100, 3, false)
+        );
+        assert_eq!(
+            report.changes[0].path,
+            r"HKEY_CURRENT_USER\Software\Fixture\Key000"
+        );
+        assert_eq!(
+            report.changes[99].path,
+            r"HKEY_CURRENT_USER\Software\Fixture\Key099"
+        );
+        assert!(report
+            .changes
+            .iter()
+            .all(|row| row.after_first && row.after_second));
     }
 
     #[test]

@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 
 use crate::compile::windows::{file_digest, local_directory, require_regular_path};
 
+#[path = "windows_registry.rs"]
+mod registry;
+
 const TOOLS: &[(&str, &str)] = &[
     (
         "SbieDll.dll",
@@ -631,6 +634,22 @@ impl Sandboxie {
             }
             thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    pub(super) fn snapshot_owned_user_software(
+        &self,
+        name: &str,
+        root: &Path,
+    ) -> Result<std::collections::BTreeMap<String, u64>, String> {
+        let paths = self.verify_box(name, root)?;
+        self.quiescent(name, Duration::ZERO)?;
+        let key = paths
+            .key
+            .strip_prefix(r"\REGISTRY\USER\")
+            .ok_or("Sandboxie reported an unexpected registry root.")?;
+        let snapshot = registry::snapshot(key, root)?;
+        self.quiescent(name, Duration::ZERO)?;
+        Ok(snapshot)
     }
 
     pub(super) fn stop(&self, name: &str, root: &Path) -> Result<(), String> {

@@ -19,13 +19,17 @@ use crate::compile::windows::{
     copy_tree, local_directory, metadata_at, new_output_path, require_regular_path, within,
 };
 use crate::orchestrate::{post_capture, session_layout, SessionLayout};
-use crate::profile::{fingerprint, inventory, local_file, read_small, tree_sha256, write_new};
+use crate::profile::{
+    fingerprint, inventory, inventory_with_limits, local_file, read_small, tree_sha256, write_new,
+    InventoryLimits,
+};
 use crate::regfile::{decode_reg_export, parse_reg_with_report};
 use crate::snapshot::{normalise_path, sha256_hex, FileEntry, Snapshot};
 use crate::{Phase, SandboxMode, Session};
 pub use runtime::{
-    test_built_paf, RuntimeDataChangeKind, RuntimeDataFileChange, RuntimeDataReopenStatus,
-    RuntimeDataStatus, RuntimeReport, RuntimeRequest,
+    test_built_paf, OutsideDataChange, OutsideDataReport, OutsideDataSection,
+    RuntimeDataChangeKind, RuntimeDataFileChange, RuntimeDataReopenStatus, RuntimeDataStatus,
+    RuntimeReport, RuntimeRequest,
 };
 use sources::{setup_args_sha256, PreparedSetup};
 pub(crate) use sources::{verify_capture_sources, SetupCompanion};
@@ -457,6 +461,80 @@ impl BoxRoots {
         snapshot.files = files.into_values().collect();
         Ok(())
     }
+
+    /// Read only the current user's AppData and Documents mirrors in the owned box.
+    fn outside_data_files(
+        &self,
+        root: &Path,
+        package_data: &Path,
+        check: impl Fn() -> Result<(), String>,
+    ) -> Result<BTreeMap<String, crate::profile::Fingerprint>, String> {
+        check()?;
+        let root = local_directory(root)?;
+        let (user_mirror, profile) = &self.user[0];
+        let drive = profile
+            .ancestors()
+            .last()
+            .ok_or("Missing current-user profile drive.")?;
+        let drive_mirror = Self::drive_mirror(drive)?;
+        let mut files = BTreeMap::new();
+        let mut identities = BTreeSet::new();
+        let mut budget = InventoryLimits {
+            entries: 4_000,
+            total_bytes: 64 * 1024 * 1024,
+            file_bytes: 8 * 1024 * 1024,
+        };
+        for folder in ["AppData", "Documents"] {
+            let logical = profile.join(folder);
+            if within(&logical, package_data) || within(package_data, &logical) {
+                return Err(
+                    "The observation scope overlaps the installed package's Data folder.".into(),
+                );
+            }
+            let drive_relative = logical.strip_prefix(drive).map_err(|e| e.to_string())?;
+            for relative in [user_mirror.join(folder), drive_mirror.join(drive_relative)] {
+                check()?;
+                let Some(physical) = boxed_directory(&root, &relative)? else {
+                    continue;
+                };
+                let rows = inventory_with_limits(&physical, budget, &check)?;
+                budget.entries -= rows.len();
+                for row in rows {
+                    let Some(file) = row.file else { continue };
+                    budget.total_bytes -= file.size_bytes;
+                    let path = normalise_path(
+                        logical
+                            .join(row.path)
+                            .to_str()
+                            .ok_or("Invalid logical file path.")?,
+                    );
+                    if !identities.insert(path.to_uppercase()) {
+                        return Err("An outside-Data file has ambiguous redirected paths.".into());
+                    }
+                    files.insert(path, file);
+                }
+            }
+        }
+        Ok(files)
+    }
+}
+
+fn boxed_directory(root: &Path, relative: &Path) -> Result<Option<PathBuf>, String> {
+    let mut current = root.to_owned();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Err("Invalid path for redirected file observation.".into());
+        };
+        current.push(part);
+        if !optional_directory(&current)? {
+            return Ok(None);
+        }
+    }
+    let canonical = local_directory(&current)?;
+    if !within(&canonical, &current) || !within(&current, &canonical) {
+        return Err("The redirected observation folder changed.".into());
+    }
+    Ok(Some(canonical))
 }
 
 fn optional_directory(path: &Path) -> Result<bool, String> {

@@ -1,5 +1,13 @@
 # Decisions — PortableForge
 
+## 2026-11-14 — Observe writes outside portable Data
+
+Compare scoped files and current-user Software registry keys after each
+launch against the post-install state of the dedicated box. Keep logical
+paths and key names in the report. Check only the owned registry hive,
+where coverage depends on being able to read it. Package updates remain
+explicit choices.
+
 ## 2026-11-14 — Per-file installer test evidence
 
 Compare the existing post-install, first-launch, and second-launch inventory
