@@ -1,13 +1,14 @@
 //! Bounded artwork import and deterministic PortableApps image generation.
 
 use image::{imageops, ImageEncoder, ImageFormat, ImageReader, Limits, Rgba, RgbaImage};
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::Path;
 use std::sync::Arc;
 
 const MAX_IMPORT_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_DIMENSION: u32 = 4096;
+pub const MAX_DIMENSION: u32 = 4096;
 const PNG_SIZES: [u32; 5] = [16, 32, 75, 128, 256];
 pub const SIDEBAR_WIDTH: u32 = 328;
 pub const SIDEBAR_HEIGHT: u32 = 628;
@@ -18,6 +19,19 @@ pub(crate) const BMP_BYTES: usize = 54 + (SIDEBAR_WIDTH * SIDEBAR_HEIGHT * 3) as
 pub struct Raster(Arc<RgbaImage>);
 
 impl Raster {
+    /// Reconstruct an owned image from validated, row-major RGBA pixels.
+    pub fn from_rgba(width: u32, height: u32, pixels: Vec<u8>) -> Result<Self, String> {
+        if !(1..=MAX_DIMENSION).contains(&width)
+            || !(1..=MAX_DIMENSION).contains(&height)
+            || pixels.len() != (width * height * 4) as usize
+        {
+            return Err("Artwork dimensions and pixel data do not match.".into());
+        }
+        RgbaImage::from_raw(width, height, pixels)
+            .map(|image| Self(Arc::new(image)))
+            .ok_or_else(|| "Artwork dimensions and pixel data do not match.".into())
+    }
+
     pub fn load(path: &Path) -> Result<Self, String> {
         let file =
             File::open(path).map_err(|error| format!("Could not open the artwork: {error}"))?;
@@ -69,14 +83,16 @@ impl Raster {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FitMode {
     #[default]
     Fit,
     Crop,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Transform {
     /// Clockwise quarter turns, followed by flips in the displayed axes.
     pub quarter_turns: u8,

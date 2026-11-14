@@ -201,7 +201,7 @@ impl Flow {
                 "Save App Job"
             } else if self.discard_stage.is_some() || self.status == Some(copy::CLEANING_SOURCE) {
                 copy::CLEANING_SOURCE_TITLE
-            } else if self.scan.is_none() {
+            } else if self.scan.is_none() || self.status == Some(saved_job::LOADING) {
                 copy::CHECKING_SOURCE
             } else if self.page == Page::Program {
                 "Reading App Details"
