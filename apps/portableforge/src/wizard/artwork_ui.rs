@@ -92,6 +92,10 @@ impl Editor {
         (self.applied.icon.is_some() || self.applied.sidebar.is_some()).then_some(&self.applied)
     }
 
+    pub(super) fn set_applied(&mut self, artwork: Artwork) {
+        self.applied = artwork;
+    }
+
     pub(super) fn open(&mut self, opener: egui::Id, captured_icon: Option<Raster>) {
         self.open_with_copy(opener, captured_icon, &CAPTURE_COPY);
     }

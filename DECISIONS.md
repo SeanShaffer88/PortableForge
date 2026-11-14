@@ -6,6 +6,8 @@ Save one paused app package independently of setup drafts and profile approvals.
 Store the original source selection and editable decisions locally. Resume through
 the same source inspection and build checks, using new temporary staging. Require
 explicit redistribution permission on every resumed run.
+Keep applied artwork in the same atomic save. Restore it when the saved start
+file is still eligible. Saved artwork does not depend on imported image paths.
 
 ## 2026-11-12 — Package ZIPs and selected app files
 

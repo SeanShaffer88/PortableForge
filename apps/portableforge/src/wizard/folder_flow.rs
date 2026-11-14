@@ -131,6 +131,7 @@ enum Outcome {
     DroppedSetup(PathBuf),
     IntakeStopped,
     StageDiscarded(DiscardStage, Result<(), Failure>),
+    LoadedSavedJob(Result<SavedJob, Failure>),
     SavedForLater,
     Selected(Selection, Vec<FolderIssue>),
     #[cfg(all(windows, target_arch = "x86_64"))]
@@ -392,6 +393,8 @@ impl Flow {
             DiscardStage::Close => self.close_ready = true,
             DiscardStage::Saved => {
                 self.open = false;
+                self.artwork = artwork_ui::Editor::default();
+                self.icon = None;
                 self.status = Some("App job saved.");
             }
             DiscardStage::Stopped => self.status = Some(copy::SOURCE_STOPPED),
@@ -576,7 +579,7 @@ impl Flow {
         if let Some(path) = eligible.cloned() {
             if let Some(selection) = recommendation.filter(|selection| selection.relative == path) {
                 self.accept_selection(ctx, selection);
-                self.restore_choices(saved);
+                self.restore_choices(ctx, saved);
             } else {
                 self.page = Page::Program;
                 self.select(ctx, path);
@@ -608,11 +611,15 @@ impl Flow {
         self.output_parent.clone_from(&saved.output_parent);
     }
 
-    fn restore_choices(&mut self, saved: SavedJob) {
+    fn restore_choices(&mut self, ctx: &egui::Context, saved: SavedJob) {
         self.restore_locations(&saved);
         self.draft = saved.draft;
         self.draft.rights = false;
         self.inferred_name = false;
+        if let Some(artwork) = saved.artwork {
+            self.artwork.set_applied(artwork);
+            self.refresh_review_icon(ctx);
+        }
     }
 
     fn can_save_for_later(&self) -> bool {
@@ -694,6 +701,19 @@ impl Flow {
                 self.discard_failed();
                 self.error = Some(failure);
             }
+            Ok(Outcome::LoadedSavedJob(result)) => match result {
+                Ok(saved) => {
+                    self.mode = IntakeMode::Autonomous;
+                    self.inspect(ctx, saved.inputs.clone(), false, Some(saved.kind));
+                    if self.busy() {
+                        self.restoring = Some(saved);
+                    }
+                }
+                Err(failure) => {
+                    self.open = false;
+                    self.error = Some(failure);
+                }
+            },
             Ok(Outcome::SavedForLater) => self.discard(DiscardStage::Saved),
             Ok(Outcome::Inspected(inspection)) => {
                 self.source = inspection.original;
@@ -730,7 +750,7 @@ impl Flow {
                 self.issues = issues;
                 self.accept_selection(ctx, selection);
                 if let Some(saved) = self.restoring.take() {
-                    self.restore_choices(saved);
+                    self.restore_choices(ctx, saved);
                 }
             }
             #[cfg(all(windows, target_arch = "x86_64"))]
@@ -1001,24 +1021,22 @@ impl WizardApp {
     }
 
     fn resume_app_job(&mut self, ctx: &egui::Context) {
-        if self.folder_flow.busy() || self.folder_flow.modal_open() || self.profile_flow.busy() {
+        let flow = &mut self.folder_flow;
+        if flow.busy() || flow.modal_open() || self.profile_flow.busy() {
             return;
         }
-        match saved_job::load(&saved_job::path(&self.settings_path)) {
-            Ok(job) => {
-                let paths = job.inputs.clone();
-                self.folder_flow.mode = IntakeMode::Autonomous;
-                self.folder_flow.inspect(ctx, paths, false, Some(job.kind));
-                if self.folder_flow.busy() {
-                    self.folder_flow.restoring = Some(job);
-                }
-            }
-            Err(error) => {
-                self.folder_flow.error = Some(Failure::new(
+        let path = saved_job::path(&self.settings_path);
+        flow.start(ctx, saved_job::LOADING, move |_, _| {
+            let job = saved_job::load(&path).map_err(|error| {
+                Failure::new(
                     "The saved job could not be opened. Remove it or choose the app files again.",
                     error,
-                ));
-            }
+                )
+            });
+            Ok(Outcome::LoadedSavedJob(job))
+        });
+        if flow.busy() {
+            flow.open = true;
         }
     }
 
@@ -1392,6 +1410,7 @@ mod tests {
             assert_eq!(persisted.inputs, paths);
             assert_eq!(persisted.kind, kind);
             assert!(!persisted.draft.rights);
+            assert!(persisted.artwork.is_none());
             assert_eq!(std::fs::read(&wizard.settings_path).unwrap(), setup_draft);
             let mut json: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -1424,6 +1443,109 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_jobs_restore_applied_artwork_for_zip_and_loose_files() {
+        use portableforge_core::artwork::render_sidebar;
+
+        for kind in [SourceKind::Zip, SourceKind::Files] {
+            let fixture = AppJobFixture::new();
+            let ctx = egui::Context::default();
+            let paths = match kind {
+                SourceKind::Zip => vec![fixture.zip.clone()],
+                SourceKind::Files => vec![fixture.app.clone(), fixture.config.clone()],
+                SourceKind::Folder => unreachable!(),
+            };
+            let mut wizard = fixture.wizard();
+            wizard.folder_flow.mode = IntakeMode::Autonomous;
+            wizard.inspect_app_inputs(&ctx, paths, false);
+            finish_folder_work(&mut wizard.folder_flow, &ctx);
+            let initial_stage = wizard
+                .folder_flow
+                .staged
+                .as_ref()
+                .unwrap()
+                .root()
+                .to_owned();
+            let artwork = job_artwork(kind == SourceKind::Zip);
+            let icon = render_icon(artwork.icon.as_ref().unwrap(), 32).unwrap();
+            let expected_pane = render_sidebar(
+                artwork.sidebar.as_ref().unwrap(),
+                Some(&render_icon(artwork.icon.as_ref().unwrap(), 256).unwrap()),
+            )
+            .unwrap();
+            wizard.folder_flow.artwork.set_applied(artwork.clone());
+            wizard.save_app_job(&ctx);
+            finish_folder_work(&mut wizard.folder_flow, &ctx);
+            assert!(!initial_stage.exists());
+            drop(wizard);
+
+            let mut reopened = fixture.wizard();
+            reopened.resume_app_job(&ctx);
+            finish_folder_work(&mut reopened.folder_flow, &ctx);
+            let flow = &mut reopened.folder_flow;
+            let resumed_stage = flow.staged.as_ref().unwrap().root().to_owned();
+            assert_ne!(resumed_stage, initial_stage);
+            assert_eq!(flow.selected.as_deref(), Some(Path::new("Widget.exe")));
+            let restored = flow.artwork.artwork().unwrap();
+            let restored_icon = restored.icon.as_ref().unwrap();
+            let restored_pane = restored.sidebar.as_ref().unwrap();
+            assert_eq!(restored_icon.transform, artwork.icon.unwrap().transform);
+            assert_eq!(
+                restored_pane.transform,
+                artwork.sidebar.as_ref().unwrap().transform
+            );
+            assert_eq!(
+                restored_pane.background,
+                artwork.sidebar.as_ref().unwrap().background
+            );
+            assert_eq!(restored_pane.source.is_some(), kind == SourceKind::Zip);
+            assert_eq!(render_icon(restored_icon, 32).unwrap().rgba(), icon.rgba());
+            assert_eq!(
+                render_sidebar(
+                    restored_pane,
+                    Some(&render_icon(restored_icon, 256).unwrap()),
+                )
+                .unwrap()
+                .rgba(),
+                expected_pane.rgba()
+            );
+            assert!(flow.icon.is_some());
+            assert!(!flow.draft.rights);
+            flow.back();
+            finish_folder_work(flow, &ctx);
+            assert!(!resumed_stage.exists());
+        }
+    }
+
+    fn job_artwork(imported_pane: bool) -> portableforge_core::artwork::Artwork {
+        use portableforge_core::artwork::{
+            Artwork, FitMode, IconArtwork, SidebarArtwork, Transform,
+        };
+
+        Artwork {
+            icon: Some(IconArtwork {
+                source: Raster::from_rgba(2, 1, vec![230, 11, 50, 255, 10, 43, 201, 222]).unwrap(),
+                transform: Transform {
+                    quarter_turns: 1,
+                    flip_horizontal: true,
+                    ..Default::default()
+                },
+            }),
+            sidebar: Some(SidebarArtwork {
+                source: imported_pane.then(|| {
+                    Raster::from_rgba(1, 2, vec![0, 11, 79, 200, 90, 21, 8, 153]).unwrap()
+                }),
+                transform: Transform {
+                    quarter_turns: 2,
+                    flip_vertical: true,
+                    fit: FitMode::Crop,
+                    ..Default::default()
+                },
+                background: [10, 20, 30],
+            }),
+        }
+    }
+
+    #[test]
     fn saved_app_job_rejects_missing_or_reclassified_sources_and_reopens_ambiguous_choice() {
         let fixture = AppJobFixture::new();
         let ctx = egui::Context::default();
@@ -1438,6 +1560,7 @@ mod tests {
         wizard.folder_flow.select(&ctx, "Other.exe".into());
         finish_folder_work(&mut wizard.folder_flow, &ctx);
         wizard.folder_flow.draft.name = "Other Reviewed".into();
+        wizard.folder_flow.artwork.set_applied(job_artwork(true));
         wizard.save_app_job(&ctx);
         finish_folder_work(&mut wizard.folder_flow, &ctx);
 
@@ -1449,6 +1572,7 @@ mod tests {
             Some(Path::new("Other.exe"))
         );
         assert_eq!(reopened.folder_flow.draft.name, "Other Reviewed");
+        assert!(reopened.folder_flow.artwork.artwork().is_some());
 
         std::fs::remove_file(&extra).unwrap();
         reopened.resume_app_job(&ctx);
@@ -1456,6 +1580,9 @@ mod tests {
         assert!(reopened.folder_flow.selected.is_none());
         assert_eq!(reopened.folder_flow.page, Page::Program);
         assert_ne!(reopened.folder_flow.draft.name, "Other Reviewed");
+        reopened.folder_flow.select(&ctx, "Widget.exe".into());
+        finish_folder_work(&mut reopened.folder_flow, &ctx);
+        assert!(reopened.folder_flow.artwork.artwork().is_none());
         assert!(!reopened.folder_flow.build_ready());
 
         std::fs::rename(&fixture.folder, fixture.root.join("Unavailable")).unwrap();

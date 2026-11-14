@@ -1,21 +1,24 @@
 //! One local app-file draft. This data never grants permission to build.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use portableforge_core::folder::input::DropPlan;
+use portableforge_core::{artwork::Artwork, folder::input::DropPlan};
 use serde::{Deserialize, Serialize};
 
 use super::draft::Draft;
 
+mod artwork;
+
 pub(super) const SAVE: &str = "Save for Later";
 pub(super) const SAVING: &str = "Saving the app job…";
 pub(super) const RESUME: &str = "Resume App Package";
+pub(super) const LOADING: &str = "Opening saved job…";
 pub(super) const REMOVE: &str = "Remove Saved Job";
-const MAX_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_INPUTS: usize = 20_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -47,6 +50,8 @@ pub(super) struct SavedJob {
     pub(super) launcher_tools: PathBuf,
     pub(super) installer_tools: PathBuf,
     pub(super) output_parent: PathBuf,
+    #[serde(skip)]
+    pub(super) artwork: Option<Artwork>,
 }
 
 impl SavedJob {
@@ -60,6 +65,7 @@ impl SavedJob {
             launcher_tools: flow.launcher_tools.clone(),
             installer_tools: flow.installer_tools.clone(),
             output_parent: flow.output_parent.clone(),
+            artwork: flow.artwork.artwork().cloned(),
         }
     }
 
@@ -83,6 +89,7 @@ impl SavedJob {
             || !optional_absolute(&self.launcher_tools)
             || !optional_absolute(&self.installer_tools)
             || !optional_absolute(&self.output_parent)
+            || (self.artwork.is_some() && self.selected.is_none())
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -104,16 +111,29 @@ pub(super) fn load(path: &Path) -> io::Result<SavedJob> {
             "The saved job is not a file.",
         ));
     }
-    let file = File::open(path)?;
-    let mut bytes = Vec::new();
-    file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "The saved job is too large.",
-        ));
-    }
-    let job: SavedJob = serde_json::from_slice(&bytes)?;
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut magic = [0; artwork::MAGIC.len()];
+    let has_artwork = if len >= magic.len() as u64 {
+        file.read_exact(&mut magic)?;
+        magic == artwork::MAGIC
+    } else {
+        false
+    };
+    let job = if has_artwork {
+        artwork::read(file, len)?
+    } else {
+        file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        file.take(MAX_METADATA_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_METADATA_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "The saved job is too large.",
+            ));
+        }
+        serde_json::from_slice(&bytes)?
+    };
     job.validate()?;
     Ok(job)
 }
@@ -140,13 +160,7 @@ pub(super) fn revision(path: &Path) -> io::Result<Option<Revision>> {
 
 pub(super) fn save(path: &Path, expected: Option<Revision>, job: &SavedJob) -> io::Result<()> {
     job.validate()?;
-    let bytes = serde_json::to_vec(job)?;
-    if bytes.len() as u64 > MAX_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "The saved job is too large.",
-        ));
-    }
+    let contents = artwork::Contents::new(job)?;
     with_slot(path, expected, || {
         static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let clock = SystemTime::now()
@@ -162,7 +176,7 @@ pub(super) fn save(path: &Path, expected: Option<Revision>, job: &SavedJob) -> i
             .write(true)
             .create_new(true)
             .open(&temporary)?;
-        let result = file.write_all(&bytes).and_then(|()| file.sync_all());
+        let result = contents.write(&mut file).and_then(|()| file.sync_all());
         drop(file);
         let result = result.and_then(|()| fs::rename(&temporary, path));
         if result.is_err() {
