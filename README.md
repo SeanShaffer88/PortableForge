@@ -49,6 +49,8 @@ On **Keep AppData Settings Portable**, optionally redirect Roaming or Local AppD
 
 Open the test page under **Build Result**, then choose **Test Installer** to try it in a fresh Sandboxie-Plus box. Follow the prompts to finish setup and try the app twice. **Show Test Details** lists changes inside the package’s `Data` folder and what happened to those files after reopening. The report keeps up to 100 file paths and counts omitted entries. The test also checks that the box was removed.
 
+**Outside Data** lists changed files in the standard AppData and Documents folders under the boxed user’s profile and changed keys under **HKEY_CURRENT_USER\Software**. The Software check excludes the Classes alias. Each launch is compared with the state just after installation. The report shows paths and key names and identifies unavailable checks. Review AppData redirection before rebuilding if you want to change it.
+
 Use **Package Artwork** to edit the app icon and installer left pane on their own pages. Preview and apply your choices before building.
 
 PortableForge leaves the source folder intact and preserves its directory layout in staging. The official installer builder skips housekeeping files such as `thumbs.db`. It warns about likely fixed paths and parent-folder references in supported settings files. The folder check does not start the app, so the build result reports that portability at runtime is unverified. A prepared PortableApps.com package can use the trusted prepared-package command described below.

@@ -343,6 +343,33 @@ mod tests {
                 }],
                 data_file_changes_omitted: 0,
                 data_status: RuntimeDataStatus::ObservedChangesRetained,
+                outside_data: {
+                    use portableforge_core::sbie_verified::{
+                        OutsideDataChange, OutsideDataReport, OutsideDataSection,
+                    };
+                    OutsideDataReport {
+                        files: OutsideDataSection {
+                            changes: vec![OutsideDataChange {
+                                path: r"C:\Users\Example\Documents\Widget.txt".into(),
+                                after_first: true,
+                                after_second: false,
+                                noise: false,
+                            }],
+                            omitted: 0,
+                            unavailable: false,
+                        },
+                        registry: OutsideDataSection {
+                            changes: vec![OutsideDataChange {
+                                path: r"HKEY_CURRENT_USER\Software\Widget".into(),
+                                after_first: false,
+                                after_second: true,
+                                noise: false,
+                            }],
+                            omitted: 0,
+                            unavailable: false,
+                        },
+                    }
+                },
                 cleanup_verified: true,
             },
             std::path::Path::new(r"C:\Tests\Installer-Test"),
@@ -483,9 +510,12 @@ mod tests {
                 "Portable data changes",
                 r"Data\settings.ini",
                 "Same contents after reopening",
+                "Outside Data",
+                r"C:\Users\Example\Documents\Widget.txt",
+                r"HKEY_CURRENT_USER\Software\Widget",
             ];
             let mut displayed = String::new();
-            for _ in 0..5 {
+            for _ in 0..9 {
                 let output = frame.draw(&mut wizard, Default::default());
                 for shape in &output.shapes {
                     let egui::Shape::Text(text) = &shape.shape else {
