@@ -1143,7 +1143,6 @@ impl WizardApp {
         if self.folder_flow.open {
             self.show_folder_flow(ctx);
             self.show_shell_popup(ctx);
-            self.folder_flow.show_artwork(ctx);
             #[cfg(all(windows, target_arch = "x86_64"))]
             self.folder_flow.show_test_confirmation(ctx);
             return;

@@ -36,9 +36,24 @@ pub(super) enum Page {
     About,
     Package,
     Rights,
-    Files,
     Findings,
+    Icon,
+    InstallerArtwork,
+    Tools,
+    Output,
+    Build,
     Done,
+    Test,
+}
+
+impl Page {
+    fn is_artwork(self) -> bool {
+        matches!(self, Self::Icon | Self::InstallerArtwork)
+    }
+
+    fn is_result(self) -> bool {
+        matches!(self, Self::Done | Self::Test)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -73,9 +88,10 @@ pub(super) struct Flow {
     launcher_tools: PathBuf,
     installer_tools: PathBuf,
     page: Page,
+    roadmap_positions: [Option<usize>; 7],
     program_page: usize,
     issue_page: usize,
-    findings_from: Page,
+    findings_from: Option<Page>,
     error: Option<Failure>,
     result: Option<Delivery>,
     #[cfg(all(windows, target_arch = "x86_64"))]
@@ -220,15 +236,20 @@ impl Flow {
             return Notice::Progress(status);
         }
         Notice::Progress(match self.page() {
-            Page::Done if self.busy() => {
+            Page::Done | Page::Test if self.busy() => {
                 "The installer is built. The current check is still running."
             }
             Page::Done => "The installer is ready.",
+            Page::Test => "Review or run the installer test.",
             _ if self.busy() => "PortableForge is preparing your package.",
             Page::Program => "Choose the file that opens the app.",
             Page::App | Page::About | Page::Package => "Review the app details.",
             Page::Rights => "Review permission to include the files.",
-            Page::Files => "Choose the tools and output folder.",
+            Page::Icon => "Review the app icon.",
+            Page::InstallerArtwork => "Review the installer artwork.",
+            Page::Tools => "Choose the tools that build the package.",
+            Page::Output => "Choose where to save the installer.",
+            Page::Build => "Check the package before building.",
             Page::Findings => "Review the findings.",
             Page::Review => "Review the source files and package choices.",
         })
@@ -263,10 +284,11 @@ impl Flow {
 
     pub(super) fn modal_open(&self) -> bool {
         #[cfg(all(windows, target_arch = "x86_64"))]
-        if self.runtime.prompt.is_some() {
-            return true;
+        {
+            self.runtime.prompt.is_some()
         }
-        self.artwork.is_open()
+        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        false
     }
 
     fn test_in_progress(&self) -> bool {
@@ -287,20 +309,17 @@ impl Flow {
         false
     }
 
-    #[cfg(windows)]
-    fn open_artwork(&mut self, opener: egui::Id) {
-        self.artwork.open_folder(
-            opener,
-            self.base_icon
-                .clone()
-                .unwrap_or_else(default_application_icon),
-        );
-    }
-
-    pub(super) fn show_artwork(&mut self, ctx: &egui::Context) {
-        if self.artwork.show(ctx) {
-            self.refresh_review_icon(ctx);
+    fn go_to(&mut self, page: Page) {
+        if self.page.is_artwork() && !page.is_artwork() {
+            self.artwork.cancel_folder_page();
         }
+        if self.page == Page::Findings {
+            self.findings_from = None;
+        }
+        if page == Page::Findings && self.page != page {
+            self.issue_page = 0;
+        }
+        self.page = page;
     }
 
     fn refresh_review_icon(&mut self, ctx: &egui::Context) {
@@ -330,23 +349,38 @@ impl Flow {
         if self.busy() || self.modal_open() {
             return;
         }
-        if self.page == Page::Findings {
-            self.page = self.findings_from;
-        } else if matches!(self.page, Page::Review | Page::Done) {
-            self.discard(DiscardStage::Back);
-        } else {
-            self.page = Page::Review;
+        let previous = match self.page {
+            Page::Review | Page::Done => {
+                self.discard(DiscardStage::Back);
+                return;
+            }
+            Page::Program => Page::Review,
+            Page::App => Page::Program,
+            Page::About => Page::App,
+            Page::Package => Page::About,
+            Page::Rights => Page::Package,
+            Page::Findings => self.findings_from.unwrap_or(Page::Rights),
+            Page::Icon => Page::Findings,
+            Page::InstallerArtwork => Page::Icon,
+            Page::Tools if cfg!(windows) => Page::InstallerArtwork,
+            Page::Tools => Page::Findings,
+            Page::Output => Page::Tools,
+            Page::Build => Page::Output,
+            Page::Test => Page::Done,
+        };
+        if self.page != previous {
+            self.go_to(previous);
         }
     }
 
     pub(super) fn toggle_findings(&mut self) {
-        if !self.busy() && !self.modal_open() {
+        if !self.busy() && !self.modal_open() && !self.page.is_result() {
             if self.page == Page::Findings {
-                self.page = self.findings_from;
+                self.go_to(self.findings_from.unwrap_or(Page::Rights));
             } else {
-                self.findings_from = self.page;
-                self.issue_page = 0;
-                self.page = Page::Findings;
+                let origin = self.page;
+                self.go_to(Page::Findings);
+                self.findings_from = Some(origin);
             }
         }
     }
@@ -418,7 +452,7 @@ impl Flow {
     }
 
     fn discard_failed(&mut self) {
-        if self.page != Page::Done {
+        if !self.page.is_result() {
             self.scan = None;
             self.selected = None;
         }
@@ -635,7 +669,8 @@ impl Flow {
     }
 
     fn can_save_for_later(&self) -> bool {
-        matches!(self.page, Page::Review | Page::Program)
+        !self.page.is_artwork()
+            && !self.page.is_result()
             && self.source_kind.is_some()
             && self
                 .scan
@@ -760,6 +795,8 @@ impl Flow {
                 self.accept_selection(ctx, selection);
                 if let Some(saved) = self.restoring.take() {
                     self.restore_choices(ctx, saved);
+                } else {
+                    self.page = Page::Program;
                 }
             }
             #[cfg(all(windows, target_arch = "x86_64"))]
@@ -850,16 +887,16 @@ impl Flow {
         }
         if self.launcher_tools.as_os_str().is_empty() || self.installer_tools.as_os_str().is_empty()
         {
-            return Some((Page::Files, "Choose the two PortableApps.com tool folders."));
+            return Some((Page::Tools, "Choose the two PortableApps.com tool folders."));
         }
         if self.output_parent.as_os_str().is_empty() {
-            return Some((Page::Files, "Choose where to save the installer."));
+            return Some((Page::Output, "Choose where to save the installer."));
         }
         None
     }
 
     pub(super) fn build_ready(&self) -> bool {
-        self.page == Page::Review
+        self.page == Page::Build
             && !self.busy()
             && !self.modal_open()
             && self.scan.is_some()
@@ -867,7 +904,7 @@ impl Flow {
     }
 
     pub(super) fn show_build_action(&self) -> bool {
-        self.page == Page::Review
+        self.page == Page::Build
             && self.scan.as_ref().is_some_and(|scan| !scan.is_prepared())
             && !self.busy()
     }
@@ -1103,6 +1140,7 @@ impl WizardApp {
         if files.is_empty()
             || self.folder_flow.busy()
             || self.folder_flow.modal_open()
+            || self.folder_flow.page.is_artwork()
             || self.profile_flow.busy()
         {
             return;
@@ -1239,8 +1277,10 @@ mod tests {
     fn build_action_requires_complete_facts_and_explicit_permission() {
         let mut wizard = populated();
         let flow = &mut wizard.folder_flow;
+        flow.page = Page::Build;
         flow.draft.rights = false;
         assert!(!flow.build_ready());
+        assert_eq!(flow.blocker().unwrap().0, Page::Rights);
         flow.draft.rights = true;
         flow.draft.version = "unknown".into();
         assert!(!flow.build_ready());
@@ -1261,13 +1301,14 @@ mod tests {
 
     #[cfg(all(windows, target_arch = "x86_64"))]
     #[test]
-    fn a_ready_review_waits_for_an_explicit_build() {
+    fn ready_pages_wait_for_an_explicit_build() {
         let mut wizard = populated();
         let ctx = egui::Context::default();
         super::super::theme::install_fonts(&ctx);
         let mut frame = eframe::Frame::_new_kittest();
-        for _ in 0..3 {
-            assert!(wizard.folder_flow.build_ready());
+        for page in [Page::Review, Page::Tools, Page::Output, Page::Build] {
+            wizard.folder_flow.page = page;
+            assert_eq!(wizard.folder_flow.build_ready(), page == Page::Build);
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 eframe::App::update(&mut wizard, ctx, &mut frame);
             });
@@ -1768,7 +1809,7 @@ mod tests {
         super::super::theme::install_fonts(&ctx);
         let bounds = egui::Rect::from_min_size(
             egui::Pos2::ZERO,
-            egui::Vec2::from(super::super::dense::MIN_CONTENT),
+            egui::Vec2::from(super::super::window_scale::CANVAS),
         );
         let mut frame = eframe::Frame::_new_kittest();
         let mut draw = |wizard: &mut WizardApp, events| {
@@ -1809,8 +1850,9 @@ mod tests {
             }
         };
 
-        click(&mut wizard, "Edit Package Artwork…");
-        assert!(wizard.folder_flow.modal_open());
+        click(&mut wizard, "Package Artwork");
+        assert_eq!(wizard.folder_flow.page, Page::Icon);
+        assert!(!wizard.folder_flow.modal_open());
         assert!(!wizard.folder_flow.build_ready());
         let source = wizard.folder_flow.source.clone();
         wizard.inspect_dropped_files(
@@ -1821,17 +1863,16 @@ mod tests {
             }],
         );
         assert_eq!(wizard.folder_flow.source, source);
-        wizard.folder_flow.back();
-        assert!(wizard.folder_flow.open);
-
-        click(&mut wizard, "Installer Left Pane");
+        click(&mut wizard, "Next");
+        assert_eq!(wizard.folder_flow.page, Page::InstallerArtwork);
         click(&mut wizard, "Use app icon");
         assert!(wizard.folder_flow.artwork.artwork().is_none());
         click(&mut wizard, "Apply Artwork");
-        click(&mut wizard, "Edit Package Artwork…");
-        click(&mut wizard, "Installer Left Pane");
+        assert_eq!(wizard.folder_flow.page, Page::Tools);
+        click(&mut wizard, "Package Artwork");
+        assert_eq!(wizard.folder_flow.page, Page::InstallerArtwork);
         click(&mut wizard, "Use default left pane");
-        click(&mut wizard, "Cancel");
+        click(&mut wizard, "Discard Artwork Changes");
         let flow = &mut wizard.folder_flow;
         assert!(!flow.modal_open());
         assert!(flow.artwork.artwork().unwrap().sidebar.is_some());
@@ -1928,52 +1969,67 @@ mod tests {
                     &[
                         "Review Your Package",
                         "App Files · Widget.zip",
-                        #[cfg(windows)]
-                        "Edit Package Artwork…",
-                        "Build Installer",
                         saved_job::SAVE,
-                        copy::RIGHTS,
+                        "Next",
                     ][..],
                 ),
                 (
                     Page::Program,
                     &["Choose the File That Starts the App", "Currently selected"][..],
                 ),
-                (Page::App, &["App Name", "Publisher", "Version Number"][..]),
-                (Page::About, &["App Website", "Short Description"][..]),
+                (
+                    Page::App,
+                    &["Edit App Details", "App Name", "Version Number"][..],
+                ),
+                (
+                    Page::About,
+                    &[
+                        "Describe the App",
+                        "Publisher",
+                        "App Website",
+                        "Short Description",
+                    ][..],
+                ),
                 (
                     Page::Package,
                     &["Package Name", "Installer Language", "Multilingual"][..],
                 ),
                 (
                     Page::Rights,
-                    &["Open source", "Requires administrator access"][..],
+                    &["Open source", "Requires administrator access", copy::RIGHTS][..],
+                ),
+                #[cfg(windows)]
+                (Page::Icon, &["Edit App Icon", "Import image…", "Next"][..]),
+                #[cfg(windows)]
+                (
+                    Page::InstallerArtwork,
+                    &["Edit Installer Artwork", "Import image…", "Apply Artwork"][..],
                 ),
                 (
-                    Page::Files,
-                    &[
-                        "Choose Launcher Folder…",
-                        "Choose Installer Folder…",
-                        "Change Save Location…",
-                    ][..],
+                    Page::Tools,
+                    &["Choose Launcher Folder…", "Choose Installer Folder…"][..],
                 ),
+                (
+                    Page::Output,
+                    &["Choose Where to Save", "Change Save Location…"][..],
+                ),
+                (Page::Build, &["Build & Output · 3 of 3", "Save To"][..]),
                 (
                     Page::Findings,
                     &["Folder Findings", "Review before moving the app"][..],
                 ),
                 (
                     Page::Done,
-                    &[
-                        "Installer Built",
-                        "Build Receipt",
-                        "View Output Folder",
-                        #[cfg(all(windows, target_arch = "x86_64"))]
-                        copy::TEST_INSTALLER,
-                    ][..],
+                    &["Installer Built", "Build Receipt", "View Output Folder"][..],
+                ),
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                (
+                    Page::Test,
+                    &["Test the Installer", copy::TEST_INSTALLER][..],
                 ),
             ];
             for (page, labels) in pages {
-                wizard.folder_flow.page = page;
+                wizard.folder_flow.go_to(page);
                 if page == Page::Done {
                     wizard.folder_flow.result = Some(Delivery {
                         artifact: wizard
@@ -2027,7 +2083,7 @@ mod tests {
                 )
             };
             for (page, labels) in pages {
-                wizard.folder_flow.page = page;
+                wizard.folder_flow.go_to(page);
                 draw(&mut wizard);
                 let output = draw(&mut wizard);
                 for &label in labels

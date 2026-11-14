@@ -48,7 +48,7 @@ impl Delivery {
 
 impl Flow {
     pub(super) fn open_test_confirmation(&mut self) {
-        if self.page == Page::Done && self.result.is_some() && !self.busy() && !self.modal_open() {
+        if self.page == Page::Test && self.result.is_some() && !self.busy() && !self.modal_open() {
             self.runtime.prompt = Some(Confirmation { focus_first: true });
         }
     }
@@ -311,7 +311,7 @@ mod tests {
         WizardApp {
             folder_flow: Flow {
                 open: true,
-                page: Page::Done,
+                page: Page::Test,
                 result: Some(Delivery {
                     artifact: directory.join("WidgetPortable_1.2.0_English.paf.exe"),
                     manifest: directory.join("build-manifest.json"),

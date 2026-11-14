@@ -5,10 +5,65 @@ use portableforge_core::folder::IssueSeverity;
 use portableforge_core::guide::folder_flow as copy;
 use portableforge_core::paf::CATEGORIES;
 
+#[cfg(windows)]
+use super::super::artwork_ui::ArtworkPage;
 use super::super::{dense, file_picker, package_review, shell, theme, WizardApp};
 use super::draft::{suggested_id, Language};
 use super::saved_job;
 use super::{Flow, Page};
+
+const ROADMAP: [(&str, &[Page], &str); 7] = [
+    (
+        "Package Review",
+        &[Page::Review],
+        "Check the files you selected for this package.",
+    ),
+    (
+        "Start File",
+        &[Page::Program],
+        "Choose the file that starts the app.",
+    ),
+    (
+        "App Details",
+        &[Page::App, Page::About, Page::Package, Page::Rights],
+        "Review the app name, publisher, package details, and sharing permission.",
+    ),
+    (
+        "File Findings",
+        &[Page::Findings],
+        "Read what PortableForge found in your source files.",
+    ),
+    (
+        "Package Artwork",
+        &[Page::Icon, Page::InstallerArtwork],
+        "Edit the app icon and installer image.",
+    ),
+    (
+        "Build & Output",
+        &[Page::Tools, Page::Output, Page::Build],
+        "Choose the tools and save location, then build the installer.",
+    ),
+    (
+        "Build Result",
+        &[Page::Done, Page::Test],
+        "Find and test the installer you built.",
+    ),
+];
+
+impl Page {
+    fn roadmap_position(self) -> (usize, usize) {
+        ROADMAP
+            .iter()
+            .enumerate()
+            .find_map(|(group, (_, pages, _))| {
+                pages
+                    .iter()
+                    .position(|page| *page == self)
+                    .map(|step| (group, step))
+            })
+            .expect("each folder page has a roadmap row")
+    }
+}
 
 impl WizardApp {
     pub(in crate::wizard) fn show_app_intake_picker(&mut self, ui: &mut egui::Ui) {
@@ -81,8 +136,6 @@ impl WizardApp {
                         !flow.busy() && !flow.modal_open(),
                         egui::Button::new(if flow.page == Page::Done {
                             "Choose Another App"
-                        } else if flow.details_next_step().is_some() {
-                            "Back to Review"
                         } else {
                             "Back"
                         }),
@@ -114,7 +167,7 @@ impl WizardApp {
                                     ctx.request_repaint();
                                 }
                             }
-                        } else if flow.page == Page::Done {
+                        } else if flow.page.is_result() {
                             let enabled = !flow.busy() && !flow.modal_open();
                             if let Some(folder) = flow.result.as_ref().and_then(|delivery| delivery.artifact.parent()) {
                                 ui.add_enabled_ui(enabled, |ui| {
@@ -131,15 +184,6 @@ impl WizardApp {
                             if stop.clicked() {
                                 flow.stop();
                             }
-                        } else if let Some((next, label)) = flow.details_next_step() {
-                            let enabled = !flow.busy() && !flow.modal_open();
-                            let action = dense::primary_action(ui, enabled, label);
-                            if enabled {
-                                shell::register_region(ui, shell::Region::Footer, action.id);
-                            }
-                            if action.clicked() {
-                                flow.page = next;
-                            }
                         } else if flow.show_build_action() {
                             let build = dense::primary_action(ui, flow.build_ready(), copy::BUILD);
                             if flow.build_ready() {
@@ -147,6 +191,16 @@ impl WizardApp {
                             }
                             if build.clicked() {
                                 flow.build(ctx);
+                            }
+                        }
+                        if let Some((_, label)) = flow.next_step().filter(|_| !flow.busy()) {
+                            let enabled = flow.can_continue();
+                            let action = dense::primary_action(ui, enabled, label);
+                            if enabled {
+                                shell::register_region(ui, shell::Region::Footer, action.id);
+                            }
+                            if action.clicked() {
+                                flow.continue_page(ctx);
                             }
                         }
                     });
@@ -189,18 +243,60 @@ impl WizardApp {
 }
 
 impl Flow {
-    fn details_next_step(&self) -> Option<(Page, &'static str)> {
-        match self.page {
-            Page::App => Some((Page::About, "Next: About")),
-            Page::About => Some((Page::Package, "Next: Package")),
-            Page::Package => Some((Page::Rights, "Next: License")),
-            Page::Rights => Some((Page::Review, "Return to Review")),
-            _ => None,
+    fn next_step(&self) -> Option<(Page, &'static str)> {
+        let next = match self.page {
+            Page::Review
+                if self
+                    .scan
+                    .as_ref()
+                    .is_some_and(|scan| !scan.is_prepared() && !scan.candidates.is_empty()) =>
+            {
+                Page::Program
+            }
+            Page::Program => Page::App,
+            Page::App => Page::About,
+            Page::About => Page::Package,
+            Page::Package => Page::Rights,
+            Page::Rights => Page::Findings,
+            Page::Findings if cfg!(windows) => Page::Icon,
+            Page::Findings => Page::Tools,
+            Page::Icon => Page::InstallerArtwork,
+            Page::InstallerArtwork => return Some((Page::Tools, "Apply Artwork")),
+            Page::Tools => Page::Output,
+            Page::Output => Page::Build,
+            Page::Done if cfg!(all(windows, target_arch = "x86_64")) => Page::Test,
+            _ => return None,
+        };
+        Some((next, "Next"))
+    }
+
+    pub(in crate::wizard) fn can_continue(&self) -> bool {
+        !self.busy()
+            && !self.modal_open()
+            && self.next_step().is_some()
+            && match self.page {
+                Page::Program | Page::Findings => self.selected.is_some(),
+                Page::InstallerArtwork => self.artwork.can_apply_folder_page(),
+                Page::Done => self.result.is_some(),
+                _ => true,
+            }
+    }
+
+    pub(in crate::wizard) fn continue_page(&mut self, ctx: &egui::Context) {
+        if !self.can_continue() {
+            return;
+        }
+        if let Some((next, _)) = self.next_step() {
+            if self.page == Page::InstallerArtwork && self.artwork.apply_folder_page() {
+                self.refresh_review_icon(ctx);
+            }
+            self.go_to(next);
+            ctx.request_repaint();
         }
     }
 
     pub(in crate::wizard) fn show_compact_roadmap(&mut self, ui: &mut egui::Ui) {
-        let finished = self.page == Page::Done;
+        let finished = self.page.is_result();
         let review = self.page == Page::Review;
         let can_review = !self.busy() && !self.modal_open() && !finished;
         ui.horizontal(|ui| {
@@ -210,17 +306,11 @@ impl Flow {
             );
             dense::field_help(&review_item, "Review the source files and the choices needed to build the package.");
             if review_item.clicked() {
-                self.page = Page::Review;
+                self.go_to(Page::Review);
             }
             ui.label(egui::RichText::new("›").weak());
-            let current = match self.page {
-                Page::Review => "Configuration",
-                Page::Program => "Start file",
-                Page::App | Page::About | Page::Package | Page::Rights => "App details",
-                Page::Files => "Tools and output",
-                Page::Findings => "File findings",
-                Page::Done => "Configuration",
-            };
+            let (group, _) = self.page.roadmap_position();
+            let current = if review || finished { "Configuration" } else { ROADMAP[group].0 };
             if review || finished {
                 ui.weak(current);
             } else {
@@ -239,87 +329,39 @@ impl Flow {
     fn show_roadmap(&mut self, ui: &mut egui::Ui) {
         let ready = !self.busy()
             && !self.modal_open()
-            && self.scan.as_ref().is_some_and(|scan| !scan.is_prepared())
-            && self.page != Page::Done;
-        let selected_file = ready && self.selected.is_some();
-        let finished = self.page == Page::Done;
-        for (label, page, active, enabled, help) in [
-            (
-                "Package Review",
-                Page::Review,
-                self.page == Page::Review,
-                ready || self.page == Page::Review,
-                "Check the source, start file and required choices before creating your installer.",
-            ),
-            (
-                "Start File",
-                Page::Program,
-                self.page == Page::Program,
-                ready && self.scan.as_ref().is_some_and(|scan| !scan.candidates.is_empty()),
-                "Choose which program to open when someone runs the portable app. Use the file you would normally open to start this app.",
-            ),
-            (
-                "App Details",
-                Page::App,
-                matches!(self.page, Page::App | Page::About | Page::Package | Page::Rights),
-                selected_file,
-                "Set the name, publisher, version, website, and license information that appear in the portable package.",
-            ),
-            (
-                "File Findings",
-                Page::Findings,
-                self.page == Page::Findings,
-                ready,
-                "Read what PortableForge found in the source files. Resolve anything marked to fix before building.",
-            ),
-        ] {
-            let item = dense::roadmap_item(ui, label, active, enabled, help);
+            && self.scan.as_ref().is_some_and(|scan| !scan.is_prepared());
+        let finished = self.result.is_some();
+        let editable = ready && !finished;
+        let selected = editable && self.selected.is_some();
+        let (current, substep) = self.page.roadmap_position();
+        self.roadmap_positions[current] = Some(substep);
+        for (group, (label, pages, help)) in ROADMAP.into_iter().enumerate() {
+            let active = group == current;
+            let enabled = match pages[0] {
+                Page::Review => editable || (active && !self.busy()),
+                Page::Program => {
+                    editable
+                        && self
+                            .scan
+                            .as_ref()
+                            .is_some_and(|scan| !scan.candidates.is_empty())
+                }
+                Page::App | Page::Tools => selected,
+                Page::Findings => editable,
+                Page::Icon => selected && cfg!(windows),
+                Page::Done => finished && !self.busy() && !self.modal_open(),
+                _ => unreachable!("roadmap rows start with an entry page"),
+            };
+            let last = self.roadmap_positions[group];
+            let progress = (pages.len() > 1).then_some((last, pages.len()));
+            let item =
+                dense::roadmap_item_with_progress(ui, label, active, enabled, help, progress);
             if active && enabled {
                 shell::register_region(ui, shell::Region::Sidebar, item.id);
             }
             if item.clicked() && !active {
-                if page == Page::Findings {
-                    self.toggle_findings();
-                } else {
-                    self.page = page;
-                }
+                self.go_to(pages[last.unwrap_or_default()]);
             }
-        }
-        #[cfg(windows)]
-        {
-            let item = dense::roadmap_item(
-                ui,
-                "Package Artwork",
-                self.artwork.is_open(),
-                selected_file,
-                "Preview the app icon and the image shown on the left side of the installer. Apply changes to include them in this package.",
-            );
-            if item.clicked() {
-                self.open_artwork(item.id);
-            }
-        }
-        let item = dense::roadmap_item(
-            ui,
-            "Build & Output",
-            self.page == Page::Files,
-            selected_file,
-            "Choose the installed PortableApps.com tools and the folder that will receive your new installer.",
-        );
-        if self.page == Page::Files && selected_file {
-            shell::register_region(ui, shell::Region::Sidebar, item.id);
-        }
-        if item.clicked() {
-            self.page = Page::Files;
-        }
-        let item = dense::roadmap_item(
-            ui,
-            "Build Result",
-            finished,
-            finished,
-            "Find the installer and its build receipt after the package has been created.",
-        );
-        if finished {
-            shell::register_region(ui, shell::Region::Sidebar, item.id);
         }
     }
 
@@ -365,18 +407,35 @@ impl Flow {
                 self.show_programs(ui);
                 None
             }
-            Page::Files => {
-                self.show_files(ui);
+            Page::Tools => {
+                self.show_tools(ui);
+                None
+            }
+            Page::Output => {
+                self.show_output(ui);
+                None
+            }
+            Page::Build => {
+                self.show_build(ui);
                 None
             }
             Page::Done => {
                 self.show_delivery(ui);
                 None
             }
-            _ => {
+            Page::Test => {
+                self.show_test_page(ui);
+                None
+            }
+            Page::Icon | Page::InstallerArtwork => {
+                self.show_artwork_page(ui);
+                None
+            }
+            Page::App | Page::About | Page::Package | Page::Rights => {
                 self.show_editor(ui);
                 None
             }
+            Page::Findings => unreachable!("findings render before other pages"),
         };
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error.message);
@@ -440,64 +499,12 @@ impl Flow {
         if !self.draft.id.is_empty() && !self.output_parent.as_os_str().is_empty() {
             path_summary(ui, "Save To", &self.output());
         }
-        ui.horizontal_wrapped(|ui| {
-            if self.selected.is_some() {
-                if ui.button("Edit App Details").clicked() {
-                    self.page = Page::App;
-                }
-                #[cfg(windows)]
-                {
-                    let edit = ui.button("Edit Package Artwork…");
-                    if edit.clicked() {
-                        self.open_artwork(edit.id);
-                    }
-                }
-                if ui.button("Build Tools and Output").clicked() {
-                    self.page = Page::Files;
-                }
-            }
-            if !scan.candidates.is_empty() {
-                let label = if self.selected.is_some() {
-                    "Change Start File"
-                } else {
-                    "Choose Start File"
-                };
-                if ui.button(label).clicked() {
-                    self.page = Page::Program;
-                }
-            }
-            let findings = scan.issues.len() + self.issues.len();
-            if ui.button(format!("Folder Findings ({findings})")).clicked() {
-                self.toggle_findings();
-            }
-            if ui.button(copy::CHANGE_SOURCE).clicked() {
-                self.back();
-                ui.ctx().request_repaint();
-            }
-        });
-        if self.selected.is_some() {
-            let rights = ui.checkbox(&mut self.draft.rights, copy::RIGHTS);
-            dense::field_help(
-                &rights,
-                "Confirm that the app’s license or publisher lets you distribute these files in your installer. PortableForge needs your confirmation before it can include them.",
-            );
+        if scan.candidates.is_empty() {
+            ui.label("Choose a folder containing the file that starts the app.");
         }
-        if let Some((page, message)) = self.blocker() {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(message);
-                if page != Page::Review
-                    && (page != Page::Program || !scan.candidates.is_empty())
-                    && ui.button("Review").clicked()
-                {
-                    if page == Page::Findings {
-                        self.toggle_findings();
-                    } else {
-                        self.page = page;
-                    }
-                }
-            });
-        } else {
-            ui.label("Ready to build. Your original folder stays as it is.");
+        if ui.button(copy::CHANGE_SOURCE).clicked() {
+            self.back();
+            ui.ctx().request_repaint();
         }
         None
     }
@@ -558,67 +565,51 @@ impl Flow {
         }
     }
 
+    fn show_substep_heading(&self, ui: &mut egui::Ui, title: &str) {
+        let (group, step) = self.page.roadmap_position();
+        let (name, pages, _) = ROADMAP[group];
+        dense::heading(
+            ui,
+            title,
+            &format!("{name} · {} of {}", step + 1, pages.len()),
+        );
+    }
+
     fn show_editor(&mut self, ui: &mut egui::Ui) {
-        dense::heading(ui, "Edit App Details", "");
-        ui.horizontal_wrapped(|ui| {
-            for (page, label) in [
-                (Page::App, "Name and Version"),
-                (Page::About, "About"),
-                (Page::Package, "Package"),
-                (Page::Rights, "License"),
-            ] {
-                let response = ui.selectable_value(&mut self.page, page, label);
-                theme::focus_outline(ui, &response);
-            }
-        });
         match self.page {
             Page::App => {
+                self.show_substep_heading(ui, "Edit App Details");
                 let old_id = suggested_id(&self.draft.name);
                 let name_help = "Enter the name people will see in the installer and the PortableApps.com menu. A recognizable name helps people find the portable app later.";
-                let publisher_help = "Enter the person or organization that publishes the original app. Use the name on its website or About screen.";
-                let changed = if ui.available_width() >= 480.0 {
-                    ui.columns(2, |columns| {
-                        let changed = dense::explained_text_field(
-                            &mut columns[0],
-                            "App Name",
-                            &mut self.draft.name,
-                            name_help,
-                        );
-                        dense::explained_text_field(
-                            &mut columns[1],
-                            "Publisher",
-                            &mut self.draft.publisher,
-                            publisher_help,
-                        );
-                        changed
-                    })
-                } else {
+                let version_help = "Enter the version of this app in numbers, such as 2.4 or 2.4.1. The platform uses this to recognize newer packages.";
+                let changed = ui.columns(2, |columns| {
                     let changed = dense::explained_text_field(
-                        ui,
+                        &mut columns[0],
                         "App Name",
                         &mut self.draft.name,
                         name_help,
                     );
                     dense::explained_text_field(
-                        ui,
-                        "Publisher",
-                        &mut self.draft.publisher,
-                        publisher_help,
+                        &mut columns[1],
+                        "Version Number",
+                        &mut self.draft.version,
+                        version_help,
                     );
                     changed
-                };
+                });
                 if changed {
                     self.inferred_name = false;
                     if old_id == self.draft.id {
                         self.draft.id = suggested_id(&self.draft.name);
                     }
                 }
-                dense::explained_text_field(
-                    ui, "Version Number", &mut self.draft.version,
-                    "Enter the version of this app in numbers, such as 2.4 or 2.4.1. The platform uses this to recognize newer packages.",
-                );
             }
             Page::About => {
+                self.show_substep_heading(ui, "Describe the App");
+                dense::explained_text_field(
+                    ui, "Publisher", &mut self.draft.publisher,
+                    "Enter the person or organization that publishes the original app. Use the name on its website or About screen.",
+                );
                 dense::explained_text_field(
                     ui, "App Website", &mut self.draft.homepage,
                     "Enter the app’s official website, starting with https:// or http://. This lets people learn about the original app.",
@@ -629,26 +620,24 @@ impl Flow {
                 );
             }
             Page::Package => {
+                self.show_substep_heading(ui, "Configure the Package");
                 dense::explained_text_field(
                     ui, "Package Name", &mut self.draft.id,
                     "This name identifies the package and its install folder. Use a short name without spaces, such as WidgetPortable.",
                 );
-                ui.label("Category");
-                egui::Grid::new("folder-package-categories")
-                    .num_columns(3)
-                    .show(ui, |ui| {
-                        for (index, &category) in CATEGORIES.iter().enumerate() {
-                            if ui
-                                .radio(self.draft.category == category, category)
-                                .clicked()
-                            {
-                                self.draft.category = category.to_owned();
+                ui.horizontal(|ui| {
+                    ui.label("Category");
+                    let category = egui::ComboBox::from_id_salt("folder-package-category")
+                        .selected_text(&self.draft.category)
+                        .show_ui(ui, |ui| {
+                            for &category in CATEGORIES {
+                                if ui.selectable_label(self.draft.category == category, category).clicked() {
+                                    self.draft.category = category.to_owned();
+                                }
                             }
-                            if (index + 1) % 3 == 0 {
-                                ui.end_row();
-                            }
-                        }
-                    });
+                        });
+                    dense::field_help(&category.response, "Choose the category where people should find the app in the PortableApps.com menu.");
+                });
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Installer Language");
                     for language in [Language::English, Language::Multilingual] {
@@ -657,6 +646,7 @@ impl Flow {
                 });
             }
             Page::Rights => {
+                self.show_substep_heading(ui, "Confirm Sharing Permission");
                 ui.label("Select what applies to this app.");
                 for (value, label, help) in [
                     (&mut self.draft.open_source, "Open source", "Select this when the publisher makes the source code available under an open-source license."),
@@ -667,8 +657,13 @@ impl Flow {
                     let choice = ui.checkbox(value, label);
                     dense::field_help(&choice, help);
                 }
+                let rights = ui.checkbox(&mut self.draft.rights, copy::RIGHTS);
+                dense::field_help(
+                    &rights,
+                    "Confirm that the app’s license or publisher lets you distribute these files in your installer.",
+                );
             }
-            _ => {}
+            _ => unreachable!("only app details pages use this editor"),
         }
         if let Some((page, message)) = self.draft.blocker() {
             if page == self.page {
@@ -677,8 +672,8 @@ impl Flow {
         }
     }
 
-    fn show_files(&mut self, ui: &mut egui::Ui) {
-        dense::heading(ui, "Build Tools and Output", "");
+    fn show_tools(&mut self, ui: &mut egui::Ui) {
+        self.show_substep_heading(ui, "Choose Build Tools");
         folder_field(
             ui,
             "Launcher Generator",
@@ -693,6 +688,10 @@ impl Flow {
             "Choose Installer Folder…",
             "Choose the Installer tool folder. It packages your app and launcher into the .paf.exe you can install or share.",
         );
+    }
+
+    fn show_output(&mut self, ui: &mut egui::Ui) {
+        self.show_substep_heading(ui, "Choose Where to Save");
         folder_field(
             ui,
             "Save In",
@@ -703,6 +702,45 @@ impl Flow {
         if !self.output_parent.as_os_str().is_empty() {
             path_summary(ui, "New Folder", &self.output());
         }
+    }
+
+    fn show_build(&mut self, ui: &mut egui::Ui) {
+        self.show_substep_heading(ui, copy::BUILD);
+        if let Some((page, message)) = self.blocker() {
+            ui.label(message);
+            if ui.button("Review Required Choice").clicked() {
+                self.go_to(page);
+            }
+            return;
+        }
+        self.show_app_summary(ui);
+        path_summary(ui, "Save To", &self.output());
+        ui.label("Ready to build. Your original files stay in place.");
+    }
+
+    fn show_artwork_page(&mut self, ui: &mut egui::Ui) {
+        #[cfg(windows)]
+        {
+            let (title, artwork) = if self.page == Page::Icon {
+                ("Edit App Icon", ArtworkPage::Icon)
+            } else {
+                ("Edit Installer Artwork", ArtworkPage::Sidebar)
+            };
+            self.show_substep_heading(ui, title);
+            if !self.artwork.is_open() {
+                let icon = self
+                    .base_icon
+                    .clone()
+                    .unwrap_or_else(super::default_application_icon);
+                self.artwork.begin_folder_page(icon);
+            }
+            self.artwork.show_folder_page(ui, artwork);
+            if ui.button("Discard Artwork Changes").clicked() {
+                self.go_to(Page::Findings);
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = ui;
     }
 
     fn show_findings(&mut self, ui: &mut egui::Ui) {
@@ -743,13 +781,8 @@ impl Flow {
     }
 
     fn show_delivery(&mut self, ui: &mut egui::Ui) {
-        #[cfg(all(windows, target_arch = "x86_64"))]
-        let tested = self.show_test_outcome(ui);
-        #[cfg(not(all(windows, target_arch = "x86_64")))]
-        let tested = false;
-        if !tested {
-            dense::heading(ui, copy::BUILT, copy::UNVERIFIED);
-        }
+        self.show_substep_heading(ui, copy::BUILT);
+        ui.weak(copy::UNVERIFIED);
         if let Some(delivery) = &self.result {
             if let Some(name) = delivery.artifact.file_name() {
                 ui.label(egui::RichText::new(name.to_string_lossy()).strong());
@@ -757,8 +790,18 @@ impl Flow {
             path_summary(ui, "Installer", &delivery.artifact);
             path_summary(ui, "Build Receipt", &delivery.manifest);
         }
+    }
+
+    fn show_test_page(&mut self, ui: &mut egui::Ui) {
         #[cfg(all(windows, target_arch = "x86_64"))]
-        if self.result.is_some() {
+        {
+            if !self.show_test_outcome(ui) {
+                self.show_substep_heading(ui, "Test the Installer");
+                ui.label("Check installation and see whether changes survive two launches.");
+            }
+            if self.result.is_none() {
+                return;
+            }
             let test = ui
                 .push_id("folder-test-action", |ui| ui.button(copy::TEST_INSTALLER))
                 .inner;
@@ -768,6 +811,8 @@ impl Flow {
                 self.restore_test_focus(ui, &test);
             }
         }
+        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        let _ = ui;
     }
 }
 

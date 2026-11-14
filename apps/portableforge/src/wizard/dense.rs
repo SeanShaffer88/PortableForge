@@ -34,11 +34,15 @@ pub(super) fn compact_body(ui: &mut egui::Ui) {
 }
 
 pub(super) fn heading(ui: &mut egui::Ui, title: &str, description: &str) {
-    let heading = ui.add(
-        egui::Label::new(egui::RichText::new(title).heading().strong())
-            .sense(egui::Sense::focusable_noninteractive()),
-    );
-    shell::register_heading(ui, &heading);
+    let font = egui::TextStyle::Heading.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let galley = ui
+        .painter()
+        .layout(title.to_owned(), font, color, ui.available_width());
+    let (rect, heading) =
+        ui.allocate_exact_size(galley.size(), egui::Sense::focusable_noninteractive());
+    ui.painter().galley(rect.min, galley, color);
+    shell::register_heading(ui, &heading, title);
     if !description.is_empty() {
         ui.label(egui::RichText::new(description).weak());
     }
@@ -178,12 +182,23 @@ pub(super) fn explained(response: egui::Response, help: impl AsRef<str>) -> egui
 
 pub(super) fn help_strip(ui: &mut egui::Ui, default: &str) {
     let modal = ui.layer_id().order == egui::Order::Foreground;
+    let text = help_message(ui.ctx(), default, modal);
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let line = ui.fonts_mut(|fonts| fonts.row_height(&font));
+    ui.set_min_height(line * 2.0);
+    let color = ui.visuals().weak_text_color();
+    let width = ui.available_width();
+    let galley = layout_help(ui.ctx(), text, font, color, width);
+    show_help_label(ui, galley);
+}
+
+fn help_message(ctx: &egui::Context, default: &str, modal: bool) -> String {
     let (focused, modal_open) =
-        ui.memory(|memory| (memory.focused(), memory.top_modal_layer().is_some()));
-    let pointer = ui.input(|input| input.pointer.hover_pos());
+        ctx.memory(|memory| (memory.focused(), memory.top_modal_layer().is_some()));
+    let pointer = ctx.input(|input| input.pointer.hover_pos());
     let mut message = None;
     if modal || !modal_open {
-        help_targets(ui.ctx(), modal, |state| {
+        help_targets(ctx, modal, |state| {
             let active = &state.current;
             let previous = &state.previous;
             let previous_hover = previous
@@ -203,15 +218,22 @@ pub(super) fn help_strip(ui: &mut egui::Ui, default: &str) {
                 .map(|target| target.message.clone());
         });
     }
-    let text = message.as_deref().unwrap_or(default);
-    let font = egui::TextStyle::Small.resolve(ui.style());
-    let line = ui.fonts_mut(|fonts| fonts.row_height(&font));
-    ui.set_min_height(line * 2.0);
-    let color = ui.visuals().weak_text_color();
-    let mut layout =
-        egui::text::LayoutJob::simple(text.to_owned(), font, color, ui.available_width());
+    message.unwrap_or_else(|| default.to_owned())
+}
+
+fn layout_help(
+    ctx: &egui::Context,
+    text: String,
+    font: egui::FontId,
+    color: egui::Color32,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut layout = egui::text::LayoutJob::simple(text, font, color, width);
     layout.wrap.max_rows = 2;
-    let galley = ui.fonts_mut(|fonts| fonts.layout_job(layout));
+    ctx.fonts_mut(|fonts| fonts.layout_job(layout))
+}
+
+fn show_help_label(ui: &mut egui::Ui, galley: std::sync::Arc<egui::Galley>) {
     let label = ui.label(galley);
     ui.ctx().accesskit_node_builder(label.id, |node| {
         node.set_role(egui::accesskit::Role::Status)
@@ -219,16 +241,28 @@ pub(super) fn help_strip(ui: &mut egui::Ui, default: &str) {
 }
 
 pub(super) fn show_help_bar(ctx: &egui::Context, default: &str) {
-    let visuals = &ctx.style().visuals;
+    let style = ctx.style();
+    let visuals = &style.visuals;
+    let frame = egui::Frame::new()
+        .fill(visuals.window_fill)
+        .stroke(visuals.widgets.noninteractive.bg_stroke)
+        .inner_margin(egui::Margin::symmetric(12, 4));
+    let mut font = egui::TextStyle::Body.resolve(&style);
+    font.size = (font.size - 1.0).max(14.0);
+    let margins = frame.total_margin().sum();
+    let text = help_message(ctx, default, false);
+    let width = (ctx.available_rect().width() - margins.x).max(0.0);
+    let color = visuals.weak_text_color();
+    let mut galley = layout_help(ctx, text.clone(), font, color, width);
+    if galley.elided {
+        let compact_font = egui::TextStyle::Small.resolve(&style);
+        galley = layout_help(ctx, text, compact_font, color, width);
+    }
     egui::TopBottomPanel::bottom("wizard-context-help")
         .resizable(false)
-        .frame(
-            egui::Frame::new()
-                .fill(visuals.window_fill)
-                .stroke(visuals.widgets.noninteractive.bg_stroke)
-                .inner_margin(egui::Margin::symmetric(12, 4)),
-        )
-        .show(ctx, |ui| help_strip(ui, default));
+        .exact_height(galley.size().y.ceil() + margins.y)
+        .frame(frame)
+        .show(ctx, |ui| show_help_label(ui, galley));
 }
 
 pub(super) fn explained_text_field(
@@ -286,15 +320,22 @@ pub(super) fn roadmap_item(
     enabled: bool,
     help: &str,
 ) -> egui::Response {
-    let response = ui.add_enabled(
-        enabled,
-        egui::Button::selectable(selected, label)
-            .min_size(egui::vec2(
-                ui.available_width(),
-                theme::compact_row_height(),
-            ))
-            .wrap(),
-    );
+    roadmap_item_with_progress(ui, label, selected, enabled, help, None)
+}
+
+pub(super) fn roadmap_item_with_progress(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: bool,
+    enabled: bool,
+    help: &str,
+    progress: Option<(Option<usize>, usize)>,
+) -> egui::Response {
+    let height = theme::compact_row_height() + if progress.is_some() { 8.0 } else { 0.0 };
+    let button = egui::Button::selectable(selected, label)
+        .min_size(egui::vec2(ui.available_width(), height))
+        .wrap();
+    let response = ui.add_enabled(enabled, button);
     mark_roadmap_selection(&response, selected);
     if selected {
         let left = response.rect.left() + 1.0;
@@ -304,8 +345,51 @@ pub(super) fn roadmap_item(
             ui.visuals().selection.stroke,
         );
     }
+    if let Some((current, total)) = progress {
+        let x = response.rect.left() + 8.0;
+        let y = response.rect.bottom() - 5.0;
+        let palette = theme::palette(ui.ctx());
+        for index in 0..total {
+            let current_marker = selected && current == Some(index);
+            let color = if current_marker {
+                palette.focus
+            } else if current.is_some_and(|step| index <= step) {
+                palette.muted
+            } else {
+                palette.border
+            };
+            let start = egui::pos2(x + index as f32 * 14.0, y);
+            ui.painter().line_segment(
+                [start, start + egui::vec2(10.0, 0.0)],
+                egui::Stroke::new(
+                    if current_marker { 4.0_f32 } else { 2.0_f32 },
+                    theme::rgb(color),
+                ),
+            );
+        }
+        if let Some(index) = current {
+            let counter_y = if response.rect.width() < 155.0 {
+                response.rect.bottom() - 8.0
+            } else {
+                response.rect.center().y
+            };
+            ui.painter().text(
+                egui::pos2(response.rect.right() - 7.0, counter_y),
+                egui::Align2::RIGHT_CENTER,
+                format!("{}/{}", index + 1, total),
+                egui::TextStyle::Small.resolve(ui.style()),
+                theme::rgb(palette.muted),
+            );
+        }
+        let announcement = match current {
+            Some(index) => format!("{help} Substep {} of {total}.", index + 1),
+            None => format!("{help} {total} substeps."),
+        };
+        field_help(&response, &announcement);
+    } else {
+        field_help(&response, help);
+    }
     theme::focus_outline(ui, &response);
-    field_help(&response, help);
     response
 }
 
@@ -845,6 +929,37 @@ mod tests {
                 ],
             );
         }
+    }
+
+    #[test]
+    fn status_bar_releases_unused_help_line() {
+        let ctx = egui::Context::default();
+        let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0));
+        let draw = |message| {
+            let mut bar_height = 0.0;
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(bounds),
+                    ..Default::default()
+                },
+                |ctx| {
+                    show_help_bar(ctx, message);
+                    bar_height = bounds.bottom() - ctx.available_rect().bottom();
+                },
+            );
+            let shape = output.shapes.iter().find(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == message)
+            }).expect("help is drawn");
+            assert!(shape
+                .clip_rect
+                .expand(1.0)
+                .contains_rect(shape.shape.visual_bounding_rect()));
+            bar_height
+        };
+        let compact = draw("Choose a file.");
+        let wrapped = draw("Choose a file.\nChoose its folder if the app includes other files.");
+        assert!(wrapped > compact + 10.0);
+        assert_eq!(draw("Choose a file."), compact);
     }
 
     #[test]

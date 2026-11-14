@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Give folder, ZIP, and loose-file packaging a page per substep. The seven roadmap rows show substep progress. Status help uses larger text and grows only when it wraps. Activity text is smaller.
 - Guide each package through review and an explicit build. Dark High Contrast is the default for new settings, with persistent Activity and in-window pickers.
 - Shorten the guided workspace and enlarge text. The Roadmap and Activity panes use matching widths.
 - Use a shared project roadmap, grouped app settings, and paired artwork previews on wider windows.
