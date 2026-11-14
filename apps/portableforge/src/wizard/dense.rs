@@ -705,7 +705,12 @@ impl WizardApp {
                                 self.run_wizard_action(ctx, action);
                             }
                         } else {
-                            shell::register_region(ui, shell::Region::Footer, details.id);
+                            let focus = if self.showing_setup_storage() && !self.show_details {
+                                back.id
+                            } else {
+                                details.id
+                            };
+                            shell::register_region(ui, shell::Region::Footer, focus);
                         }
                     });
                 });
@@ -1138,6 +1143,32 @@ mod tests {
     #[test]
     fn compact_verified_pages_fit_at_every_text_preset() {
         for scale in TEXT_SCALES {
+            use portableforge_core::storage::{StorageFinding, StorageReport, StorageSource};
+
+            let mut storage = WizardApp::default();
+            storage.enter_verified_capture();
+            storage.step = 6;
+            storage.setup_storage_open = true;
+            storage.setup_storage = Some(StorageReport {
+                findings: vec![StorageFinding {
+                    location: "Roaming AppData".into(),
+                    evidence: "Example Settings".repeat(18),
+                    source: StorageSource::FirstRun,
+                }],
+                limited: true,
+            });
+            assert_page_fits(
+                scale,
+                storage,
+                &[
+                    "Find Where the App Saves Data",
+                    "Observed during setup or first use.",
+                    "Roaming AppData",
+                    "View Location Details",
+                    "Back",
+                ],
+            );
+
             let mut capture = WizardApp::default();
             capture.enter_verified_capture();
             assert_page_fits(
@@ -1204,6 +1235,7 @@ mod tests {
                     confidence: 1.0,
                     why: "Fixture setting".into(),
                 }]);
+                overview.setup_storage = Some(StorageReport::default());
                 let row = format!("Setup · {source}");
                 assert_page_fits(
                     scale,
@@ -1213,6 +1245,7 @@ mod tests {
                         &row,
                         "View Source",
                         "Captured Findings (1)",
+                        "View Data Locations",
                         next,
                         "Review Findings",
                     ],

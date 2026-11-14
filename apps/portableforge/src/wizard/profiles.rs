@@ -1771,6 +1771,8 @@ impl WizardApp {
         self.main_exe.clear();
         self.package_version = "1.0.0.0".into();
         self.review = Default::default();
+        self.setup_storage_open = false;
+        self.setup_storage = None;
         self.review_page = 0;
         self.review_needs_attention = false;
         self.sharing = None;

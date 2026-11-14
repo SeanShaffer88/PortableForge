@@ -15,6 +15,7 @@ use portableforge_core::folder::{
     self, AppProperties, DependencyReport, FolderIssue, FolderScan, IssueSeverity, ScanError,
 };
 use portableforge_core::guide::folder_flow as copy;
+use portableforge_core::storage::{inspect_folder, StorageReport};
 
 use super::{activity::Notice, artwork_ui, file_picker, WizardApp};
 
@@ -38,6 +39,7 @@ pub(super) enum Page {
     Rights,
     Findings,
     Dependencies,
+    Storage,
     AppData,
     Icon,
     InstallerArtwork,
@@ -95,6 +97,8 @@ pub(super) struct Flow {
     issue_page: usize,
     dependencies: Option<Result<DependencyReport, String>>,
     dependency_page: usize,
+    storage: StorageReport,
+    storage_page: usize,
     findings_from: Option<Page>,
     error: Option<Failure>,
     result: Option<Delivery>,
@@ -135,6 +139,7 @@ struct Inspection {
     scan: Arc<FolderScan>,
     selection: Option<Selection>,
     issues: Vec<FolderIssue>,
+    storage: StorageReport,
 }
 
 enum Outcome {
@@ -198,6 +203,7 @@ fn inspect(
             .as_ref()
             .map(|selection| selection.relative.as_path()),
     );
+    let storage = inspect_folder(&scan);
     Ok(Inspection {
         staged: None,
         original,
@@ -206,6 +212,7 @@ fn inspect(
         scan: Arc::new(scan),
         selection,
         issues,
+        storage,
     })
 }
 
@@ -257,6 +264,7 @@ impl Flow {
             Page::Build => "Check the package before building.",
             Page::Findings => "Review the findings.",
             Page::Dependencies => "Check which DLLs the app lists.",
+            Page::Storage => "Review clues about where the app stores data.",
             Page::AppData => "Choose where this app saves its settings.",
             Page::Review => "Review the source files and package choices.",
         })
@@ -368,7 +376,8 @@ impl Flow {
             Page::Rights => Page::Package,
             Page::Findings => self.findings_from.unwrap_or(Page::Rights),
             Page::Dependencies => Page::Findings,
-            Page::AppData => Page::Dependencies,
+            Page::Storage => Page::Dependencies,
+            Page::AppData => Page::Storage,
             Page::Icon => Page::AppData,
             Page::InstallerArtwork => Page::Icon,
             Page::Tools if cfg!(windows) => Page::InstallerArtwork,
@@ -811,6 +820,7 @@ impl Flow {
                     |elapsed| format!("{:x}", elapsed.as_nanos() & 0x0000_ffff_ffff_ffff),
                 );
                 self.issues = inspection.issues;
+                self.storage = inspection.storage;
                 self.scan = Some(inspection.scan);
                 if let Some(saved) = self.restoring.take() {
                     self.restore_after_scan(ctx, saved, inspection.selection);
@@ -1374,6 +1384,36 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn archive_inspection_reports_storage_clues_without_configuring_redirection() {
+        use portableforge_core::storage::StorageSource;
+
+        let fixture = AppJobFixture::new();
+        std::fs::write(&fixture.config, r"profile = %APPDATA%\Example\prefs.ini").unwrap();
+        std::fs::remove_file(&fixture.zip).unwrap();
+        portableforge_core::build::write_package_zip(&fixture.folder, &fixture.zip).unwrap();
+        let ctx = egui::Context::default();
+        let mut wizard = fixture.wizard();
+        wizard.inspect_app_inputs(&ctx, vec![fixture.zip.clone()], false);
+        finish_folder_work(&mut wizard.folder_flow, &ctx);
+        let flow = &mut wizard.folder_flow;
+        assert!(flow
+            .storage
+            .findings
+            .iter()
+            .any(|finding| finding.source == StorageSource::Referenced));
+        assert!(flow.draft.appdata_rules.is_empty());
+        flow.go_to(Page::Dependencies);
+        flow.continue_page(&ctx);
+        assert_eq!(flow.page(), Page::Storage);
+        flow.continue_page(&ctx);
+        assert_eq!(flow.page(), Page::AppData);
+        flow.back();
+        assert_eq!(flow.page(), Page::Storage);
+        flow.back();
+        assert_eq!(flow.page(), Page::Dependencies);
     }
 
     fn inert_desktop_pe() -> [u8; 368] {
@@ -2031,6 +2071,27 @@ mod tests {
             wizard.folder_flow.open = true;
             wizard.folder_flow.source_kind = Some(SourceKind::Zip);
             use portableforge_core::folder::{Dependency, DependencyStatus};
+            use portableforge_core::storage::{StorageFinding, StorageSource};
+            wizard.folder_flow.storage = StorageReport {
+                limited: true,
+                findings: vec![
+                    StorageFinding {
+                        location: "Roaming AppData".into(),
+                        evidence: format!("settings/{}/preferences.ini", "Long Folder ".repeat(20)),
+                        source: StorageSource::Referenced,
+                    },
+                    StorageFinding {
+                        location: "Included settings".into(),
+                        evidence: "defaults.json".into(),
+                        source: StorageSource::Included,
+                    },
+                    StorageFinding {
+                        location: "Shared settings".into(),
+                        evidence: "local.ini".into(),
+                        source: StorageSource::Referenced,
+                    },
+                ],
+            };
             wizard.folder_flow.dependencies = Some(Ok(DependencyReport {
                 executable: "Widget.exe".into(),
                 architecture: portableforge_core::snapshot::PeArch::X64,
@@ -2114,6 +2175,16 @@ mod tests {
                         "Scan Again",
                         "View Path",
                         "example.dll",
+                    ][..],
+                ),
+                (
+                    Page::Storage,
+                    &[
+                        "Find Where the App Saves Data",
+                        "Clues from the selected app files.",
+                        "Roaming AppData",
+                        "View Location Details",
+                        "Test the app to confirm where it writes.",
                     ][..],
                 ),
                 (

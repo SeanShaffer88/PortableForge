@@ -78,6 +78,10 @@ full-value dialog. **Build Installer** is available on the build page once
 the required checks pass. **Stop After This Step** appears while a running
 build can still be stopped.
 
+**Data Locations** under **File Findings** labels archive clues by source.
+Setup review offers observed locations with labels for setup and first use.
+The paged reports stay in the wizard and use text labels for evidence.
+
 **Package Artwork** contains separate icon and installer artwork pages.
 Apply the edits to include them in the package.
 

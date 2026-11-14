@@ -13,6 +13,7 @@ use portableforge_core::orchestrate::{
 use portableforge_core::review::Review;
 use portableforge_core::session::Phase;
 use portableforge_core::settings::{self, WizardDraft, WizardSettings};
+use portableforge_core::storage::StorageReport;
 
 mod activity;
 mod artwork_ui;
@@ -24,6 +25,7 @@ mod installer_test;
 mod package_review;
 mod profiles;
 mod shell;
+mod storage_report;
 mod theme;
 mod window_scale;
 
@@ -39,6 +41,9 @@ pub struct WizardApp {
     detail_page: usize,
     review_page: usize,
     setup_findings_open: bool,
+    setup_storage_open: bool,
+    setup_storage: Option<StorageReport>,
+    setup_storage_page: usize,
     review_needs_attention: bool,
     msi_review_ready: bool,
     safety_page: usize,
@@ -114,6 +119,9 @@ impl Default for WizardApp {
             detail_page: 0,
             review_page: 0,
             setup_findings_open: false,
+            setup_storage_open: false,
+            setup_storage: None,
+            setup_storage_page: 0,
             review_needs_attention: false,
             msi_review_ready: false,
             safety_page: 0,
@@ -298,6 +306,8 @@ fn card(ui: &egui::Ui) -> egui::Frame {
 impl WizardApp {
     fn setup_changed(&mut self) {
         self.setup_findings_open = false;
+        self.setup_storage_open = false;
+        self.setup_storage = None;
         self.profile_flow.detach_capture();
         self.artwork = artwork_ui::Editor::default();
         self.layout = None;
@@ -608,6 +618,9 @@ impl WizardApp {
 
     fn apply_capture(&mut self, outcome: portableforge_core::orchestrate::CaptureOutcome) {
         self.setup_findings_open = false;
+        self.setup_storage_open = false;
+        self.setup_storage = Some(outcome.storage);
+        self.setup_storage_page = 0;
         self.log
             .push(format!("Notes read in. {}", outcome.review.summary()));
         self.review = outcome.review;
@@ -868,6 +881,8 @@ impl WizardApp {
             self.step = pos;
         }
         self.setup_findings_open = false;
+        self.setup_storage_open = false;
+        self.setup_storage = None;
         self.resume_offer = false;
         self.profile_flow.update_base = draft.profile_update_base;
         if let Some(capture) = draft.cleaned_capture {
@@ -894,6 +909,10 @@ impl WizardApp {
     /// One step back. Nothing is lost.
     fn go_back(&mut self) {
         if !self.can_go_back() {
+            return;
+        }
+        if self.showing_setup_storage() {
+            self.setup_storage_open = false;
             return;
         }
         if self.showing_setup_findings() {
@@ -925,6 +944,10 @@ impl WizardApp {
 
     fn showing_setup_findings(&self) -> bool {
         self.at_setup_review() && self.setup_findings_open
+    }
+
+    fn showing_setup_storage(&self) -> bool {
+        self.at_setup_review() && self.setup_storage_open && self.setup_storage.is_some()
     }
 
     fn offer_setup_findings(&self) -> bool {
@@ -971,6 +994,9 @@ impl WizardApp {
     /// the log, never a trap). Returns true when the step moved or
     /// the run finished.
     fn advance(&mut self) -> bool {
+        if self.showing_setup_storage() {
+            return false;
+        }
         if self.offer_setup_findings() && !self.profile_flow.busy() {
             self.setup_findings_open = true;
             return true;
@@ -1218,7 +1244,12 @@ impl WizardApp {
             },
         };
         self.show_header(ctx, step.title, Some((self.step + 1, STEPS.len())));
-        dense::show_help_bar(ctx, self.context_help_default(what_you_do));
+        let help = if self.showing_setup_storage() {
+            "Review the locations recorded while the setup or the app ran."
+        } else {
+            self.context_help_default(what_you_do)
+        };
+        dense::show_help_bar(ctx, help);
         self.show_navigation(ctx);
         dense::task_sidebar(ctx, |ui| {
             self.show_phase_navigation(ui, self.step + 1, STEPS.len(), true);
@@ -1236,6 +1267,13 @@ impl WizardApp {
                 self.show_step_details(ui, step);
                 return;
             }
+            if self.showing_setup_storage() {
+                if let Some(report) = &self.setup_storage {
+                    dense::heading(ui, storage_report::TITLE, "");
+                    storage_report::show(ui, report, &mut self.setup_storage_page, true);
+                }
+                return;
+            }
             if step.id == "changes" && !self.setup_findings_open {
                 let path = std::path::Path::new(self.installer_path.trim());
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -1249,6 +1287,20 @@ impl WizardApp {
                 } else {
                     format!("Captured Findings ({count})")
                 });
+                if self.setup_storage.is_some()
+                    && dense::explained(
+                        ui.add_enabled(
+                            !self.profile_flow.busy(),
+                            egui::Button::new("View Data Locations"),
+                        ),
+                        "See where the setup or the app was observed saving data.",
+                    )
+                    .clicked()
+                {
+                    self.setup_storage_open = true;
+                    self.setup_storage_page = 0;
+                    ctx.request_repaint();
+                }
                 ui.label(if verified {
                     "Next · App Details → Sharing → Save Profile"
                 } else {
@@ -2010,6 +2062,28 @@ mod tests {
         wizard.step = 1;
         wizard.go_back();
         assert_eq!(wizard.step, 0);
+    }
+
+    #[test]
+    fn setup_storage_review_back_leaves_findings_and_gates_unchanged() {
+        let mut wizard = WizardApp {
+            step: 6,
+            setup_storage_open: true,
+            setup_storage: Some(StorageReport::default()),
+            ..Default::default()
+        };
+        assert!(wizard.showing_setup_storage());
+        assert_eq!(wizard.current_wizard_action(), None);
+        assert!(!wizard.advance());
+        wizard.go_back();
+        assert_eq!(wizard.step, 6);
+        assert!(!wizard.showing_setup_storage());
+        assert_eq!(
+            wizard.current_wizard_action(),
+            Some((shell::WizardAction::Continue, true))
+        );
+        wizard.setup_changed();
+        assert!(wizard.setup_storage.is_none());
     }
 
     #[test]
