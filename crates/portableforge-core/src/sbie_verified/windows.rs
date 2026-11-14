@@ -782,6 +782,11 @@ impl Sandboxie {
         // supported. Explicit local/global compatibility exceptions are not.
         for key in self.setting_names(Some(GLOBAL))? {
             let lower = key.to_ascii_lowercase();
+            if lower == "template" {
+                return Err(global_templates_rejection(|index| {
+                    self.setting(Some(GLOBAL), Some("Template"), DIRECT_CONF | index)
+                }));
+            }
             if !matches!(
                 lower.as_str(),
                 "editadminonly"
@@ -1422,6 +1427,51 @@ fn checked(action: &str, status: i32) -> Result<(), String> {
     }
 }
 
+fn global_templates_rejection(
+    mut setting: impl FnMut(u32) -> Result<Option<String>, String>,
+) -> String {
+    const MAX_TEMPLATE_NAMES: u32 = 32;
+    let mut names = Vec::<String>::new();
+    let mut incomplete = false;
+    for index in 0..=MAX_TEMPLATE_NAMES {
+        let name = match setting(index) {
+            Ok(Some(name)) if index < MAX_TEMPLATE_NAMES => name,
+            Ok(None) => break,
+            Ok(Some(_)) | Err(_) => {
+                incomplete = true;
+                break;
+            }
+        };
+        if name.is_empty()
+            || name.len() > 80
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            incomplete = true;
+        } else if !names.iter().any(|seen| seen.eq_ignore_ascii_case(&name)) {
+            names.push(name);
+        }
+    }
+
+    let mut detail = String::from(
+        "The running Sandboxie engine has global compatibility templates. \
+         They can change which resources every test box can access.",
+    );
+    if !names.is_empty() {
+        detail.push_str("\n\nActive global templates:\n");
+        detail.push_str(&names.join("\n"));
+    }
+    if incomplete || names.is_empty() {
+        detail.push_str("\n\nSome template names could not be listed.");
+    }
+    detail.push_str(
+        "\n\nVerified testing requires a compatible Sandboxie engine. \
+         You can still build from app folders or ZIPs.",
+    );
+    detail
+}
+
 fn verify_mark_of_the_web_disabled(
     mut setting: impl FnMut(u32) -> Result<Option<String>, String>,
 ) -> Result<(), String> {
@@ -1441,6 +1491,51 @@ fn os_error(action: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_template_diagnostic_lists_only_safe_names_in_driver_order() {
+        let values = [
+            "Edge_Fix",
+            "edge_fix",
+            "C:\\private\\profile",
+            "fake\nSetting",
+            "OfficeLicensing",
+        ];
+        let detail = global_templates_rejection(|index| {
+            Ok(values.get(index as usize).map(|s| s.to_string()))
+        });
+        assert!(detail.contains("Active global templates:\nEdge_Fix\nOfficeLicensing\n"));
+        assert!(detail.contains("Some template names could not be listed."));
+        assert!(!detail.contains("edge_fix"));
+        assert!(!detail.contains("private"));
+        assert!(!detail.contains("fake"));
+    }
+
+    #[test]
+    fn global_template_diagnostic_stays_blocking_on_missing_or_failed_reads() {
+        for detail in [
+            global_templates_rejection(|_| Ok(None)),
+            global_templates_rejection(|_| Err("C:\\private\\query".into())),
+        ] {
+            assert!(detail.contains("global compatibility templates"));
+            assert!(detail.contains("Some template names could not be listed."));
+            assert!(detail.contains("Verified testing requires a compatible Sandboxie engine."));
+            assert!(!detail.contains("private"));
+        }
+    }
+
+    #[test]
+    fn global_template_diagnostic_caps_driver_reads_and_displayed_names() {
+        let mut reads = 0;
+        let detail = global_templates_rejection(|index| {
+            reads += 1;
+            Ok(Some(format!("Fixture_{index:02}")))
+        });
+        assert_eq!(reads, 33);
+        assert!(detail.contains("Fixture_31\n"));
+        assert!(!detail.contains("Fixture_32"));
+        assert!(detail.contains("Some template names could not be listed."));
+    }
 
     #[test]
     fn mark_of_the_web_box_is_supported_only_with_an_inactive_force_switch() {

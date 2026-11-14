@@ -57,7 +57,7 @@ pub const TEST_FAILED: &str = "Installer Test Could Not Finish";
 pub const TEST_IDENTITY_HELP: &str =
     "The installer or receipt could not be verified. Build a new installer to test it.";
 pub const TEST_STARTUP_HELP: &str =
-    "The Sandboxie-Plus test could not start. The built installer is still available.";
+    "Open Show Test Details to see why the test could not start. The built installer is still available.";
 pub const TEST_FAILURE_HELP: &str =
     "Open Show Test Details to see what happened. The built installer is still available.";
 pub const TEST_CLEANUP_HELP: &str =

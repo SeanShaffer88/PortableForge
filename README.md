@@ -71,6 +71,8 @@ Use printable ASCII for the capture and build paths. Leave out `$`, `%`, single 
 
 PortableForge reuses a compatible running Sandboxie-Plus engine for verified capture and installer testing. To start the bundled Sandboxie-Plus 1.18.8 x64 portable files, choose **View bundled test box location** and copy its path. Copy the whole folder to a new protected local location under Program Files. Open `SandMan.exe` from that copy and approve its administrator prompts to start the Sandboxie-Plus service and driver. Return to **Capture with Sandboxie-Plus** and choose **Check prerequisites**. After using the portable engine, close SandMan and approve its service cleanup prompt. [Sandboxie-Plus portable startup and cleanup](https://github.com/sandboxie-plus/Sandboxie/blob/v1.18.8/SandboxiePlus/SandMan/SandMan.cpp)
 
+Global compatibility templates can change which resources a test box can access. If they block a verified run, **View prerequisite details** or **Show Test Details** lists the names PortableForge can read from the running engine. You can still build from an app folder, ZIP, or selected files.
+
 ### Customize package artwork
 
 **App icon** previews a PNG or ICO import at the output icon sizes. **Installer left pane** accepts a PNG or ICO, or places the app icon over a chosen background. Use the rotate, flip, Fit and Crop controls to adjust either image. The left pane is 328 × 628 pixels. The editor can restore the captured icon and the default installer pane.

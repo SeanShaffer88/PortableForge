@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Name active global Sandboxie compatibility templates when they block capture or an installer test.
 - Report scoped files and current-user registry keys observed outside the portable Data folder during installer testing.
 - Show individual portable data file changes from both app launches in installer test details.
 - Show data locations from archive settings clues and observed setup or first-use changes.
