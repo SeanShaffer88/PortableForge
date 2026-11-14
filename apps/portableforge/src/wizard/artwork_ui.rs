@@ -11,7 +11,7 @@ use portableforge_core::artwork::{
     SIDEBAR_HEIGHT, SIDEBAR_WIDTH,
 };
 
-use super::dense;
+use super::{dense, file_picker};
 
 const DEFAULT_PANE_COLOR: [u8; 3] = [0x15, 0x26, 0x3c];
 const ICON_SIZES: [u32; 6] = [16, 32, 48, 75, 128, 256];
@@ -358,9 +358,7 @@ impl Draft {
         };
         ui.horizontal_wrapped(|ui| {
             let import = help(ui.button(import_label), "Choose a PNG or ICO image for the app icon. A square image with a transparent background usually reads best at small sizes.");
-            if import.clicked() {
-                self.import_image(Tab::Icon);
-            }
+            self.import_image(&import, Tab::Icon);
             if help(
                 ui.add_enabled(self.artwork.icon.is_some(), egui::Button::new(self.copy.restore_icon)),
                 "Remove the custom icon and use the icon PortableForge found for this app. You can import another picture at any time.",
@@ -399,9 +397,8 @@ impl Draft {
             "Import image…"
         };
         ui.horizontal_wrapped(|ui| {
-            if help(ui.button(import_label), "Choose a PNG or ICO picture for the installer’s left pane. PortableForge prepares it at 328 by 628 pixels. Use Fit to show the whole image or Crop to fill the pane.").clicked() {
-                self.import_image(Tab::Sidebar);
-            }
+            let import = help(ui.button(import_label), "Choose a PNG or ICO picture for the installer’s left pane. PortableForge prepares it at 328 by 628 pixels. Use Fit to show the whole image or Crop to fill the pane.");
+            self.import_image(&import, Tab::Sidebar);
             let icon_available = self.artwork.icon.is_some() || self.base_icon.is_some();
             if help(ui.add_enabled(icon_available, egui::Button::new("Use app icon")),
                 "Use the current app icon as the picture for the installer’s left pane. Set the background color below.").clicked()
@@ -447,12 +444,14 @@ impl Draft {
         }
     }
 
-    fn import_image(&mut self, tab: Tab) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Choose artwork")
-            .add_filter("PNG or ICO image", &["png", "ico"])
-            .pick_file()
-        else {
+    fn import_image(&mut self, opener: &egui::Response, tab: Tab) {
+        let Some(path) = file_picker::choose(
+            opener,
+            "Choose artwork",
+            file_picker::Mode::File(&["png", "ico"]),
+            None,
+        )
+        .and_then(|paths| paths.into_iter().next()) else {
             return;
         };
         match Raster::load(&path) {

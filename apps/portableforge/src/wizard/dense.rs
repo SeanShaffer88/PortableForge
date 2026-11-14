@@ -2,7 +2,7 @@
 
 use eframe::egui;
 
-use super::{guide, picker_start_dir, shell, theme, WizardApp};
+use super::{file_picker, guide, picker_start_dir, shell, theme, WizardApp};
 
 pub(super) const MIN_CONTENT: [f32; 2] = [640.0, 480.0];
 
@@ -46,13 +46,18 @@ pub(super) fn primary_action(ui: &mut egui::Ui, enabled: bool, label: &str) -> e
                 widget.weak_bg_fill = theme::rgb(fill);
                 widget.bg_stroke = egui::Stroke::NONE;
             }
+            let color = if enabled {
+                theme::rgb(palette.action_foreground)
+            } else {
+                let widget = &mut visuals.widgets.inactive;
+                widget.bg_fill = theme::rgb(palette.raised);
+                widget.weak_bg_fill = widget.bg_fill;
+                widget.bg_stroke = egui::Stroke::new(1.0_f32, theme::rgb(palette.edge));
+                theme::rgb(palette.muted)
+            };
             ui.add_enabled(
                 enabled,
-                egui::Button::new(
-                    egui::RichText::new(label)
-                        .strong()
-                        .color(theme::rgb(palette.action_foreground)),
-                ),
+                egui::Button::new(egui::RichText::new(label).strong().color(color)),
             )
         })
         .inner;
@@ -321,6 +326,19 @@ pub(super) fn page(
     let pages = total.div_ceil(per_page);
     *page = (*page).min(pages.saturating_sub(1));
     if pages > 1 {
+        let page_label = |page: usize| {
+            let first = page * per_page + 1;
+            let last = (first + per_page - 1).min(total);
+            if first == last {
+                format!("{item} {first} of {total}")
+            } else {
+                format!("{item} {first}–{last} of {total}")
+            }
+        };
+        let narrow = ui.available_width() < 275.0;
+        if narrow {
+            ui.label(page_label(*page));
+        }
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(*page > 0, egui::Button::new("‹ Previous"))
@@ -328,13 +346,9 @@ pub(super) fn page(
             {
                 *page -= 1;
             }
-            let first = *page * per_page + 1;
-            let last = (first + per_page - 1).min(total);
-            ui.label(if first == last {
-                format!("{item} {first} of {total}")
-            } else {
-                format!("{item} {first}–{last} of {total}")
-            });
+            if !narrow {
+                ui.label(page_label(*page));
+            }
             if ui
                 .add_enabled(*page + 1 < pages, egui::Button::new("Next ›"))
                 .clicked()
@@ -363,7 +377,12 @@ fn diagnostic_in_height(ui: &mut egui::Ui, text: &str, selected: &mut usize, hei
         )
     });
     let line_height = galley.rows.first().map_or(20.0, |row| row.rect().height());
-    let rows = ((height - 36.0) / line_height).floor().max(1.0) as usize;
+    let pager_height = if ui.available_width() < 275.0 {
+        (ui.spacing().interact_size.y + ui.spacing().item_spacing.y) * 2.0
+    } else {
+        36.0
+    };
+    let rows = ((height - pager_height) / line_height).floor().max(1.0) as usize;
     let range = page(ui, selected, galley.rows.len(), rows, "Line");
     let start = galley.rows[..range.start]
         .iter()
@@ -467,6 +486,15 @@ pub(super) fn view_text(ui: &mut egui::Ui, action: &str, title: &str, text: &str
 impl WizardApp {
     pub(super) fn apply_layout_zoom(&mut self, ctx: &egui::Context) {
         let scale = ctx.zoom_factor();
+        if self.proportional_window {
+            let client_dip = ctx.content_rect().size() * scale;
+            if let Some(scale) = super::window_scale::fit([client_dip.x, client_dip.y]) {
+                if (scale - ctx.zoom_factor()).abs() > 0.0001 {
+                    ctx.set_zoom_factor(scale);
+                }
+            }
+            return;
+        }
         if self.applied_layout_zoom != scale {
             self.applied_layout_zoom = scale;
             let minimum = egui::Vec2::from(MIN_CONTENT);
@@ -499,19 +527,17 @@ impl WizardApp {
                     if step.is_none() && (!self.folder_flow.open || room_for_sidebar(ctx)) {
                         ui.label(egui::RichText::new(section).small().weak());
                     }
-                    if step.is_none() && self.folder_flow.open && !room_for_sidebar(ctx) {
-                        self.folder_flow.show_compact_roadmap(ui);
-                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let appearance = explained(
                             ui.button("Appearance"),
-                            "Adjust the theme or change the text size. Shortcut: Ctrl+comma.",
+                            "Choose a theme. Shortcut: Ctrl+comma.",
                         );
                         if appearance.clicked() {
                             self.open_shell_popup(shell::Popup::Appearance, Some(appearance.id));
                         }
+                        self.activity.toggle_button(ui);
                         let commands = explained(
-                            ui.button("Commands · Ctrl+K"),
+                            ui.button("Commands"),
                             "Search for an action available in the current step.",
                         );
                         shell::register_region(ui, shell::Region::Header, commands.id);
@@ -522,6 +548,11 @@ impl WizardApp {
                 });
                 if let Some((index, total)) = step.filter(|_| !room_for_sidebar(ctx)) {
                     self.show_phase_navigation(ui, index, total, false);
+                } else if self.folder_flow.open
+                    && !room_for_sidebar(ctx)
+                    && !self.activity.compact(ctx)
+                {
+                    self.folder_flow.show_compact_roadmap(ui);
                 }
             });
     }
@@ -622,9 +653,7 @@ impl WizardApp {
         heading(ui, "Status and details", detail);
         let log = self.run_log_text();
         diagnostic(ui, &log, &mut self.detail_page);
-        if ui.button("Save the run log").clicked() {
-            self.export_run_log();
-        }
+        self.export_run_log(&ui.button("Save the run log"));
     }
 
     pub(super) fn show_icon_field(&mut self, ui: &mut egui::Ui) -> bool {
@@ -638,17 +667,21 @@ impl WizardApp {
                 )
                 .labelled_by(label.id)
                 .changed();
-            if ui.button("Browse…").clicked() {
-                let mut dialog = rfd::FileDialog::new()
-                    .set_title("Pick the program's picture file")
-                    .add_filter("Picture files", &["ico"]);
-                if let Some(dir) = picker_start_dir(&self.icon_path) {
-                    dialog = dialog.set_directory(dir);
-                }
-                if let Some(path) = dialog.pick_file() {
-                    self.icon_path = path.display().to_string();
-                    changed = true;
-                }
+            let browse = ui.button("Browse…");
+            let start = browse
+                .clicked()
+                .then(|| picker_start_dir(&self.icon_path))
+                .flatten();
+            if let Some(path) = file_picker::choose(
+                &browse,
+                "Pick the program's picture file",
+                file_picker::Mode::File(&["ico"]),
+                start,
+            )
+            .and_then(|paths| paths.into_iter().next())
+            {
+                self.icon_path = path.display().to_string();
+                changed = true;
             }
         });
         if !self.icon_path.trim().is_empty()
@@ -714,6 +747,16 @@ mod tests {
         expected: &[&str],
     ) {
         assert_wizard_fits_at(ctx, frame, wizard, scale, MIN_CONTENT, expected);
+        wizard.activity.open_for_layout_test();
+        assert_wizard_fits_at(
+            ctx,
+            frame,
+            wizard,
+            scale,
+            super::super::window_scale::CANVAS,
+            expected,
+        );
+        wizard.activity = Default::default();
     }
 
     fn assert_wizard_fits_at(
@@ -944,7 +987,6 @@ mod tests {
                 "Check prerequisites",
                 "Sandboxie-Plus 1.18.8 · Needs attention",
                 "View prerequisite details",
-                "Open bundled test box folder",
                 "Portable test box instructions",
                 "Start capture",
             ],

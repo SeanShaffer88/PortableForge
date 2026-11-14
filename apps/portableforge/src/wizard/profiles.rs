@@ -12,7 +12,7 @@ use portableforge_core::settings::{self, CleanedCapture, SavedBuild, SavedProfil
 use portableforge_core::SandboxMode;
 
 use super::{
-    dense, open_folder, picker_start_dir, setup_input, shell, theme, SetupInput, SetupKind,
+    dense, file_picker, picker_start_dir, setup_input, shell, theme, SetupInput, SetupKind,
     WizardApp,
 };
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -396,6 +396,35 @@ impl ProfileFlow {
         move || drop(sender)
     }
 
+    pub(super) fn activity_problem(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub(super) fn activity_signal(&self) -> Option<super::activity::Notice> {
+        use super::activity::Notice;
+        if self.error.is_some() {
+            Some(Notice::Problem(
+                "The current task hit a problem. Check the suggested fix.",
+            ))
+        } else if self.busy() {
+            Some(Notice::Progress(self.status))
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn activity_notice(&self) -> super::activity::Notice {
+        use super::activity::Notice;
+        self.activity_signal().unwrap_or_else(|| {
+            Notice::Progress(match self.library_tab {
+                LibraryTab::Profiles => "Choose a saved profile to prepare an installer.",
+                LibraryTab::Queue => "Review the installers waiting to build.",
+                LibraryTab::Results if self.build.is_some() => "The installer is ready.",
+                LibraryTab::Results => "Review the finished builds.",
+            })
+        })
+    }
+
     pub(super) fn profile_saved(&self) -> bool {
         self.saved.is_some()
     }
@@ -704,14 +733,14 @@ impl ProfileFlow {
             ui.label(format!("Companion files · {count}"));
         }
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Choose companion files…").clicked() {
-                if let Some(paths) = rfd::FileDialog::new()
-                    .set_title("Choose files used by setup")
-                    .pick_files()
-                {
-                    self.companions = paths;
-                    self.reset_trust();
-                }
+            if let Some(paths) = file_picker::choose(
+                &ui.button("Choose companion files…"),
+                "Choose files used by setup",
+                file_picker::Mode::Files(&[]),
+                None,
+            ) {
+                self.companions = paths;
+                self.reset_trust();
             }
             if !self.companions.is_empty() {
                 let paths = self
@@ -782,29 +811,27 @@ fn path_field(ui: &mut egui::Ui, label: &str, value: &mut String, kind: FieldKin
         if let Some(browse) = browse {
             let browse_button = ui.button(browse);
             dense::field_help(&browse_button, label);
-            if browse_button.clicked() {
-                let mut dialog = rfd::FileDialog::new().set_title(label);
-                if let Some(dir) = picker_start_dir(value) {
-                    dialog = dialog.set_directory(dir);
-                }
+            let mode = match kind {
+                FieldKind::File => file_picker::Mode::File(&["exe"]),
+                FieldKind::MatchingSetup => file_picker::Mode::File(&["exe", "msi"]),
+                _ => file_picker::Mode::Folder,
+            };
+            let start = browse_button
+                .clicked()
+                .then(|| picker_start_dir(value))
+                .flatten();
+            if let Some(path) = file_picker::choose(&browse_button, label, mode, start)
+                .and_then(|paths| paths.into_iter().next())
+            {
                 let picked = match kind {
-                    FieldKind::File => Ok(dialog.add_filter("Setup files", &["exe"]).pick_file()),
-                    FieldKind::MatchingSetup => Ok(dialog
-                        .add_filter("Setup files", &["exe", "msi"])
-                        .pick_file()),
-                    FieldKind::Folder => Ok(dialog.pick_folder()),
-                    FieldKind::NewFolder(name, queue) => dialog
-                        .pick_folder()
-                        .map(|parent| fresh_child_path(&parent, name, queue))
-                        .transpose(),
-                    FieldKind::Typed => Ok(None),
+                    FieldKind::NewFolder(name, queue) => fresh_child_path(&path, name, queue),
+                    _ => Ok(path),
                 };
                 match picked {
-                    Ok(Some(path)) => {
+                    Ok(path) => {
                         *value = path.to_string_lossy().into_owned();
                         changed = true;
                     }
-                    Ok(None) => {}
                     Err(error) => {
                         ui.colored_label(ui.visuals().error_fg_color, error);
                     }
@@ -1503,11 +1530,13 @@ impl WizardApp {
             } else {
                 ui.label(path_text);
             }
-            if ui.button("Open the profile folder").clicked() {
-                if let Err(error) = open_folder(path) {
-                    self.profile_flow.error = Some(error);
-                }
-            }
+            dense::view_text(
+                ui,
+                "View profile folder",
+                "Profile folder",
+                &path.display().to_string(),
+                true,
+            );
         }
         if let Some(error) = self.profile_flow.approval_error.clone() {
             ui.colored_label(
@@ -1681,6 +1710,7 @@ impl WizardApp {
                 }
             }
         });
+        self.show_activity_side(ctx);
         egui::CentralPanel::default()
             .frame(dense::content_frame(ctx))
             .show(ctx, |ui| {
@@ -2273,34 +2303,37 @@ impl WizardApp {
                     ui.horizontal_wrapped(|ui| {
                         dense::view_text(ui, "View build log", "Build problem", error, true);
                         let work = job.request.destination.join("work");
-                        if work.is_dir() && ui.button("Open build working folder").clicked() {
-                            if let Err(error) = open_folder(&work) {
-                                action_error = Some(error);
-                            }
-                        }
+                        dense::view_text(
+                            ui,
+                            "View build working folder",
+                            "Build work folder",
+                            &work.display().to_string(),
+                            work.is_dir(),
+                        );
                         edit = ui
                             .add_enabled(!busy, egui::Button::new("Edit build inputs"))
                             .clicked();
-                        if ui
-                            .add_enabled(!busy, egui::Button::new("Retry in a new folder…"))
-                            .clicked()
+                        let retry =
+                            ui.add_enabled(!busy, egui::Button::new("Retry in a new folder…"));
+                        if let Some(parent) = file_picker::choose(
+                            &retry,
+                            "Choose a parent for the retry",
+                            file_picker::Mode::Folder,
+                            None,
+                        )
+                        .and_then(|paths| paths.into_iter().next())
                         {
-                            if let Some(parent) = rfd::FileDialog::new()
-                                .set_title("Choose a parent for the retry")
-                                .pick_folder()
-                            {
-                                match fresh_child_path(
-                                    &parent,
-                                    "PortableForge Retry",
-                                    &self.profile_flow.queue,
-                                ) {
-                                    Ok(destination) => {
-                                        let mut retry = job.request.clone();
-                                        retry.destination = destination;
-                                        retry_request = Some(retry);
-                                    }
-                                    Err(error) => action_error = Some(error),
+                            match fresh_child_path(
+                                &parent,
+                                "PortableForge Retry",
+                                &self.profile_flow.queue,
+                            ) {
+                                Ok(destination) => {
+                                    let mut retry = job.request.clone();
+                                    retry.destination = destination;
+                                    retry_request = Some(retry);
                                 }
+                                Err(error) => action_error = Some(error),
                             }
                         }
                     });
@@ -2379,11 +2412,13 @@ impl WizardApp {
             .cloned();
         ui.add_enabled_ui(!busy, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Open the installer folder").clicked() {
-                    if let Err(error) = open_folder(&build.directory) {
-                        self.profile_flow.error = Some(error);
-                    }
-                }
+                dense::view_text(
+                    ui,
+                    "View installer folder",
+                    "Installer folder",
+                    &build.directory.display().to_string(),
+                    true,
+                );
                 if ui.button("View build details").clicked() {
                     let selected = build.clone();
                     self.profile_flow.start(
@@ -2940,7 +2975,11 @@ mod tests {
                     &["✓ Build recorded", "View build details", "Test installer"][..],
                 ),
             ] {
-                for size in [dense::MIN_CONTENT, [960.0, 540.0]] {
+                for size in [
+                    dense::MIN_CONTENT,
+                    [960.0, 540.0],
+                    super::super::window_scale::CANVAS,
+                ] {
                     assert_library_controls_fit(tab, expected, size, scale);
                     if size[0] >= 768.0 {
                         assert_library_controls_fit(
@@ -2980,6 +3019,9 @@ mod tests {
     fn assert_library_controls_fit(tab: LibraryTab, labels: &[&str], size: [f32; 2], scale: f32) {
         let mut wizard = library_fixture();
         wizard.profile_flow.library_tab = tab;
+        if size == super::super::window_scale::CANVAS {
+            wizard.activity.open_for_layout_test();
+        }
         assert_controls_fit(wizard, labels, size, scale);
     }
 

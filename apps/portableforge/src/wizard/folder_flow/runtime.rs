@@ -373,7 +373,7 @@ mod tests {
         ));
         assert!(wizard.folder_flow.result.is_some());
         frame.assert_test_focus(&mut wizard);
-        frame.fit(&mut wizard, &[copy::TEST_FAILED, "Open Output Folder"]);
+        frame.fit(&mut wizard, &[copy::TEST_FAILED, "View Output Folder"]);
     }
 
     #[test]
@@ -408,7 +408,7 @@ mod tests {
         frame.draw(&mut wizard, Default::default());
         assert!(!wizard.folder_flow.busy());
         assert!(wizard.folder_flow.result.is_some());
-        frame.fit(&mut wizard, &[copy::TEST_CANCELLED, "Open Output Folder"]);
+        frame.fit(&mut wizard, &[copy::TEST_CANCELLED, "View Output Folder"]);
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
                 wizard.folder_flow.runtime.outcome = Some(Err(failure));
                 frame.fit(
                     &mut wizard,
-                    &[copy::TEST_FAILED, copy::TEST_DETAILS, "Open Output Folder"],
+                    &[copy::TEST_FAILED, copy::TEST_DETAILS, "View Output Folder"],
                 );
                 let output = frame.draw(&mut wizard, Default::default());
                 assert!(!output.shapes.iter().any(|shape| {
@@ -463,7 +463,7 @@ mod tests {
                 &[
                     copy::TEST_FINISHED,
                     copy::TEST_DETAILS,
-                    "Open Output Folder",
+                    "View Output Folder",
                 ],
             );
         }

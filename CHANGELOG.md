@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Guide each package through review and an explicit build. Dark High Contrast is the default for new settings, with a collapsible Activity panel and in-window pickers.
 - Use a shared project roadmap, grouped app settings, and paired artwork previews on wider windows.
 - Keep the applied app icon and installer left pane when saving and resuming an Autonomous job.
 - Pause an Autonomous app package and resume it after restarting the wizard. Resuming scans the original selection and asks for sharing permission again.

@@ -83,8 +83,13 @@ fn main() -> ExitCode {
 pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFacts {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt as _;
+
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
         fn reg_value(value: &str) -> Option<String> {
             let out = std::process::Command::new(system_directory().ok()?.join("reg.exe"))
+                .creation_flags(CREATE_NO_WINDOW)
                 .args([
                     "query",
                     r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
@@ -133,6 +138,7 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
             .ok()
             .and_then(|directory| {
                 std::process::Command::new(directory.join("dism.exe"))
+                    .creation_flags(CREATE_NO_WINDOW)
                     .args([
                         "/English",
                         "/Online",
@@ -155,6 +161,7 @@ pub fn collect_preflight_facts() -> portableforge_core::orchestrate::PreflightFa
         // vssadmin lists shadow copies; no listing at all means none
         // exist, and a failed run (needs elevation) stays "unknown".
         let restore_point = std::process::Command::new("vssadmin.exe")
+            .creation_flags(CREATE_NO_WINDOW)
             .args(["list", "shadows"])
             .output()
             .ok()

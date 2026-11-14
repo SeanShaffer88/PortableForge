@@ -18,6 +18,24 @@ pub(super) struct State {
     applied: Option<(Palette, Density)>,
 }
 
+const HIGH_CONTRAST: Palette = Palette {
+    background: [0x01, 0x04, 0x09],
+    surface: [0x0d, 0x11, 0x17],
+    raised: [0x01, 0x04, 0x09],
+    selected: [0x17, 0x2a, 0x40],
+    muted: [0xb1, 0xba, 0xc4],
+    border: [0x7d, 0x85, 0x90],
+    edge: [0x7d, 0x85, 0x90],
+    selection_indicator: [0x71, 0xcb, 0xff],
+    focus: [0x71, 0xcb, 0xff],
+    action: [0x58, 0xa6, 0xff],
+    action_hover: [0x79, 0xc0, 0xff],
+    action_pressed: [0x71, 0xcb, 0xff],
+    action_foreground: [0x01, 0x04, 0x09],
+    success: [0x7e, 0xe7, 0x87],
+    ..tessel::DARK
+};
+
 const RADIUS: u8 = 4;
 const SEMIBOLD: &str = "Segoe UI Semibold";
 
@@ -122,19 +140,21 @@ impl State {
         if self.last_appearance != Some(appearance) {
             ctx.set_theme(match appearance {
                 Appearance::System => egui::ThemePreference::System,
-                Appearance::Dark => egui::ThemePreference::Dark,
+                Appearance::Dark | Appearance::HighContrast => egui::ThemePreference::Dark,
                 Appearance::Light => egui::ThemePreference::Light,
             });
             self.last_appearance = Some(appearance);
         }
         let dark = match appearance {
             Appearance::System => system != Some(egui::Theme::Light),
-            Appearance::Dark => true,
+            Appearance::Dark | Appearance::HighContrast => true,
             Appearance::Light => false,
         };
-        let chosen = self
-            .high_contrast
-            .unwrap_or(if dark { tessel::DARK } else { tessel::LIGHT });
+        let chosen = self.high_contrast.unwrap_or(match appearance {
+            Appearance::HighContrast => HIGH_CONTRAST,
+            _ if dark => tessel::DARK,
+            _ => tessel::LIGHT,
+        });
         let size = ctx.content_rect().size();
         let density = if size.x >= 700.0 && size.y >= 620.0 {
             tessel::COMFORTABLE
@@ -429,7 +449,11 @@ mod tests {
     #[test]
     fn github_palettes_keep_text_action_and_focus_readable() {
         assert_eq!(tessel::DESIGN_REVISION, 2);
-        for (palette, dark) in [(tessel::DARK, true), (tessel::LIGHT, false)] {
+        for (palette, dark) in [
+            (HIGH_CONTRAST, true),
+            (tessel::DARK, true),
+            (tessel::LIGHT, false),
+        ] {
             let visuals = style(palette, tessel::COMPACT, dark).visuals;
             assert_eq!(visuals.text_color(), rgb(palette.foreground));
             assert_eq!(visuals.weak_text_color(), rgb(palette.muted));

@@ -1,7 +1,7 @@
 //! Task navigation, focus, and local commands shared by the wizard shell.
 
 use eframe::egui;
-use portableforge_core::settings::{Appearance, TEXT_SCALES};
+use portableforge_core::settings::Appearance;
 
 use super::{dense, folder_flow, theme, WizardApp};
 
@@ -90,6 +90,7 @@ pub(super) enum Region {
     Header,
     Sidebar,
     Body,
+    Activity,
     Footer,
 }
 
@@ -109,6 +110,10 @@ pub(super) fn register_region(ui: &egui::Ui, region: Region, id: egui::Id) {
 
 pub(super) fn clear_sidebar_focus(ctx: &egui::Context) {
     ctx.data_mut(|data| data.remove::<egui::Id>(Region::Sidebar.key()));
+}
+
+pub(super) fn clear_activity_focus(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.remove::<egui::Id>(Region::Activity.key()));
 }
 
 pub(super) fn register_heading(ui: &egui::Ui, response: &egui::Response) {
@@ -390,7 +395,7 @@ impl WizardApp {
                 command: Command::Appearance,
                 label: "Change appearance",
                 keys: "Ctrl+,",
-                keywords: "settings theme text size",
+                keywords: "settings theme contrast",
                 enabled: true,
             },
             Entry {
@@ -585,10 +590,7 @@ impl WizardApp {
                 entry.enabled,
                 egui::Button::selectable(i == popup.selected && entry.enabled, text),
             );
-            if row
-                .on_disabled_hover_text("This action is unavailable at the current step.")
-                .clicked()
-            {
+            if row.clicked() {
                 chosen = Some(entry.command);
             }
         }
@@ -606,6 +608,7 @@ impl WizardApp {
         ui.label("Theme");
         for (label, value) in [
             ("System", Appearance::System),
+            ("Dark High Contrast", Appearance::HighContrast),
             ("GitHub Dark", Appearance::Dark),
             ("GitHub Light", Appearance::Light),
         ] {
@@ -620,23 +623,7 @@ impl WizardApp {
                 ui.ctx().request_repaint();
             }
         }
-        ui.label("Text size");
-        ui.horizontal_wrapped(|ui| {
-            for (label, scale) in ["Standard", "Large", "Extra large"]
-                .into_iter()
-                .zip(TEXT_SCALES)
-            {
-                if ui
-                    .selectable_label(self.settings.text_scale() == scale, label)
-                    .clicked()
-                {
-                    self.settings.text_scale = scale;
-                    self.settings_dirty = true;
-                    self.persist_now();
-                    ui.ctx().request_repaint();
-                }
-            }
-        });
+        ui.label("Drag a window corner to scale the entire workspace.");
     }
 
     fn execute_command(&mut self, ctx: &egui::Context, command: Command, opener: Option<egui::Id>) {
@@ -668,6 +655,7 @@ fn focus_next_region(ctx: &egui::Context) {
         Region::Header,
         Region::Sidebar,
         Region::Body,
+        Region::Activity,
         Region::Footer,
     ];
     let start = regions
