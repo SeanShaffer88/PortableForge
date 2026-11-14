@@ -64,7 +64,9 @@ to dragging a source onto the first screen. **Choose App Files** accepts
 one ZIP or several files for the same app. **Guided** is the default.
 **Autonomous** checks the same information and starts the build once the
 required decisions are complete. Use **Cancel Preparation** to stop a ZIP
-or file selection while it is being prepared.
+or file selection while it is being prepared. **Save for Later** returns to
+the source screen. **Resume App Package** reopens the saved selection for
+review.
 
 App details, build tools and output, and folder
 findings use compact pages with a shared **Back** action. **F1** opens

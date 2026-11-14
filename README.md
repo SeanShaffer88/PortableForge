@@ -31,6 +31,8 @@ In the standard package flow, select a setup file and review the system checks. 
 2. In **Guided**, use **Review Your Package** to review the suggested program, name, version, publisher, and icon. Choose the main program if several look plausible. Fill in missing details, confirm permission to include the files, and select the official Launcher Generator 2.2.9 and Installer 3.9.19 folders.
 3. Choose a new output folder and build. In **Autonomous**, PortableForge starts the build once the required choices and checks are complete. The installer and build receipt appear together in the output folder.
 
+In **Autonomous**, use **Save for Later** to pause one app package. Choose **Resume App Package** from the first page to scan the original files again and pick up your saved choices. Review the current files and confirm permission to include them before building. Apply custom artwork again after resuming. The saved job stays available after building. Use **Remove Saved Job** to clear it.
+
 ZIP and loose-file staging on Windows x64 leaves your originals intact and never runs them. ZIPs use standard stored or deflated files. If PortableForge cannot open an archive format, extract it with a trusted tool and drop the resulting app folder.
 
 Choose **Test Installer** on the result page to try the new installer in a fresh Sandboxie-Plus box. Follow the prompts to finish setup and try the app twice. The result records what happened to the app’s portable data and whether the test box was removed.

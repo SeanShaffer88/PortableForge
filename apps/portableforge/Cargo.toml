@@ -18,6 +18,7 @@ path = "src/bin/portableforge-agent.rs"
 
 [dependencies]
 portableforge-core = { path = "../../crates/portableforge-core" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Native file dialogs (the wizard's Browse… buttons) — the same crate
 # RoomForge and ytTrayDL use; no dialog code of our own to maintain.
