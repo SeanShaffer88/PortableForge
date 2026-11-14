@@ -90,13 +90,13 @@ impl Draft {
     pub(super) fn blocker(&self) -> Option<(Page, &'static str)> {
         if !has_text(&self.name, 120) {
             Some((Page::App, "Enter a name for the app."))
-        } else if !has_text(&self.publisher, 120) {
-            Some((Page::App, "Enter the name of the app’s publisher."))
         } else if !has_text(&self.version, 40) || package_version(&self.version).is_none() {
             Some((
                 Page::App,
                 "Enter the app version in numbers, such as 2.4 or 2.4.1.",
             ))
+        } else if !has_text(&self.publisher, 120) {
+            Some((Page::About, "Enter the name of the app’s publisher."))
         } else if !valid_homepage(self.homepage.trim()) {
             Some((Page::About, "Enter the address of the app’s website."))
         } else if !has_text(&self.description, 512) {
@@ -123,7 +123,7 @@ impl Draft {
             ))
         } else if !self.rights {
             Some((
-                Page::Review,
+                Page::Rights,
                 "Confirm you have permission to include these app files.",
             ))
         } else {

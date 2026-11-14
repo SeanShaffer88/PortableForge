@@ -25,8 +25,8 @@ task surface. Warnings and outcomes include text. [TesselGUI revision 2 verifica
 - Ctrl+, opens **Appearance**. F1 opens **Status and details** or shortcut help
   in the saved-profile workspace. F6 moves focus between available regions.
 - Escape dismisses a dialog or goes back when the current step allows it.
-  Commands, Appearance, and Package artwork restore focus to their opener.
-  Task navigation focuses the heading so the next controls follow in reading order.
+  Commands, Appearance, and the capture artwork dialog restore focus to their opener.
+  Task navigation focuses the heading for reading order. Interactive controls retain a visible focus outline.
   Back and Escape return from captured findings to **Review Your Package**.
 - **Needs attention** shows unresolved required warnings. Review choices
   remain with their findings when you page, filter, or go back.
@@ -50,11 +50,10 @@ Long paths stay available in full. A long path can wrap in the field and
 opens in a full-value dialog when more room is needed. A copy action is
 available in that dialog.
 
-The left roadmap shows the current phase and available navigation. The two
-side panes have matching widths. Available fields and artwork
-controls send plain-language help to the fixed status bar on pointer hover or
-keyboard focus. The artwork dialog shows both previews when it fits and uses
-tabs in the compact layout. The charcoal work surface uses subtle circuit
+The left roadmap shows the current phase, available navigation, and substep
+markers. The two side panes have matching widths. Fields and artwork controls
+send plain-language help to the larger fixed status bar on pointer hover or
+keyboard focus. Activity uses smaller text. The charcoal work surface uses subtle circuit
 traces in Dark appearance. Light and Windows contrast appearances use
 plain backgrounds.
 
@@ -72,21 +71,17 @@ or file selection while it is being prepared. **Save for Later** returns to
 the source screen. **Resume App Package** reopens the saved selection for
 review.
 
-App details, build tools and output, and folder
-findings use compact pages with a shared **Back** action. **F1** opens
-findings. Start-file choices and findings are paged, and **View Path**
-opens long paths in the full-value dialog. The wizard keeps **Build
-Installer** in the action strip on the review screen, and displays
-**Stop After This Step** while a running build can still be stopped.
-Geometry tests exercise the populated folder pages at 640 × 480 for
-Standard, Large, and Extra large text.
+App details, artwork, build tools, save location, build, and test use
+dedicated pages with **Back** and **Next**. **F1** opens findings. Start-file
+choices and findings are paged. **View Path** opens long paths in the
+full-value dialog. **Build Installer** is available on the build page once
+the required checks pass. **Stop After This Step** appears while a running
+build can still be stopped.
 
-**Edit Package Artwork** opens the same icon and installer pane controls
-from folder review. **Apply Artwork** keeps edits for the current review,
-and **Cancel** or Escape discards unapplied edits. Closing the editor
-returns focus to **Edit Package Artwork**.
+**Package Artwork** contains separate icon and installer artwork pages.
+Apply the edits to include them in the package.
 
-**Test Installer** opens a confirmation from the built result. **Cancel**
+**Test Installer** opens a confirmation from the test page. **Cancel**
 has initial focus, and **Start Test** opens the installer in a fresh
 Sandboxie-Plus box after checking the original build receipt. The running
 screen shows the setup and two-launch instructions. **Cancel Test**

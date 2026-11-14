@@ -34,16 +34,16 @@ In the standard package flow, select a setup file and review the system checks. 
 ## Build from a ZIP, app folder, or app files
 
 1. Drop one ZIP or app folder on the first page, or select the files for one app together. For loose files, include the app's executable and its companion files from the same folder. To include subfolders, drop the whole app folder or its ZIP. Setup files still use the capture workflow.
-2. Open **Review Your Package** to check the suggested program, name, version, publisher, and icon. Choose the main program if several look plausible. Fill in missing details, confirm permission to include the files, and select the official Launcher Generator 2.2.9 and Installer 3.9.19 folders.
-3. Choose a new output folder and select **Build Installer** when your review is complete. The installer and build receipt appear together in the output folder.
+2. Open **Review Your Package** and choose **Next** to confirm the start file, enter the app details, check sharing permission, and review findings. Choose a roadmap row to revisit its pages. The marker and count show the current substep.
+3. Select the official Launcher Generator 2.2.9 and Installer 3.9.19 folders under **Build & Output**, then choose where to save. Select **Build Installer** when the checks pass. The installer and receipt appear together in the output folder.
 
 Use **Save for Later** to pause one app package. Choose **Resume App Package** from the first page to scan the original files again and pick up your saved choices. Review the current files and confirm permission to include them before building. Artwork you applied, including the custom icon and installer left pane, returns with the saved start file. The saved job stays available after building. Use **Remove Saved Job** to clear it.
 
 ZIP and loose-file staging on Windows x64 leaves your originals intact and never runs them. ZIPs use standard stored or deflated files. If PortableForge cannot open an archive format, extract it with a trusted tool and drop the resulting app folder.
 
-Choose **Test Installer** on the result page to try the new installer in a fresh Sandboxie-Plus box. Follow the prompts to finish setup and try the app twice. The result records what happened to the app’s portable data and whether the test box was removed.
+Open the test page under **Build Result**, then choose **Test Installer** to try it in a fresh Sandboxie-Plus box. Follow the prompts to finish setup and try the app twice. The result records what happened to the app’s portable data and whether the test box was removed.
 
-Use **Edit Package Artwork** to change the app icon or the image shown on the left side of the installer. Preview your changes and choose **Apply Artwork** before building.
+Use **Package Artwork** to edit the app icon and installer left pane on their own pages. Preview and apply your choices before building.
 
 PortableForge leaves the source folder intact and preserves its directory layout in staging. The official installer builder skips housekeeping files such as `thumbs.db`. It warns about likely fixed paths and parent-folder references in supported settings files. The folder check does not start the app, so the build result reports that portability at runtime is unverified. A prepared PortableApps.com package can use the trusted prepared-package command described below.
 

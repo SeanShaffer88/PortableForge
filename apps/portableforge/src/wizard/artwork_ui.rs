@@ -18,13 +18,13 @@ const ICON_SIZES: [u32; 6] = [16, 32, 48, 75, 128, 256];
 const ARTWORK_HELP: &str = "Point to a control or focus it with Tab to read what it does.";
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum Tab {
+pub(super) enum ArtworkPage {
     #[default]
     Icon,
     Sidebar,
 }
 
-impl Tab {
+impl ArtworkPage {
     fn index(self) -> usize {
         match self {
             Self::Icon => 0,
@@ -41,9 +41,9 @@ pub(super) struct Editor {
 }
 
 struct Draft {
-    opener: egui::Id,
+    opener: Option<egui::Id>,
     copy: &'static EditorCopy,
-    tab: Tab,
+    tab: ArtworkPage,
     icon_size: u32,
     artwork: Artwork,
     base_icon: Option<Raster>,
@@ -107,23 +107,61 @@ impl Editor {
     }
 
     pub(super) fn open(&mut self, opener: egui::Id, captured_icon: Option<Raster>) {
-        self.open_with_copy(opener, captured_icon, &CAPTURE_COPY);
+        self.open_with_copy(Some(opener), captured_icon, &CAPTURE_COPY);
     }
 
-    pub(super) fn open_folder(&mut self, opener: egui::Id, base_icon: Raster) {
-        self.open_with_copy(opener, Some(base_icon), &FOLDER_COPY);
+    pub(super) fn begin_folder_page(&mut self, base_icon: Raster) {
+        if self.editing.is_none() {
+            self.open_with_copy(None, Some(base_icon), &FOLDER_COPY);
+        }
+    }
+
+    pub(super) fn show_folder_page(&mut self, ui: &mut egui::Ui, page: ArtworkPage) {
+        let Some(draft) = self.folder_draft_mut() else {
+            return;
+        };
+        if draft.tab != page {
+            draft.tab = page;
+            draft.problem = None;
+        }
+        draft.show_workspace(ui);
+    }
+
+    pub(super) fn can_apply_folder_page(&self) -> bool {
+        self.editing
+            .as_ref()
+            .filter(|draft| draft.opener.is_none())
+            .is_some_and(Draft::can_apply)
+    }
+
+    pub(super) fn apply_folder_page(&mut self) -> bool {
+        if !self.can_apply_folder_page() {
+            return false;
+        }
+        self.finish(Exit::Apply);
+        true
+    }
+
+    pub(super) fn cancel_folder_page(&mut self) {
+        if self.folder_draft_mut().is_some() {
+            self.finish(Exit::Cancel);
+        }
+    }
+
+    fn folder_draft_mut(&mut self) -> Option<&mut Draft> {
+        self.editing.as_mut().filter(|draft| draft.opener.is_none())
     }
 
     fn open_with_copy(
         &mut self,
-        opener: egui::Id,
+        opener: Option<egui::Id>,
         base_icon: Option<Raster>,
         copy: &'static EditorCopy,
     ) {
         self.editing = Some(Draft {
             opener,
             copy,
-            tab: Tab::Icon,
+            tab: ArtworkPage::Icon,
             icon_size: 128,
             artwork: self.applied.clone(),
             base_icon,
@@ -141,7 +179,7 @@ impl Editor {
         session: PathBuf,
         main_exe: PathBuf,
     ) {
-        let Some(draft) = &mut self.editing else {
+        let Some(draft) = self.editing.as_mut().filter(|draft| draft.opener.is_some()) else {
             return;
         };
         #[cfg(all(windows, target_arch = "x86_64"))]
@@ -174,7 +212,7 @@ impl Editor {
 
     /// Returns true after the user applies the artwork.
     pub(super) fn show(&mut self, ctx: &egui::Context) -> bool {
-        let Some(draft) = &mut self.editing else {
+        let Some(draft) = self.editing.as_mut().filter(|draft| draft.opener.is_some()) else {
             if let Some(opener) = self.return_focus {
                 if ctx.memory(|memory| memory.top_modal_layer().is_none()) {
                     ctx.memory_mut(|memory| memory.request_focus(opener));
@@ -234,7 +272,7 @@ impl Editor {
 
     fn finish(&mut self, exit: Exit) {
         if let Some(draft) = self.editing.take() {
-            self.return_focus = Some(draft.opener);
+            self.return_focus = draft.opener;
             if exit == Exit::Apply {
                 self.applied = draft.artwork;
             }
@@ -275,11 +313,11 @@ impl Draft {
         let before = self.tab;
         ui.horizontal(|ui| {
             help(
-                ui.selectable_value(&mut self.tab, Tab::Icon, self.copy.icon_tab),
+                ui.selectable_value(&mut self.tab, ArtworkPage::Icon, self.copy.icon_tab),
                 "Edit the icon shown for the portable app. Check its preview at different sizes before applying.",
             );
             help(
-                ui.selectable_value(&mut self.tab, Tab::Sidebar, self.copy.sidebar_tab),
+                ui.selectable_value(&mut self.tab, ArtworkPage::Sidebar, self.copy.sidebar_tab),
                 "Edit the vertical picture shown to the left of the installation steps. You can import a picture or use the app icon as its starting point.",
             );
         });
@@ -299,8 +337,8 @@ impl Draft {
                 |ui| {
                     ui.set_width(controls_width);
                     match self.tab {
-                        Tab::Icon => self.show_icon_controls(ui, false),
-                        Tab::Sidebar => self.show_sidebar_controls(ui, false),
+                        ArtworkPage::Icon => self.show_icon_controls(ui, false),
+                        ArtworkPage::Sidebar => self.show_sidebar_controls(ui, false),
                     }
                     self.show_problem(ui);
                 },
@@ -316,18 +354,21 @@ impl Draft {
 
     fn show_paired_workspace(&mut self, ui: &mut egui::Ui) {
         ui.columns(2, |columns| {
-            for (column, tab) in columns.iter_mut().zip([Tab::Icon, Tab::Sidebar]) {
+            for (column, tab) in columns
+                .iter_mut()
+                .zip([ArtworkPage::Icon, ArtworkPage::Sidebar])
+            {
                 let heading = match tab {
-                    Tab::Icon => self.copy.icon_tab,
-                    Tab::Sidebar => self.copy.sidebar_tab,
+                    ArtworkPage::Icon => self.copy.icon_tab,
+                    ArtworkPage::Sidebar => self.copy.sidebar_tab,
                 };
                 column.label(egui::RichText::new(heading).strong());
                 self.update_preview(column.ctx(), tab);
                 self.show_preview(column, column.available_width(), tab, true);
                 column.add_space(8.0);
                 match tab {
-                    Tab::Icon => self.show_icon_controls(column, true),
-                    Tab::Sidebar => self.show_sidebar_controls(column, true),
+                    ArtworkPage::Icon => self.show_icon_controls(column, true),
+                    ArtworkPage::Sidebar => self.show_sidebar_controls(column, true),
                 }
             }
         });
@@ -358,7 +399,7 @@ impl Draft {
         };
         ui.horizontal_wrapped(|ui| {
             let import = help(ui.button(import_label), "Choose a PNG or ICO image for the app icon. A square image with a transparent background usually reads best at small sizes.");
-            self.import_image(&import, Tab::Icon);
+            self.import_image(&import, ArtworkPage::Icon);
             if help(
                 ui.add_enabled(self.artwork.icon.is_some(), egui::Button::new(self.copy.restore_icon)),
                 "Remove the custom icon and use the icon PortableForge found for this app. You can import another picture at any time.",
@@ -381,7 +422,7 @@ impl Draft {
                     "Change the preview size to check the artwork. The package still includes all required icon sizes.",
                 ).changed()
                 {
-                    self.dirty_previews[Tab::Icon.index()] = true;
+                    self.dirty_previews[ArtworkPage::Icon.index()] = true;
                 }
             }
         });
@@ -398,7 +439,7 @@ impl Draft {
         };
         ui.horizontal_wrapped(|ui| {
             let import = help(ui.button(import_label), "Choose a PNG or ICO picture for the installer’s left pane. PortableForge prepares it at 328 by 628 pixels. Use Fit to show the whole image or Crop to fill the pane.");
-            self.import_image(&import, Tab::Sidebar);
+            self.import_image(&import, ArtworkPage::Sidebar);
             let icon_available = self.artwork.icon.is_some() || self.base_icon.is_some();
             if help(ui.add_enabled(icon_available, egui::Button::new("Use app icon")),
                 "Use the current app icon as the picture for the installer’s left pane. Set the background color below.").clicked()
@@ -444,7 +485,7 @@ impl Draft {
         }
     }
 
-    fn import_image(&mut self, opener: &egui::Response, tab: Tab) {
+    fn import_image(&mut self, opener: &egui::Response, tab: ArtworkPage) {
         let Some(path) = file_picker::choose(
             opener,
             "Choose artwork",
@@ -457,13 +498,13 @@ impl Draft {
         match Raster::load(&path) {
             Ok(source) => {
                 match tab {
-                    Tab::Icon => {
+                    ArtworkPage::Icon => {
                         self.artwork.icon = Some(IconArtwork {
                             source,
                             transform: Transform::default(),
                         })
                     }
-                    Tab::Sidebar => {
+                    ArtworkPage::Sidebar => {
                         let background = self
                             .artwork
                             .sidebar
@@ -487,15 +528,15 @@ impl Draft {
         self.problem = None;
     }
 
-    fn update_preview(&mut self, ctx: &egui::Context, tab: Tab) {
+    fn update_preview(&mut self, ctx: &egui::Context, tab: ArtworkPage) {
         let index = tab.index();
         if !self.dirty_previews[index] {
             return;
         }
         self.dirty_previews[index] = false;
         let rendered = match tab {
-            Tab::Icon => self.icon_preview(),
-            Tab::Sidebar => self.artwork.sidebar.as_ref().map_or(Ok(None), |pane| {
+            ArtworkPage::Icon => self.icon_preview(),
+            ArtworkPage::Sidebar => self.artwork.sidebar.as_ref().map_or(Ok(None), |pane| {
                 let icon = if pane.source.is_none() {
                     self.effective_icon(256)?
                 } else {
@@ -544,7 +585,7 @@ impl Draft {
         self.effective_icon(self.icon_size)
     }
 
-    fn show_preview(&self, ui: &mut egui::Ui, width: f32, tab: Tab, paired: bool) {
+    fn show_preview(&self, ui: &mut egui::Ui, width: f32, tab: ArtworkPage, paired: bool) {
         if !paired {
             ui.label(egui::RichText::new("Preview").strong());
         }
@@ -555,8 +596,8 @@ impl Draft {
             (false, _) => 184.0,
         };
         let size = match tab {
-            Tab::Icon => egui::Vec2::splat(128.0_f32.min(pane_height)),
-            Tab::Sidebar => egui::vec2(
+            ArtworkPage::Icon => egui::Vec2::splat(128.0_f32.min(pane_height)),
+            ArtworkPage::Sidebar => egui::vec2(
                 pane_height * SIDEBAR_WIDTH as f32 / SIDEBAR_HEIGHT as f32,
                 pane_height,
             ),
@@ -576,14 +617,14 @@ impl Draft {
         );
         if let Some(preview) = &self.previews[tab.index()] {
             let label = match tab {
-                Tab::Icon => format!("App icon preview at {} pixels", self.icon_size),
-                Tab::Sidebar => "Installer left pane preview".into(),
+                ArtworkPage::Icon => format!("App icon preview at {} pixels", self.icon_size),
+                ArtworkPage::Sidebar => "Installer left pane preview".into(),
             };
             response
                 .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, true, &label));
             let size = preview.size_vec2();
             let mut ratio = (image.width() / size.x).min(image.height() / size.y);
-            if tab == Tab::Icon {
+            if tab == ArtworkPage::Icon {
                 ratio = ratio.min(self.icon_size as f32 / size.x.max(size.y));
             }
             let bounds = egui::Rect::from_center_size(image.center(), size * ratio);
@@ -595,9 +636,9 @@ impl Draft {
             );
         } else {
             let label = match tab {
-                Tab::Icon if self.captured_load.is_some() => "Loading icon…",
-                Tab::Icon => "No preview",
-                Tab::Sidebar => "Default pane",
+                ArtworkPage::Icon if self.captured_load.is_some() => "Loading icon…",
+                ArtworkPage::Icon => "No preview",
+                ArtworkPage::Sidebar => "Default pane",
             };
             response
                 .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
@@ -609,10 +650,10 @@ impl Draft {
                 ui.visuals().weak_text_color(),
             );
         }
-        if paired || tab == Tab::Sidebar {
+        if paired || tab == ArtworkPage::Sidebar {
             let dimensions = match tab {
-                Tab::Icon => format!("{} × {} px", self.icon_size, self.icon_size),
-                Tab::Sidebar => "328 × 628 px".into(),
+                ArtworkPage::Icon => format!("{} × {} px", self.icon_size, self.icon_size),
+                ArtworkPage::Sidebar => "328 × 628 px".into(),
             };
             ui.label(egui::RichText::new(dimensions).small().weak());
         }
@@ -684,7 +725,7 @@ mod tests {
         let icon = fixture_icon();
         for copy in [&CAPTURE_COPY, &FOLDER_COPY] {
             let mut editor = Editor::default();
-            editor.open_with_copy(opener, Some(icon.clone()), copy);
+            editor.open_with_copy(Some(opener), Some(icon.clone()), copy);
             editor.editing.as_mut().unwrap().artwork.icon = Some(IconArtwork {
                 source: icon.clone(),
                 transform: Transform::default(),
@@ -693,7 +734,7 @@ mod tests {
             editor.finish(Exit::Apply);
             assert!(editor.artwork().unwrap().icon.is_some());
 
-            editor.open_with_copy(opener, Some(icon.clone()), copy);
+            editor.open_with_copy(Some(opener), Some(icon.clone()), copy);
             editor.editing.as_mut().unwrap().artwork.icon = None;
             editor.finish(Exit::Cancel);
             assert!(editor.artwork().unwrap().icon.is_some());
@@ -705,7 +746,7 @@ mod tests {
     fn folder_normalizes_the_icon_preview_but_keeps_the_raw_sidebar_source() {
         let mut editor = Editor::default();
         let base = fixture_icon();
-        editor.open_folder(egui::Id::new("folder-artwork"), base.clone());
+        editor.begin_folder_page(base.clone());
         let draft = editor.editing.as_mut().unwrap();
         draft.icon_size = 32;
         let preview = draft.icon_preview().unwrap().unwrap();
@@ -714,6 +755,102 @@ mod tests {
             draft.effective_icon(256).unwrap().unwrap().rgba(),
             base.rgba()
         );
+    }
+
+    #[test]
+    fn folder_pages_share_pending_artwork_until_applied_or_canceled() {
+        let mut editor = Editor::default();
+        let icon = fixture_icon();
+        editor.begin_folder_page(icon.clone());
+        let draft = editor.folder_draft_mut().unwrap();
+        draft.artwork.icon = Some(IconArtwork {
+            source: icon.clone(),
+            transform: Transform::default(),
+        });
+        editor.begin_folder_page(icon.clone());
+        let draft = editor.folder_draft_mut().unwrap();
+        assert!(draft.artwork.icon.is_some());
+        draft.artwork.sidebar = Some(SidebarArtwork {
+            source: None,
+            transform: Transform::default(),
+            background: DEFAULT_PANE_COLOR,
+        });
+        assert!(editor.artwork().is_none());
+        assert!(editor.apply_folder_page());
+        assert!(editor.artwork().unwrap().sidebar.is_some());
+        assert!(editor.artwork().unwrap().icon.is_some());
+        assert!(editor.return_focus.is_none());
+
+        editor.begin_folder_page(icon);
+        editor.folder_draft_mut().unwrap().artwork.sidebar = None;
+        editor.cancel_folder_page();
+        assert!(editor.artwork().unwrap().sidebar.is_some());
+        assert!(!editor.is_open());
+        assert!(editor.return_focus.is_none());
+    }
+
+    #[test]
+    fn each_folder_artwork_page_fits_between_the_rails() {
+        let size = super::super::window_scale::CANVAS;
+        let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, size.into());
+        let ctx = egui::Context::default();
+        super::super::theme::install_fonts(&ctx);
+        let mut theme = super::super::theme::State::default();
+        let mut editor = Editor::default();
+        let icon = fixture_icon();
+        editor.begin_folder_page(icon.clone());
+        let draft = editor.folder_draft_mut().unwrap();
+        draft.artwork.icon = Some(IconArtwork {
+            source: icon,
+            transform: Transform::default(),
+        });
+        draft.artwork.sidebar = Some(SidebarArtwork {
+            source: None,
+            transform: Transform::default(),
+            background: DEFAULT_PANE_COLOR,
+        });
+
+        for (page, visible, absent) in [
+            (ArtworkPage::Icon, "256 px", "Background"),
+            (ArtworkPage::Sidebar, "Background", "256 px"),
+        ] {
+            let mut draw = || {
+                ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(bounds),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        theme.apply(ctx, portableforge_core::settings::Appearance::Dark);
+                        egui::TopBottomPanel::bottom("footer")
+                            .exact_height(100.0)
+                            .show(ctx, |_| {});
+                        dense::task_sidebar(ctx, |_| {});
+                        egui::SidePanel::right("activity")
+                            .exact_width(dense::RAIL_WIDTH)
+                            .show(ctx, |_| {});
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            dense::compact_body(ui);
+                            dense::heading(ui, "Edit Package Artwork", "");
+                            editor.show_folder_page(ui, page);
+                        });
+                    },
+                )
+            };
+            draw();
+            let output = draw();
+            let find = |label| {
+                output.shapes.iter().find(|clipped| {
+                    matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text() == label)
+                })
+            };
+            let shape = find(visible).expect("selected page control");
+            assert!(shape
+                .clip_rect
+                .contains_rect(shape.shape.visual_bounding_rect()));
+            assert!(find(absent).is_none());
+            assert!(editor.editing.as_ref().unwrap().previews[page.index()].is_some());
+        }
     }
 
     #[test]
@@ -733,17 +870,21 @@ mod tests {
         let icon = fixture_icon();
         for scale in [1.0, 1.25, 1.5] {
             for (tab, copy) in [
-                (Tab::Icon, &CAPTURE_COPY),
-                (Tab::Sidebar, &CAPTURE_COPY),
-                (Tab::Icon, &FOLDER_COPY),
-                (Tab::Sidebar, &FOLDER_COPY),
+                (ArtworkPage::Icon, &CAPTURE_COPY),
+                (ArtworkPage::Sidebar, &CAPTURE_COPY),
+                (ArtworkPage::Icon, &FOLDER_COPY),
+                (ArtworkPage::Sidebar, &FOLDER_COPY),
             ] {
                 let ctx = egui::Context::default();
                 super::super::theme::install_fonts(&ctx);
                 ctx.set_zoom_factor(scale);
                 let mut theme = super::super::theme::State::default();
                 let mut editor = Editor::default();
-                editor.open_with_copy(egui::Id::new("edit-artwork"), Some(icon.clone()), copy);
+                editor.open_with_copy(
+                    Some(egui::Id::new("edit-artwork")),
+                    Some(icon.clone()),
+                    copy,
+                );
                 let draft = editor.editing.as_mut().unwrap();
                 draft.tab = tab;
                 draft.artwork = Artwork {
@@ -782,7 +923,7 @@ mod tests {
                     "Flip vertical",
                     "Reset adjustments",
                     "View artwork error",
-                    if tab == Tab::Icon {
+                    if tab == ArtworkPage::Icon {
                         "256 px"
                     } else {
                         "Background"

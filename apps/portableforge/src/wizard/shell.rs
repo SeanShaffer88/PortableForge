@@ -116,8 +116,13 @@ pub(super) fn clear_activity_focus(ctx: &egui::Context) {
     ctx.data_mut(|data| data.remove::<egui::Id>(Region::Activity.key()));
 }
 
-pub(super) fn register_heading(ui: &egui::Ui, response: &egui::Response) {
+pub(super) fn register_heading(ui: &egui::Ui, response: &egui::Response, title: &str) {
     register_region(ui, Region::Body, response.id);
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_role(egui::accesskit::Role::Heading);
+        node.set_level(1);
+        node.set_label(title);
+    });
     let pending = ui.data_mut(|data| {
         let pending = data.get_temp::<bool>(heading_pending()).unwrap_or(false);
         data.remove::<bool>(heading_pending());
@@ -126,7 +131,6 @@ pub(super) fn register_heading(ui: &egui::Ui, response: &egui::Response) {
     if pending {
         response.request_focus();
     }
-    theme::focus_outline(ui, response);
 }
 
 impl WizardApp {

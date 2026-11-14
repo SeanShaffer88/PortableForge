@@ -42,6 +42,13 @@ impl Activity {
     }
 
     fn show(&mut self, ui: &mut egui::Ui, technical: &[&str]) {
+        let text = egui::TextStyle::Small.resolve(ui.style());
+        let mut heading = egui::TextStyle::Heading.resolve(ui.style());
+        heading.size = 20.0;
+        let styles = &mut ui.style_mut().text_styles;
+        styles.insert(egui::TextStyle::Heading, heading);
+        styles.insert(egui::TextStyle::Body, text.clone());
+        styles.insert(egui::TextStyle::Button, text);
         let response = ui.add(
             egui::Label::new(egui::RichText::new("Activity").heading().strong())
                 .sense(egui::Sense::focusable_noninteractive()),
