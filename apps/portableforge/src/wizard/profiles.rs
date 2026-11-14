@@ -2891,7 +2891,7 @@ fn runtime_job(build: &SavedBuild, cancellation: &CancellationToken) -> Result<J
         .map_err(|error| error.detail().to_owned())?;
     Ok(JobResult::BuildDetails(
         "Installer test result",
-        result.details(),
+        result.details().to_owned(),
     ))
 }
 

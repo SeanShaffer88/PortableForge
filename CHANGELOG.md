@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Show individual portable data file changes from both app launches in installer test details.
 - Show data locations from archive settings clues and observed setup or first-use changes.
 - Check the start file’s DLL dependencies and redirect Roaming or Local AppData for the launched app under File Findings.
 - Give folder, ZIP, and loose-file packaging a page per substep. The seven roadmap rows show substep progress. Status help uses larger text and grows only when it wraps. Activity text is smaller.

@@ -1,6 +1,8 @@
 use super::*;
 use crate::profile::Fingerprint;
 
+const MAX_DATA_FILE_CHANGES: usize = 100;
+
 pub struct RuntimeRequest<'a> {
     pub installer: &'a Path,
     pub installer_sha256: &'a str,
@@ -18,7 +20,39 @@ pub struct RuntimeReport {
     pub data_files_deleted: usize,
     pub data_files_unchanged_on_reopen: usize,
     pub data_status: RuntimeDataStatus,
+    pub data_file_changes: Vec<RuntimeDataFileChange>,
+    pub data_file_changes_omitted: usize,
     pub cleanup_verified: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct RuntimeDataFileChange {
+    /// File path relative to the installed package's Data directory.
+    pub path: String,
+    /// None for files that changed only after reopening.
+    pub first_launch: Option<RuntimeDataChangeKind>,
+    pub reopen: RuntimeDataReopenStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeDataChangeKind {
+    Added,
+    Updated,
+    Removed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeDataReopenStatus {
+    Retained,
+    ChangedAgain,
+    Missing,
+    StillRemoved,
+    Returned,
+    CreatedOnReopen,
+    UpdatedOnReopen,
+    RemovedOnReopen,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -39,29 +73,94 @@ fn data_files(path: &Path) -> Result<BTreeMap<String, Fingerprint>, String> {
         .collect())
 }
 
+#[derive(Default)]
+struct DataObservation {
+    created_or_changed: usize,
+    deleted: usize,
+    retained: usize,
+    deletion_returned: bool,
+    changes: Vec<RuntimeDataFileChange>,
+    omitted: usize,
+}
+
+impl DataObservation {
+    fn first_launch_status(&self) -> RuntimeDataStatus {
+        if self.created_or_changed + self.deleted == 0 {
+            RuntimeDataStatus::NoDataFilesChanged
+        } else if self.retained == self.created_or_changed && !self.deletion_returned {
+            RuntimeDataStatus::ObservedChangesRetained
+        } else {
+            RuntimeDataStatus::ObservedChangesDifferAfterReopen
+        }
+    }
+}
+
 fn check_data(
     before: &BTreeMap<String, Fingerprint>,
     first: &BTreeMap<String, Fingerprint>,
     reopen: &BTreeMap<String, Fingerprint>,
-) -> (usize, usize, usize, RuntimeDataStatus) {
-    let changed = first
-        .iter()
-        .filter(|(path, file)| before.get(*path) != Some(*file));
-    let mut removed = before.keys().filter(|path| !first.contains_key(*path));
-    let created_or_changed = changed.clone().count();
-    let deleted = removed.clone().count();
-    let retained = changed
-        .filter(|(path, file)| reopen.get(*path) == Some(*file))
-        .count();
-    let deletions_retained = removed.all(|path| !reopen.contains_key(path));
-    let status = if created_or_changed + deleted == 0 {
-        RuntimeDataStatus::NoDataFilesChanged
-    } else if retained == created_or_changed && deletions_retained {
-        RuntimeDataStatus::ObservedChangesRetained
-    } else {
-        RuntimeDataStatus::ObservedChangesDifferAfterReopen
+) -> DataObservation {
+    use RuntimeDataChangeKind::{Added, Removed, Updated};
+    use RuntimeDataReopenStatus::{
+        ChangedAgain, CreatedOnReopen, Missing, RemovedOnReopen, Retained, Returned, StillRemoved,
+        UpdatedOnReopen,
     };
-    (created_or_changed, deleted, retained, status)
+
+    let mut observation = DataObservation::default();
+    let paths: BTreeSet<_> = before
+        .keys()
+        .chain(first.keys())
+        .chain(reopen.keys())
+        .collect();
+    for path in paths {
+        let baseline = before.get(path);
+        let initial = first.get(path);
+        let reopened = reopen.get(path);
+        let first_launch = match (baseline, initial) {
+            (None, Some(_)) => Some(Added),
+            (Some(_), None) => Some(Removed),
+            (baseline, initial) if baseline != initial => Some(Updated),
+            _ => None,
+        };
+        let reopen = match first_launch {
+            Some(Added | Updated) => {
+                observation.created_or_changed += 1;
+                match reopened {
+                    None => Missing,
+                    Some(_) if initial == reopened => {
+                        observation.retained += 1;
+                        Retained
+                    }
+                    Some(_) => ChangedAgain,
+                }
+            }
+            Some(Removed) => {
+                observation.deleted += 1;
+                if reopened.is_some() {
+                    observation.deletion_returned = true;
+                    Returned
+                } else {
+                    StillRemoved
+                }
+            }
+            None => match (initial, reopened) {
+                (None, Some(_)) => CreatedOnReopen,
+                (Some(_), None) => RemovedOnReopen,
+                (initial, reopened) if initial != reopened => UpdatedOnReopen,
+                _ => continue,
+            },
+        };
+        if observation.changes.len() < MAX_DATA_FILE_CHANGES {
+            observation.changes.push(RuntimeDataFileChange {
+                path: path.clone(),
+                first_launch,
+                reopen,
+            });
+        } else {
+            observation.omitted += 1;
+        }
+    }
+    observation
 }
 
 /// Test a manifest-verified offline PAF in a fresh box. Finish the installer
@@ -186,15 +285,17 @@ pub fn test_built_paf(
             cancellation.check()?;
             *files = data_files(&data)?;
         }
-        let (created, deleted, retained, data_status) = check_data(&before, &after[0], &after[1]);
+        let observation = check_data(&before, &after[0], &after[1]);
         Ok::<_, String>(RuntimeReport {
             installer_sha256: fp.sha256,
             install_exit: install.exit_code,
             launch_exits,
-            data_files_created_or_changed: created,
-            data_files_deleted: deleted,
-            data_files_unchanged_on_reopen: retained,
-            data_status,
+            data_files_created_or_changed: observation.created_or_changed,
+            data_files_deleted: observation.deleted,
+            data_files_unchanged_on_reopen: observation.retained,
+            data_status: observation.first_launch_status(),
+            data_file_changes: observation.changes,
+            data_file_changes_omitted: observation.omitted,
             cleanup_verified: true,
         })
     })();
@@ -223,27 +324,148 @@ pub fn test_built_paf(
 mod tests {
     use super::*;
 
+    fn files(rows: &[(&str, &str)]) -> BTreeMap<String, Fingerprint> {
+        rows.iter()
+            .map(|(path, content)| {
+                (
+                    (*path).to_owned(),
+                    Fingerprint {
+                        sha256: sha256_hex(content.as_bytes()),
+                        size_bytes: content.len() as u64,
+                    },
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn data_observation_distinguishes_retention_from_an_unexercised_setting() {
         let baseline = BTreeMap::new();
-        let first = BTreeMap::from([(
-            "settings.ini".into(),
-            Fingerprint {
-                sha256: "ab".into(),
-                size_bytes: 1,
-            },
-        )]);
+        let first = files(&[("settings.ini", "saved")]);
+        let untouched = check_data(&baseline, &baseline, &baseline);
+        assert!(untouched.changes.is_empty());
         assert_eq!(
-            check_data(&baseline, &baseline, &baseline).3,
+            untouched.first_launch_status(),
             RuntimeDataStatus::NoDataFilesChanged
         );
+        let retained = check_data(&baseline, &first, &first);
         assert_eq!(
-            check_data(&baseline, &first, &first),
-            (1, 0, 1, RuntimeDataStatus::ObservedChangesRetained)
+            (
+                retained.created_or_changed,
+                retained.deleted,
+                retained.retained
+            ),
+            (1, 0, 1)
         );
         assert_eq!(
-            check_data(&baseline, &first, &baseline),
-            (1, 0, 0, RuntimeDataStatus::ObservedChangesDifferAfterReopen)
+            retained.first_launch_status(),
+            RuntimeDataStatus::ObservedChangesRetained
         );
+        let missing = check_data(&baseline, &first, &baseline);
+        assert_eq!(
+            (
+                missing.created_or_changed,
+                missing.deleted,
+                missing.retained
+            ),
+            (1, 0, 0)
+        );
+        assert_eq!(
+            missing.first_launch_status(),
+            RuntimeDataStatus::ObservedChangesDifferAfterReopen
+        );
+    }
+
+    #[test]
+    fn file_evidence_reports_changes_from_either_launch() {
+        use RuntimeDataChangeKind::{Added, Removed, Updated};
+        use RuntimeDataReopenStatus::{
+            ChangedAgain, CreatedOnReopen, Missing, RemovedOnReopen, Retained, Returned,
+            StillRemoved, UpdatedOnReopen,
+        };
+        let baseline = files(&[
+            ("b-changed", "before"),
+            ("d-removed", "before"),
+            ("e-returned", "before"),
+            ("g-reopen-updated", "before"),
+            ("h-reopen-removed", "before"),
+            ("i-unchanged", "stable"),
+        ]);
+        let first = files(&[
+            ("a-saved", "saved"),
+            ("b-changed", "first"),
+            ("c-missing", "temporary"),
+            ("g-reopen-updated", "before"),
+            ("h-reopen-removed", "before"),
+            ("i-unchanged", "stable"),
+        ]);
+        let reopen = files(&[
+            ("a-saved", "saved"),
+            ("b-changed", "other"),
+            ("e-returned", "restored"),
+            ("f-reopen-created", "new"),
+            ("g-reopen-updated", "after"),
+            ("i-unchanged", "stable"),
+        ]);
+        let result = check_data(&baseline, &first, &reopen);
+        let actual: Vec<_> = result
+            .changes
+            .iter()
+            .map(|row| (row.path.as_str(), row.first_launch, row.reopen))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                ("a-saved", Some(Added), Retained),
+                ("b-changed", Some(Updated), ChangedAgain),
+                ("c-missing", Some(Added), Missing),
+                ("d-removed", Some(Removed), StillRemoved),
+                ("e-returned", Some(Removed), Returned),
+                ("f-reopen-created", None, CreatedOnReopen),
+                ("g-reopen-updated", None, UpdatedOnReopen),
+                ("h-reopen-removed", None, RemovedOnReopen),
+            ]
+        );
+        assert_eq!(
+            (result.created_or_changed, result.deleted, result.retained),
+            (3, 2, 1)
+        );
+        assert_eq!(result.omitted, 0);
+    }
+
+    #[test]
+    fn file_evidence_limit_keeps_exact_totals_and_reopen_only_status() {
+        let baseline = BTreeMap::new();
+        let first = (0..103)
+            .rev()
+            .map(|index| {
+                (
+                    format!("file-{index:03}"),
+                    Fingerprint {
+                        sha256: "fixture".into(),
+                        size_bytes: 1,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let result = check_data(&baseline, &first, &first);
+        assert_eq!((result.created_or_changed, result.retained), (103, 103));
+        assert_eq!((result.changes.len(), result.omitted), (100, 3));
+        assert_eq!(result.changes.first().unwrap().path, "file-000");
+        assert_eq!(result.changes.last().unwrap().path, "file-099");
+        let reopen_only = check_data(&baseline, &baseline, &first);
+        assert_eq!(
+            (
+                reopen_only.created_or_changed,
+                reopen_only.deleted,
+                reopen_only.retained
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            reopen_only.first_launch_status(),
+            RuntimeDataStatus::NoDataFilesChanged
+        );
+        assert_eq!((reopen_only.changes.len(), reopen_only.omitted), (100, 3));
     }
 }
