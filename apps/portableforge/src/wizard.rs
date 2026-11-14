@@ -1229,13 +1229,19 @@ impl eframe::App for WizardApp {
             },
         };
         self.show_header(ctx, step.title, Some((self.step + 1, STEPS.len())));
-        self.show_navigation(ctx, what_you_do);
+        dense::show_help_bar(ctx, self.context_help_default(what_you_do));
+        self.show_navigation(ctx);
+        dense::task_sidebar(ctx, |ui| {
+            self.show_phase_navigation(ui, self.step + 1, STEPS.len(), true);
+        });
         if self.step == shown_step {
             self.update_heading_focus(ctx);
         }
         egui::CentralPanel::default()
             .frame(dense::content_frame(ctx))
             .show(ctx, |ui| {
+            theme::paint_work_area(ui);
+            dense::compact_body(ui);
             if self.show_details {
                 self.show_step_details(ui, step);
                 return;
@@ -1265,16 +1271,14 @@ impl eframe::App for WizardApp {
             if self.resume_offer && step.id == "pick" {
                 ui.horizontal(|ui| {
                     ui.colored_label(ui.visuals().error_fg_color, "Unfinished run");
-                    if ui
-                        .button("Pick up where I left off")
-                        .on_hover_text("Fill the steps back in with what you had entered.")
+                    if dense::explained(ui
+                        .button("Pick up where I left off"), "Fill the steps back in with what you had entered.")
                         .clicked()
                     {
                         self.resume_draft(ctx);
                     }
-                    if ui
-                        .button("Start again")
-                        .on_hover_text("Clear the unfinished run and begin fresh.")
+                    if dense::explained(ui
+                        .button("Start again"), "Clear the unfinished run and begin fresh.")
                         .clicked()
                     {
                         self.discard_draft();
@@ -1349,8 +1353,7 @@ impl eframe::App for WizardApp {
                                         stroke,
                                     );
                                 }
-                                ui.label(egui::RichText::new(&check.label).color(col))
-                                    .on_hover_text("A tick means this is fine. A cross means it needs fixing — the fix is written under it.");
+                                dense::explained(ui.label(egui::RichText::new(&check.label).color(col)), "A tick means this is fine. A cross means it needs fixing — the fix is written under it.");
                             });
                             if !check.fix.is_empty() {
                                 ui.label(
@@ -1359,9 +1362,8 @@ impl eframe::App for WizardApp {
                                 );
                             }
                             if let Some(copy) = &check.copy_text {
-                                if ui
-                                    .small_button("Copy the fix")
-                                    .on_hover_text(format!(
+                                if dense::explained(ui
+                                    .small_button("Copy the fix"), format!(
                                         "Copy this, so you can paste it instead of retyping: {copy}"
                                     ))
                                     .clicked()
@@ -1379,9 +1381,8 @@ impl eframe::App for WizardApp {
                         if report.best_mode != portableforge_core::wsb::SandboxMode::WindowsSandbox {
                             ui.add_space(6.0);
                             let mut want = self.force_sandbox;
-                            if ui
-                                .checkbox(&mut want, "Use the safe test box anyway — I know this computer can run it")
-                                .on_hover_text("Tick this only if you are sure this computer can run the safe test box — for example, you have used it yourself. PortableForge will try the box; if Windows cannot open it, we will say so plainly and nothing will be touched.")
+                            if dense::explained(ui
+                                .checkbox(&mut want, "Use the safe test box anyway — I know this computer can run it"), "Tick this only if you are sure this computer can run the safe test box — for example, you have used it yourself. PortableForge will try the box; if Windows cannot open it, we will say so plainly and nothing will be touched.")
                                 .changed()
                             {
                                 override_change = Some(want);
@@ -1406,9 +1407,8 @@ impl eframe::App for WizardApp {
                         .unwrap_or(false);
                     if sbie_missing {
                         self.show_bundled_test_box_help(ui);
-                        if ui
-                            .button("Check again")
-                            .on_hover_text("Refresh the standard wizard's system checks.")
+                        if dense::explained(ui
+                            .button("Check again"), "Refresh the standard wizard's system checks.")
                             .clicked()
                         {
                             let mut facts = crate::collect_preflight_facts();
@@ -1517,9 +1517,8 @@ impl eframe::App for WizardApp {
                         self.review.items = items;
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            if ui
-                                .button("Save these choices to a file")
-                                .on_hover_text("Keep the choices you made here in a file, so they can be used again or sent with a problem report.")
+                            if dense::explained(ui
+                                .button("Save these choices to a file"), "Keep the choices you made here in a file, so they can be used again or sent with a problem report.")
                                 .clicked()
                             {
                                 if let Some(path) = rfd::FileDialog::new()
@@ -1539,9 +1538,8 @@ impl eframe::App for WizardApp {
                                     }
                                 }
                             }
-                            if !verified && ui
-                                .button("Load choices from a file")
-                                .on_hover_text("Bring back choices saved earlier and apply them to this list.")
+                            if !verified && dense::explained(ui
+                                .button("Load choices from a file"), "Bring back choices saved earlier and apply them to this list.")
                                 .clicked()
                             {
                                 if let Some(path) = rfd::FileDialog::new()
@@ -1572,7 +1570,7 @@ impl eframe::App for WizardApp {
                 "pick" => {
                     if !self.settings.welcomed {
                         ui.horizontal(|ui| {
-                            if ui.button("Got it").on_hover_text("Dismiss the welcome.").clicked() {
+                            if dense::explained(ui.button("Got it"), "Dismiss the welcome.").clicked() {
                                 self.settings.welcomed = true;
                                 self.settings_dirty = true;
                                 self.persist_now();
@@ -1586,18 +1584,16 @@ impl eframe::App for WizardApp {
                     ui.horizontal(|ui| {
                         let width = dense::width_with_button(ui, "Browse…");
                         let (response, view) = dense::path_edit(ui, &mut self.installer_path, width);
-                        if response
-                            .labelled_by(setup_label.id)
-                            .on_hover_text(
-                                "Type or paste the path, use Browse, or drag the setup file here.",
-                            )
+                        if dense::explained(
+                            response.labelled_by(setup_label.id),
+                            "Type or paste the path, use Browse, or drag the setup file here.",
+                        )
                             .changed()
                         {
                             self.setup_changed();
                         }
-                        if ui
-                            .button("Browse…")
-                            .on_hover_text("Open a file chooser to find the setup file.")
+                        if dense::explained(ui
+                            .button("Browse…"), "Open a file chooser to find the setup file.")
                             .clicked()
                         {
                             let mut dialog = rfd::FileDialog::new()
@@ -1620,7 +1616,7 @@ impl eframe::App for WizardApp {
                     if let SetupInput::Ready { size, .. } = input {
                         let name = std::path::Path::new(&typed).file_name().unwrap_or_default().to_string_lossy();
                         let description = format!("Ready · {name} · {}", format_size(size));
-                        ui.add(egui::Label::new(&description).truncate()).on_hover_text(description);
+                        dense::explained(ui.add(egui::Label::new(&description).truncate()), description);
                     } else if let Some(problem) = input.problem() {
                         let color = if input == SetupInput::Empty {
                             ui.visuals().weak_text_color()
@@ -1637,8 +1633,7 @@ impl eframe::App for WizardApp {
                             self.enter_verified_capture();
                             self.check_prerequisites(ctx);
                         }
-                        if ui.button("Open saved profiles")
-                            .on_hover_text("Rebuild with a saved profile and its original setup file.")
+                        if dense::explained(ui.button("Open saved profiles"), "Rebuild with a saved profile and its original setup file.")
                             .clicked()
                         {
                             self.open_profile_replay(false);
@@ -1657,7 +1652,7 @@ impl eframe::App for WizardApp {
                                     .file_name()
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_else(|| path.clone());
-                                if ui.button(name).on_hover_text(path.clone()).clicked() {
+                                if dense::explained(ui.button(name), path.clone()).clicked() {
                                     self.installer_path = path.clone();
                                     self.setup_changed();
                                 }
@@ -1711,9 +1706,8 @@ impl eframe::App for WizardApp {
                 }
                 "try" if guided_msi => {}
                 "install" | "try" | "close" => {
-                    if ui
-                        .button("Check on the test box")
-                        .on_hover_text("Ask the test box for its next note and look at what it has done so far. When all three notes are in, the list on the next steps fills itself in.")
+                    if dense::explained(ui
+                        .button("Check on the test box"), "Ask the test box for its next note and look at what it has done so far. When all three notes are in, the list on the next steps fills itself in.")
                         .clicked()
                     {
                         self.check_test_box();
@@ -1722,9 +1716,8 @@ impl eframe::App for WizardApp {
                 "build" if verified => self.show_profile_save(ui),
                 "done" if verified => self.show_saved_profile(ui),
                 "build" => {
-                    if ui
-                        .button("Build my portable copy now")
-                        .on_hover_text("Put everything together into the finished package folder and check it.")
+                    if dense::explained(ui
+                        .button("Build my portable copy now"), "Put everything together into the finished package folder and check it.")
                         .clicked()
                     {
                         self.build_now();
@@ -1739,9 +1732,8 @@ impl eframe::App for WizardApp {
                     }
                     if step.id == "test" {
                         ui.add_space(4.0);
-                        if ui
-                            .button("Check the leak-test result")
-                            .on_hover_text("Read the two notes the leak-test packet made (leak-before and leak-after, in this run's exchange folder) and judge whether the finished copy stayed inside its own folder.")
+                        if dense::explained(ui
+                            .button("Check the leak-test result"), "Read the two notes the leak-test packet made (leak-before and leak-after, in this run's exchange folder) and judge whether the finished copy stayed inside its own folder.")
                             .clicked()
                         {
                             self.check_leak_result();
@@ -1753,9 +1745,8 @@ impl eframe::App for WizardApp {
                     if step.id == "done" {
                         ui.add_space(6.0);
                         if let Some(dir) = self.built_dir.clone() {
-                            if ui
-                                .button("Open the folder with your portable copy")
-                                .on_hover_text(dir.to_string_lossy().into_owned())
+                            if dense::explained(ui
+                                .button("Open the folder with your portable copy"), "Open the published package folder to find the portable app and its files.")
                                 .clicked()
                             {
                                 if let Err(e) = open_folder(&dir) {
@@ -1764,9 +1755,8 @@ impl eframe::App for WizardApp {
                             }
                         }
                         if let Some(layout) = self.layout.clone() {
-                            if ui
-                                .button("Open the work folder")
-                                .on_hover_text(layout.root.to_string_lossy().into_owned())
+                            if dense::explained(ui
+                                .button("Open the work folder"), "Open the work folder to see the capture records and logs for this session.")
                                 .clicked()
                             {
                                 if let Err(e) = open_folder(&layout.root) {
@@ -1775,9 +1765,8 @@ impl eframe::App for WizardApp {
                             }
                         }
                         ui.add_space(6.0);
-                        if ui
-                            .button("Save the run log")
-                            .on_hover_text("Save one plain text file with everything this run did and decided — handy to keep, or to send to whoever helps you.")
+                        if dense::explained(ui
+                            .button("Save the run log"), "Save one plain text file with everything this run did and decided — handy to keep, or to send to whoever helps you.")
                             .clicked()
                         {
                             self.export_run_log();
@@ -1787,20 +1776,28 @@ impl eframe::App for WizardApp {
                 "name" => {
                     let mut changed = false;
                     ui.columns(2, |columns| {
-                        changed |= dense::text_field(&mut columns[0], "Portable app name", &mut self.app_name);
-                        changed |= dense::text_field(&mut columns[1], "Publisher", &mut self.publisher);
+                        changed |= dense::explained_text_field(&mut columns[0], "Portable app name", &mut self.app_name,
+                            "Enter the name people will see in the installer and the PortableApps.com menu. Use a name that makes this portable copy easy to recognize.");
+                        changed |= dense::explained_text_field(&mut columns[1], "Publisher", &mut self.publisher,
+                            "Enter the person or organization that publishes this app. Use the name shown on the original app’s website or About screen.");
                     });
                     ui.columns(2, |columns| {
-                        changed |= dense::text_field(&mut columns[0], "Main app file (.exe)", &mut self.main_exe);
-                        changed |= dense::text_field(&mut columns[1], "Package version (e.g. 1.0.0.0)", &mut self.package_version);
+                        changed |= dense::explained_text_field(&mut columns[0], "Main app file (.exe)", &mut self.main_exe,
+                            "Choose the file the portable copy should open. If setup installed several programs, use the file that starts the app you want to package.");
+                        changed |= dense::explained_text_field(&mut columns[1], "Package version (e.g. 1.0.0.0)", &mut self.package_version,
+                            "Use four numbers separated by dots, for example 1.0.0.0. This lets the platform tell which portable package is newer.");
                     });
                     if verified {
-                        changed |= dense::text_field(ui, "App homepage (HTTP or HTTPS)", &mut self.homepage);
+                        changed |= dense::explained_text_field(ui, "App homepage (HTTP or HTTPS)", &mut self.homepage,
+                            "Enter the full address of the app’s official website, starting with https:// or http://. People can use this link to learn more about the original app.");
                     }
-                    let description = ui.label("App description");
-                    changed |= ui.add(egui::TextEdit::multiline(&mut self.description)
+                    let help = "Write one or two sentences explaining what the app does. This description helps people identify the app before they install it.";
+                    let description = dense::explained(ui.label("App description"), help);
+                    let description_input = ui.add(egui::TextEdit::multiline(&mut self.description)
                         .desired_width(f32::INFINITY).desired_rows(2))
-                        .labelled_by(description.id).changed();
+                        .labelled_by(description.id);
+                    dense::field_help(&description_input, help);
+                    changed |= description_input.changed();
                     if changed {
                         self.mark_dirty();
                     }
@@ -1819,9 +1816,8 @@ impl eframe::App for WizardApp {
                             continue;
                         }
                         let selected = self.sharing == Some(option.answer);
-                        if ui
-                            .radio(selected, option.label)
-                            .on_hover_text(option.explanation)
+                        if dense::explained(ui
+                            .radio(selected, option.label), option.explanation)
                             .clicked()
                         {
                             self.sharing = Some(option.answer);
@@ -1839,8 +1835,7 @@ impl eframe::App for WizardApp {
                             self.mark_dirty();
                         }
                         ui.label("That file's fingerprint — 64 letters and numbers given by the maker, if they publish one");
-                        if ui.text_edit_singleline(&mut self.online_sha)
-                            .on_hover_text("The finished copy checks this fingerprint against the file it downloads.")
+                        if dense::explained(ui.text_edit_singleline(&mut self.online_sha), "The finished copy checks this fingerprint against the file it downloads.")
                             .changed()
                         {
                             self.mark_dirty();
@@ -1860,7 +1855,7 @@ impl eframe::App for WizardApp {
 pub fn run_gui() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([680.0, 480.0])
+            .with_inner_size([1160.0, 800.0])
             .with_min_inner_size(dense::MIN_CONTENT)
             .with_title("PortableForge"),
         ..Default::default()

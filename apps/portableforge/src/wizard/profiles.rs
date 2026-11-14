@@ -12,7 +12,8 @@ use portableforge_core::settings::{self, CleanedCapture, SavedBuild, SavedProfil
 use portableforge_core::SandboxMode;
 
 use super::{
-    dense, open_folder, picker_start_dir, setup_input, theme, SetupInput, SetupKind, WizardApp,
+    dense, open_folder, picker_start_dir, setup_input, shell, theme, SetupInput, SetupKind,
+    WizardApp,
 };
 #[cfg(all(windows, target_arch = "x86_64"))]
 use super::{installer_test, sessions_base, unique_folder};
@@ -130,6 +131,16 @@ enum LibraryTab {
     Profiles,
     Queue,
     Results,
+}
+
+impl LibraryTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Profiles => "Saved profiles",
+            Self::Queue => "Build queue",
+            Self::Results => "Build results",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -280,7 +291,7 @@ fn record_table(
                 if response.clicked() {
                     next = index;
                 }
-                response.on_hover_text(description);
+                dense::field_help(&response, &description);
                 last = Some(rect);
             }
             if let Some(rect) = last {
@@ -626,15 +637,18 @@ impl ProfileFlow {
                 });
             });
         }
-        let changed = ui
+        let response = ui
             .add(
                 egui::TextEdit::singleline(&mut self.setup_args[index])
                     .id(id)
                     .desired_width(f32::INFINITY),
             )
-            .labelled_by(label.id)
-            .on_hover_text("Paste one argument per line to insert several.")
-            .changed();
+            .labelled_by(label.id);
+        dense::field_help(
+            &response,
+            "Paste one setup argument per line to add several arguments at once.",
+        );
+        let changed = response.changed();
         if let Some(pasted) = pasted {
             self.setup_args
                 .splice(index..=index, pasted.lines().map(str::to_owned));
@@ -766,7 +780,9 @@ fn path_field(ui: &mut egui::Ui, label: &str, value: &mut String, kind: FieldKin
         let (response, view) = dense::path_edit(ui, value, width);
         changed = response.labelled_by(heading.id).changed();
         if let Some(browse) = browse {
-            if ui.button(browse).on_hover_text(label).clicked() {
+            let browse_button = ui.button(browse);
+            dense::field_help(&browse_button, label);
+            if browse_button.clicked() {
                 let mut dialog = rfd::FileDialog::new().set_title(label);
                 if let Some(dir) = picker_start_dir(value) {
                     dialog = dialog.set_directory(dir);
@@ -1540,18 +1556,27 @@ impl WizardApp {
     }
 
     pub(super) fn show_profile_replay(&mut self, ctx: &egui::Context) {
-        let title = match self.profile_flow.library_tab {
-            LibraryTab::Profiles => "Saved profiles",
-            LibraryTab::Queue => "Build queue",
-            LibraryTab::Results => "Build results",
-        };
-        self.show_header(ctx, title, None);
+        let title = self.profile_flow.library_tab.label();
+        self.show_header(
+            ctx,
+            if dense::room_for_sidebar(ctx) {
+                ""
+            } else {
+                title
+            },
+            None,
+        );
         let busy = self.profile_flow.busy();
         let readiness = self.replay_request();
         let request = readiness.as_ref().ok();
+        dense::show_help_bar(ctx, "Point to a setting or move to it with Tab for help.");
         egui::TopBottomPanel::bottom("profile-replay-back").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.add_enabled(!busy, egui::Button::new("Back")).clicked() {
+                let back = ui.add_enabled(!busy, egui::Button::new("Back"));
+                if !busy {
+                    shell::register_region(ui, shell::Region::Footer, back.id);
+                }
+                if back.clicked() {
                     self.profile_flow.replay_open = false;
                 }
                 ui.with_layout(
@@ -1582,11 +1607,11 @@ impl WizardApp {
                             }
                             if !busy {
                                 if let Err(blocker) = readiness {
-                                    ui.add(
+                                    let reason = ui.add(
                                         egui::Label::new(egui::RichText::new(blocker).weak())
                                             .truncate(),
-                                    )
-                                    .on_hover_text(blocker);
+                                    );
+                                    dense::field_help(&reason, blocker);
                                 }
                             }
                         }
@@ -1623,28 +1648,62 @@ impl WizardApp {
                 );
             });
         });
+        let tabs = [
+            (
+                LibraryTab::Profiles,
+                "Choose a reviewed app. Its saved profile contains the app files and the packaging choices you approved.",
+            ),
+            (
+                LibraryTab::Queue,
+                "Review installers waiting to build. You can pause the queue after the current build or retry a failed job.",
+            ),
+            (
+                LibraryTab::Results,
+                "Find finished installers, open their build details, or start a test in the isolated test box.",
+            ),
+        ];
+        dense::task_sidebar(ctx, |ui| {
+            let mut registered = false;
+            for (tab, help) in tabs {
+                let response = dense::roadmap_item(
+                    ui,
+                    tab.label(),
+                    self.profile_flow.library_tab == tab,
+                    !busy,
+                    help,
+                );
+                if !registered && response.enabled() {
+                    shell::register_region(ui, shell::Region::Sidebar, response.id);
+                    registered = true;
+                }
+                if response.clicked() {
+                    self.profile_flow.library_tab = tab;
+                }
+            }
+        });
         egui::CentralPanel::default()
             .frame(dense::content_frame(ctx))
             .show(ctx, |ui| {
-                ui.add_enabled_ui(!busy, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for (tab, name) in [
-                            (LibraryTab::Profiles, "Saved profiles"),
-                            (LibraryTab::Queue, "Build queue"),
-                            (LibraryTab::Results, "Build results"),
-                        ] {
-                            let response =
-                                ui.selectable_value(&mut self.profile_flow.library_tab, tab, name);
-                            if self.profile_flow.library_tab == tab {
-                                ui.painter().hline(
-                                    response.rect.x_range(),
-                                    response.rect.bottom(),
-                                    egui::Stroke::new(2.0_f32, ui.visuals().selection.stroke.color),
+                theme::paint_work_area(ui);
+                dense::compact_body(ui);
+                if !dense::room_for_sidebar(ctx) {
+                    ui.add_enabled_ui(!busy, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for (tab, help) in tabs {
+                                let response = ui.selectable_value(
+                                    &mut self.profile_flow.library_tab,
+                                    tab,
+                                    tab.label(),
                                 );
+                                theme::focus_outline(ui, &response);
+                                dense::field_help(&response, help);
                             }
-                        }
+                        });
                     });
-                });
+                }
+                if dense::room_for_sidebar(ctx) {
+                    dense::heading(ui, self.profile_flow.library_tab.label(), "");
+                }
                 self.profile_flow.show_feedback(ui);
                 match self.profile_flow.library_tab {
                     LibraryTab::Profiles => self.show_library_profiles(ui, busy),
@@ -1959,8 +2018,7 @@ impl WizardApp {
         };
         let response = egui::Modal::new(egui::Id::new("saved-profile-actions")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 48.0).clamp(200.0, 460.0));
-            ui.add(egui::Label::new(egui::RichText::new(&approval.label).heading()).truncate())
-                .on_hover_text(&approval.label);
+            ui.add(egui::Label::new(egui::RichText::new(&approval.label).heading()).wrap());
             ui.horizontal_wrapped(|ui| {
                 let path = approval.folder.display().to_string();
                 dense::view_text(ui, "View profile path", "Profile folder", &path, true);
@@ -2884,6 +2942,14 @@ mod tests {
             ] {
                 for size in [dense::MIN_CONTENT, [960.0, 540.0]] {
                     assert_library_controls_fit(tab, expected, size, scale);
+                    if size[0] >= 768.0 {
+                        assert_library_controls_fit(
+                            tab,
+                            &["Roadmap", "Saved profiles", "Build queue", "Build results"],
+                            size,
+                            scale,
+                        );
+                    }
                 }
             }
         }

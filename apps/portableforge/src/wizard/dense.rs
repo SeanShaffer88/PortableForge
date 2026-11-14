@@ -13,6 +13,13 @@ pub(super) fn content_frame(ctx: &egui::Context) -> egui::Frame {
         .inner_margin(style.spacing.window_margin)
 }
 
+pub(super) fn compact_body(ui: &mut egui::Ui) {
+    if ui.available_height() < 500.0 {
+        ui.spacing_mut().interact_size.y = theme::compact_row_height();
+        ui.spacing_mut().item_spacing.y = 4.0;
+    }
+}
+
 pub(super) fn heading(ui: &mut egui::Ui, title: &str, description: &str) {
     let heading = ui.add(
         egui::Label::new(egui::RichText::new(title).heading().strong())
@@ -68,14 +75,221 @@ pub(super) fn button_width(ui: &egui::Ui, label: &str) -> f32 {
     label_width + 2.0 * ui.spacing().button_padding.x + ui.spacing().item_spacing.x
 }
 
-pub(super) fn text_field(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
-    let heading = ui.label(label);
-    ui.add_sized(
-        [ui.available_width(), ui.spacing().interact_size.y],
-        egui::TextEdit::singleline(value),
-    )
-    .labelled_by(heading.id)
-    .changed()
+#[derive(Clone, PartialEq)]
+struct HelpTarget {
+    id: egui::Id,
+    rect: egui::Rect,
+    message: String,
+}
+
+#[derive(Clone, Default)]
+struct HelpTargets {
+    hovered: Option<HelpTarget>,
+    focused: Option<HelpTarget>,
+}
+
+#[derive(Clone, Default)]
+struct HelpState {
+    pass: u64,
+    previous: HelpTargets,
+    current: HelpTargets,
+}
+
+fn help_key(modal: bool) -> egui::Id {
+    egui::Id::new(("wizard-context-help", modal))
+}
+
+pub(super) fn clear_help_targets(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.remove::<HelpState>(help_key(false)));
+    ctx.request_repaint();
+}
+
+fn help_targets(ctx: &egui::Context, modal: bool, update: impl FnOnce(&mut HelpState)) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|data| {
+        let state = data.get_temp_mut_or_default::<HelpState>(help_key(modal));
+        if state.pass != pass {
+            state.previous = if state.pass + 1 == pass {
+                std::mem::take(&mut state.current)
+            } else {
+                HelpTargets::default()
+            };
+            state.pass = pass;
+            state.current = HelpTargets::default();
+        }
+        update(state);
+    });
+}
+
+pub(super) fn field_help(response: &egui::Response, help: &str) {
+    response.ctx.accesskit_node_builder(response.id, |node| {
+        node.set_description(help);
+    });
+    let hovered = response.contains_pointer();
+    let focused = response.has_focus();
+    if !hovered && !focused {
+        return;
+    }
+    let modal = response.layer_id.order == egui::Order::Foreground;
+    let mut repaint = false;
+    help_targets(&response.ctx, modal, |state| {
+        for (active, current, previous) in [
+            (hovered, &mut state.current.hovered, &state.previous.hovered),
+            (focused, &mut state.current.focused, &state.previous.focused),
+        ] {
+            if active {
+                let target = HelpTarget {
+                    id: response.id,
+                    rect: response.interact_rect,
+                    message: help.to_owned(),
+                };
+                repaint |= previous.as_ref() != Some(&target);
+                *current = Some(target);
+            }
+        }
+    });
+    if repaint {
+        response.ctx.request_repaint();
+    }
+}
+
+pub(super) fn explained(response: egui::Response, help: impl AsRef<str>) -> egui::Response {
+    field_help(&response, help.as_ref());
+    response
+}
+
+pub(super) fn help_strip(ui: &mut egui::Ui, default: &str) {
+    let modal = ui.layer_id().order == egui::Order::Foreground;
+    let (focused, modal_open) =
+        ui.memory(|memory| (memory.focused(), memory.top_modal_layer().is_some()));
+    let pointer = ui.input(|input| input.pointer.hover_pos());
+    let mut message = None;
+    if modal || !modal_open {
+        help_targets(ui.ctx(), modal, |state| {
+            let active = &state.current;
+            let previous = &state.previous;
+            let previous_hover = previous
+                .hovered
+                .as_ref()
+                .filter(|target| pointer.is_some_and(|position| target.rect.contains(position)));
+            let previous_focus = previous
+                .focused
+                .as_ref()
+                .filter(|target| focused == Some(target.id));
+            message = active
+                .hovered
+                .as_ref()
+                .or(previous_hover)
+                .or(active.focused.as_ref())
+                .or(previous_focus)
+                .map(|target| target.message.clone());
+        });
+    }
+    let text = message.as_deref().unwrap_or(default);
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let line = ui.fonts_mut(|fonts| fonts.row_height(&font));
+    ui.set_min_height(line * 2.0);
+    let color = ui.visuals().weak_text_color();
+    let mut layout =
+        egui::text::LayoutJob::simple(text.to_owned(), font, color, ui.available_width());
+    layout.wrap.max_rows = 2;
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(layout));
+    let label = ui.label(galley);
+    ui.ctx().accesskit_node_builder(label.id, |node| {
+        node.set_role(egui::accesskit::Role::Status)
+    });
+}
+
+pub(super) fn show_help_bar(ctx: &egui::Context, default: &str) {
+    let visuals = &ctx.style().visuals;
+    egui::TopBottomPanel::bottom("wizard-context-help")
+        .resizable(false)
+        .frame(
+            egui::Frame::new()
+                .fill(visuals.window_fill)
+                .stroke(visuals.widgets.noninteractive.bg_stroke)
+                .inner_margin(egui::Margin::symmetric(12, 4)),
+        )
+        .show(ctx, |ui| help_strip(ui, default));
+}
+
+pub(super) fn explained_text_field(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    help: &str,
+) -> bool {
+    let heading = explained(ui.label(label), help);
+    let input = ui
+        .add_sized(
+            [ui.available_width(), ui.spacing().interact_size.y],
+            egui::TextEdit::singleline(value),
+        )
+        .labelled_by(heading.id);
+    field_help(&input, help);
+    input.changed()
+}
+
+pub(super) fn room_for_sidebar(ctx: &egui::Context) -> bool {
+    ctx.content_rect().width() >= 768.0
+}
+
+pub(super) fn task_sidebar(ctx: &egui::Context, show: impl FnOnce(&mut egui::Ui)) {
+    shell::clear_sidebar_focus(ctx);
+    if !room_for_sidebar(ctx) {
+        return;
+    }
+    let palette = theme::palette(ctx);
+    let frame = egui::Frame::new()
+        .fill(theme::rgb(palette.background))
+        .inner_margin(egui::Margin::same(8));
+    egui::SidePanel::left("wizard-roadmap")
+        .exact_width(136.0)
+        .resizable(false)
+        .frame(frame)
+        .show(ctx, |ui| {
+            ui.label(egui::RichText::new("Roadmap").strong());
+            ui.add_space(4.0);
+            show(ui);
+        });
+}
+
+pub(super) fn mark_roadmap_selection(response: &egui::Response, selected: bool) {
+    if selected {
+        response.ctx.accesskit_node_builder(response.id, |node| {
+            node.set_selected(true);
+        });
+    }
+}
+
+pub(super) fn roadmap_item(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: bool,
+    enabled: bool,
+    help: &str,
+) -> egui::Response {
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::selectable(selected, label)
+            .min_size(egui::vec2(
+                ui.available_width(),
+                theme::compact_row_height(),
+            ))
+            .wrap(),
+    );
+    mark_roadmap_selection(&response, selected);
+    if selected {
+        let left = response.rect.left() + 1.0;
+        ui.painter().vline(
+            left,
+            response.rect.y_range().shrink(4.0),
+            ui.visuals().selection.stroke,
+        );
+    }
+    theme::focus_outline(ui, &response);
+    field_help(&response, help);
+    response
 }
 
 pub(super) fn review_counts(review: &portableforge_core::review::Review) -> String {
@@ -271,6 +485,7 @@ impl WizardApp {
         section: &str,
         step: Option<(usize, usize)>,
     ) {
+        shell::clear_sidebar_focus(ctx);
         let visuals = &ctx.style().visuals;
         let frame = egui::Frame::new()
             .fill(visuals.window_fill)
@@ -281,29 +496,37 @@ impl WizardApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("PortableForge").strong());
-                    if step.is_none() {
+                    if step.is_none() && (!self.folder_flow.open || room_for_sidebar(ctx)) {
                         ui.label(egui::RichText::new(section).small().weak());
                     }
+                    if step.is_none() && self.folder_flow.open && !room_for_sidebar(ctx) {
+                        self.folder_flow.show_compact_roadmap(ui);
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let appearance =
-                            ui.button("Appearance").on_hover_text("Appearance · Ctrl+,");
+                        let appearance = explained(
+                            ui.button("Appearance"),
+                            "Adjust the theme or change the text size. Shortcut: Ctrl+comma.",
+                        );
                         if appearance.clicked() {
                             self.open_shell_popup(shell::Popup::Appearance, Some(appearance.id));
                         }
-                        let commands = ui.button("Commands · Ctrl+K");
+                        let commands = explained(
+                            ui.button("Commands · Ctrl+K"),
+                            "Search for an action available in the current step.",
+                        );
                         shell::register_region(ui, shell::Region::Header, commands.id);
                         if commands.clicked() {
                             self.open_shell_popup(shell::Popup::Commands, Some(commands.id));
                         }
                     });
                 });
-                if let Some((index, total)) = step {
-                    self.show_phase_navigation(ui, index, total);
+                if let Some((index, total)) = step.filter(|_| !room_for_sidebar(ctx)) {
+                    self.show_phase_navigation(ui, index, total, false);
                 }
             });
     }
 
-    pub(super) fn show_navigation(&mut self, ctx: &egui::Context, hint: &str) {
+    pub(super) fn show_navigation(&mut self, ctx: &egui::Context) {
         let visuals = &ctx.style().visuals;
         let frame = egui::Frame::new()
             .fill(visuals.window_fill)
@@ -317,6 +540,7 @@ impl WizardApp {
                         self.can_go_back() && !self.show_details,
                         egui::Button::new("Back"),
                     );
+                    field_help(&back, "Go to the previous guided step. Changes you entered stay in this project.");
                     if back.clicked() {
                         self.go_back();
                         ctx.request_repaint();
@@ -329,8 +553,8 @@ impl WizardApp {
                             } else {
                                 "Status and details"
                             }),
-                        )
-                        .on_hover_text("Status and details · F1");
+                        );
+                    field_help(&details, "Read the current status or troubleshooting details for this step. Shortcut: F1.");
                     if details.clicked() {
                         self.toggle_step_details();
                         ctx.request_repaint();
@@ -344,6 +568,11 @@ impl WizardApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some((action, ready)) = action {
                             let response = primary_action(ui, ready, action.label());
+                            field_help(&response, if ready {
+                                "Confirm this step and continue the guided workflow."
+                            } else {
+                                "Complete the required choices in this step before continuing."
+                            });
                             shell::register_region(
                                 ui,
                                 shell::Region::Footer,
@@ -355,30 +584,29 @@ impl WizardApp {
                         } else {
                             shell::register_region(ui, shell::Region::Footer, details.id);
                         }
-                        let status = self
-                            .log
-                            .last()
-                            .filter(|line| {
-                                !self.show_details
-                                    && !self.profile_flow.busy()
-                                    && !line.starts_with("Moved to: ")
-                                    && line.as_str() != "Welcome to PortableForge."
-                            })
-                            .map(String::as_str)
-                            .filter(|line| !line.trim().is_empty())
-                            .unwrap_or(hint);
-                        let status = if status.is_empty() {
-                            "Ctrl+K Commands · F6 Next region"
-                        } else {
-                            status
-                        };
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(status).small().weak()).truncate(),
-                        )
-                        .on_hover_text(status);
                     });
                 });
             });
+    }
+
+    pub(super) fn context_help_default<'a>(&'a self, hint: &'a str) -> &'a str {
+        let status = self
+            .log
+            .last()
+            .filter(|line| {
+                !self.show_details
+                    && !self.profile_flow.busy()
+                    && !line.starts_with("Moved to: ")
+                    && line.as_str() != "Welcome to PortableForge."
+            })
+            .map(String::as_str)
+            .filter(|line| !line.trim().is_empty())
+            .unwrap_or(hint);
+        if status.is_empty() {
+            "Move the pointer over a control or press Tab to read what it does."
+        } else {
+            status
+        }
     }
 
     pub(super) fn show_step_details(&mut self, ui: &mut egui::Ui, step: &guide::GuideStep) {
@@ -485,8 +713,19 @@ mod tests {
         scale: f32,
         expected: &[&str],
     ) {
+        assert_wizard_fits_at(ctx, frame, wizard, scale, MIN_CONTENT, expected);
+    }
+
+    fn assert_wizard_fits_at(
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        wizard: &mut WizardApp,
+        scale: f32,
+        size: [f32; 2],
+        expected: &[&str],
+    ) {
         wizard.settings.text_scale = scale;
-        let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(MIN_CONTENT));
+        let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(size));
         let mut draw = || {
             ctx.run(
                 egui::RawInput {
@@ -525,6 +764,123 @@ mod tests {
                 shape.shape.visual_bounding_rect(),
             );
         }
+    }
+
+    #[test]
+    fn setup_roadmap_and_grouped_fields_fit_at_the_sidebar_threshold() {
+        for scale in TEXT_SCALES {
+            let ctx = egui::Context::default();
+            theme::install_fonts(&ctx);
+            let mut frame = eframe::Frame::_new_kittest();
+            let mut wizard = WizardApp::default();
+            wizard.enter_verified_capture();
+            wizard.step = 7;
+            assert_wizard_fits_at(
+                &ctx,
+                &mut frame,
+                &mut wizard,
+                scale,
+                [768.0, 480.0],
+                &[
+                    "Roadmap",
+                    "Capture",
+                    "Review",
+                    "Save profile",
+                    "Build",
+                    "Step 8 of 12",
+                    "Portable app name",
+                    "Publisher",
+                    "Main app file (.exe)",
+                    "App description",
+                    "Continue",
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn focused_configuration_help_wraps_inside_fixed_bar_at_minimum_size() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        ctx.set_zoom_factor(1.5);
+        let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(MIN_CONTENT));
+        let help = "Confirm that the app’s license or publisher lets you distribute these files in your installer. PortableForge needs your confirmation before it can include them. Check the publisher’s website when the license is unclear.";
+        let mut input = String::new();
+        let mut draw = || {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(bounds),
+                    ..Default::default()
+                },
+                |ctx| {
+                    show_help_bar(ctx, "Default help");
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let field = ui.text_edit_singleline(&mut input);
+                        field.request_focus();
+                        field_help(&field, help);
+                    });
+                },
+            )
+        };
+        draw();
+        draw();
+        let output = draw();
+        let text = output.shapes.iter().find(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == help)
+        }).expect("keyboard focus updates the fixed help bar");
+        assert!(bounds
+            .intersect(text.clip_rect)
+            .expand(1.0)
+            .contains_rect(text.shape.visual_bounding_rect()));
+        assert!(text.shape.visual_bounding_rect().top() > bounds.bottom() - 55.0);
+        assert!(
+            matches!(&text.shape, egui::Shape::Text(text) if !text.galley.elided && text.galley.rows.len() > 1)
+        );
+    }
+
+    #[test]
+    fn hover_help_overrides_focus_then_clears_when_pointer_leaves() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(MIN_CONTENT));
+        let mut pointer = None;
+        let draw = |pointer: Option<egui::Pos2>| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(bounds),
+                    events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
+                    ..Default::default()
+                },
+                |ctx| {
+                    show_help_bar(ctx, "Default help");
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let focused = ui.button("Focus target");
+                        focused.request_focus();
+                        field_help(&focused, "Focused explanation");
+                        let hovered = ui.button("Hover target");
+                        field_help(&hovered, "Hovered explanation");
+                    });
+                },
+            )
+        };
+        draw(pointer);
+        let output = draw(pointer);
+        let hover_rect = output.shapes.iter().find(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Hover target")
+        }).expect("hover target").shape.visual_bounding_rect();
+        pointer = Some(hover_rect.center());
+        draw(pointer);
+        let hovered = draw(pointer);
+        assert!(hovered.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Hovered explanation")
+        }));
+        let departed = draw(Some(egui::pos2(bounds.right() - 1.0, 200.0)));
+        assert!(departed.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Focused explanation")
+        }));
+        assert!(!departed.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Hovered explanation")
+        }));
     }
 
     #[test]

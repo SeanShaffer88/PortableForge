@@ -15,12 +15,22 @@ use super::dense;
 
 const DEFAULT_PANE_COLOR: [u8; 3] = [0x15, 0x26, 0x3c];
 const ICON_SIZES: [u32; 6] = [16, 32, 48, 75, 128, 256];
+const ARTWORK_HELP: &str = "Point to a control or focus it with Tab to read what it does.";
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Tab {
     #[default]
     Icon,
     Sidebar,
+}
+
+impl Tab {
+    fn index(self) -> usize {
+        match self {
+            Self::Icon => 0,
+            Self::Sidebar => 1,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -38,8 +48,8 @@ struct Draft {
     artwork: Artwork,
     base_icon: Option<Raster>,
     captured_load: Option<Receiver<Result<Raster, String>>>,
-    preview: Option<egui::TextureHandle>,
-    dirty_preview: bool,
+    previews: [Option<egui::TextureHandle>; 2],
+    dirty_previews: [bool; 2],
     focus_first: bool,
     problem: Option<String>,
 }
@@ -118,8 +128,8 @@ impl Editor {
             artwork: self.applied.clone(),
             base_icon,
             captured_load: None,
-            preview: None,
-            dirty_preview: true,
+            previews: [None, None],
+            dirty_previews: [true; 2],
             focus_first: true,
             problem: None,
         });
@@ -175,25 +185,41 @@ impl Editor {
             return false;
         };
         draft.poll_captured_icon();
-        let width = (ctx.content_rect().width() - 52.0).clamp(380.0, 560.0);
+        let viewport = ctx.content_rect();
+        let paired = viewport.width() >= 760.0 && viewport.height() >= 560.0;
+        let width = (viewport.width() - 52.0).clamp(380.0, if paired { 860.0 } else { 560.0 });
         let response = egui::Modal::new(egui::Id::new(draft.copy.modal_id)).show(ctx, |ui| {
             ui.set_width(width);
-            ui.heading(draft.copy.title);
-            draft.show_tabs(ui);
-            draft.show_workspace(ui);
+            let heading = ui.add(
+                egui::Label::new(egui::RichText::new(draft.copy.title).heading())
+                    .sense(egui::Sense::focusable_noninteractive()),
+            );
+            if draft.focus_first {
+                heading.request_focus();
+                draft.focus_first = false;
+            }
+            if paired {
+                draft.show_paired_workspace(ui);
+            } else {
+                draft.show_tabs(ui);
+                draft.show_workspace(ui);
+            }
             ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
+            let exit = ui.horizontal(|ui| {
+                if help(ui.button("Cancel"), "Close the artwork editor and discard edits made since you opened it. Your previously applied artwork stays in the package.").clicked() {
                     return Some(Exit::Cancel);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    dense::primary_action(ui, draft.can_apply(), draft.copy.apply)
+                    help(dense::primary_action(ui, draft.can_apply(), draft.copy.apply),
+                        "Use these previews in the package. You can revisit and adjust the artwork before building.")
                         .clicked()
                         .then_some(Exit::Apply)
                 })
                 .inner
-            })
-            .inner
+            }).inner;
+            ui.separator();
+            ui.scope(|ui| dense::help_strip(ui, ARTWORK_HELP));
+            exit
         });
         if let Some(exit) = response
             .inner
@@ -230,7 +256,7 @@ impl Draft {
         match result {
             Ok(icon) => {
                 self.base_icon = Some(icon);
-                self.dirty_preview = true;
+                self.dirty_previews = [true; 2];
             }
             Err(error) => self.problem = Some(error),
         }
@@ -248,15 +274,16 @@ impl Draft {
     fn show_tabs(&mut self, ui: &mut egui::Ui) {
         let before = self.tab;
         ui.horizontal(|ui| {
-            let icon = ui.selectable_value(&mut self.tab, Tab::Icon, self.copy.icon_tab);
-            ui.selectable_value(&mut self.tab, Tab::Sidebar, self.copy.sidebar_tab);
-            if self.focus_first {
-                icon.request_focus();
-                self.focus_first = false;
-            }
+            help(
+                ui.selectable_value(&mut self.tab, Tab::Icon, self.copy.icon_tab),
+                "Edit the icon shown for the portable app. Check its preview at different sizes before applying.",
+            );
+            help(
+                ui.selectable_value(&mut self.tab, Tab::Sidebar, self.copy.sidebar_tab),
+                "Edit the vertical picture shown to the left of the installation steps. You can import a picture or use the app icon as its starting point.",
+            );
         });
         if before != self.tab {
-            self.dirty_preview = true;
             self.problem = None;
         }
     }
@@ -272,48 +299,72 @@ impl Draft {
                 |ui| {
                     ui.set_width(controls_width);
                     match self.tab {
-                        Tab::Icon => self.show_icon_controls(ui),
-                        Tab::Sidebar => self.show_sidebar_controls(ui),
+                        Tab::Icon => self.show_icon_controls(ui, false),
+                        Tab::Sidebar => self.show_sidebar_controls(ui, false),
                     }
-                    if let Some(problem) = &self.problem {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(problem).color(ui.visuals().error_fg_color),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(problem);
-                        dense::view_text(
-                            ui,
-                            "View artwork error",
-                            "Artwork problem",
-                            problem,
-                            true,
-                        );
-                    }
+                    self.show_problem(ui);
                 },
             );
-            self.update_preview(ui.ctx());
+            self.update_preview(ui.ctx(), self.tab);
             ui.allocate_ui_with_layout(
                 egui::vec2(preview_width, 0.0),
                 egui::Layout::top_down(egui::Align::Center),
-                |ui| self.show_preview(ui, preview_width),
+                |ui| self.show_preview(ui, preview_width, self.tab, false),
             );
         });
     }
 
-    fn show_icon_controls(&mut self, ui: &mut egui::Ui) {
-        ui.label(self.copy.icon_help);
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Import image…").clicked() {
-                self.import_image();
+    fn show_paired_workspace(&mut self, ui: &mut egui::Ui) {
+        ui.columns(2, |columns| {
+            for (column, tab) in columns.iter_mut().zip([Tab::Icon, Tab::Sidebar]) {
+                let heading = match tab {
+                    Tab::Icon => self.copy.icon_tab,
+                    Tab::Sidebar => self.copy.sidebar_tab,
+                };
+                column.label(egui::RichText::new(heading).strong());
+                self.update_preview(column.ctx(), tab);
+                self.show_preview(column, column.available_width(), tab, true);
+                column.add_space(8.0);
+                match tab {
+                    Tab::Icon => self.show_icon_controls(column, true),
+                    Tab::Sidebar => self.show_sidebar_controls(column, true),
+                }
             }
-            if ui
-                .add_enabled(
-                    self.artwork.icon.is_some(),
-                    egui::Button::new(self.copy.restore_icon),
-                )
-                .clicked()
+        });
+        self.show_problem(ui);
+        if self.dirty_previews.iter().any(|dirty| *dirty) {
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn show_problem(&self, ui: &mut egui::Ui) {
+        if let Some(problem) = &self.problem {
+            ui.add(
+                egui::Label::new(egui::RichText::new(problem).color(ui.visuals().error_fg_color))
+                    .truncate(),
+            );
+            dense::view_text(ui, "View artwork error", "Artwork problem", problem, true);
+        }
+    }
+
+    fn show_icon_controls(&mut self, ui: &mut egui::Ui, paired: bool) {
+        if !paired {
+            ui.label(self.copy.icon_help);
+        }
+        let import_label = if paired {
+            "Import Icon…"
+        } else {
+            "Import image…"
+        };
+        ui.horizontal_wrapped(|ui| {
+            let import = help(ui.button(import_label), "Choose a PNG or ICO image for the app icon. A square image with a transparent background usually reads best at small sizes.");
+            if import.clicked() {
+                self.import_image(Tab::Icon);
+            }
+            if help(
+                ui.add_enabled(self.artwork.icon.is_some(), egui::Button::new(self.copy.restore_icon)),
+                "Remove the custom icon and use the icon PortableForge found for this app. You can import another picture at any time.",
+            ).clicked()
             {
                 self.artwork.icon = None;
                 self.changed();
@@ -327,26 +378,33 @@ impl Draft {
         ui.label(egui::RichText::new("Preview icon size").strong());
         ui.horizontal_wrapped(|ui| {
             for size in ICON_SIZES {
-                if ui
-                    .selectable_value(&mut self.icon_size, size, format!("{size} px"))
-                    .changed()
+                if help(
+                    ui.selectable_value(&mut self.icon_size, size, format!("{size} px")),
+                    "Change the preview size to check the artwork. The package still includes all required icon sizes.",
+                ).changed()
                 {
-                    self.dirty_preview = true;
+                    self.dirty_previews[Tab::Icon.index()] = true;
                 }
             }
         });
     }
 
-    fn show_sidebar_controls(&mut self, ui: &mut egui::Ui) {
-        ui.label("Use a picture or create a panel from the app icon.");
+    fn show_sidebar_controls(&mut self, ui: &mut egui::Ui, paired: bool) {
+        if !paired {
+            ui.label("Use a picture or create a panel from the app icon.");
+        }
+        let import_label = if paired {
+            "Import Left Pane…"
+        } else {
+            "Import image…"
+        };
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Import image…").clicked() {
-                self.import_image();
+            if help(ui.button(import_label), "Choose a PNG or ICO picture for the installer’s left pane. PortableForge prepares it at 328 by 628 pixels. Use Fit to show the whole image or Crop to fill the pane.").clicked() {
+                self.import_image(Tab::Sidebar);
             }
             let icon_available = self.artwork.icon.is_some() || self.base_icon.is_some();
-            if ui
-                .add_enabled(icon_available, egui::Button::new("Use app icon"))
-                .clicked()
+            if help(ui.add_enabled(icon_available, egui::Button::new("Use app icon")),
+                "Use the current app icon as the picture for the installer’s left pane. Set the background color below.").clicked()
             {
                 let background = self
                     .artwork
@@ -361,12 +419,10 @@ impl Draft {
                 self.changed();
             }
         });
-        if ui
-            .add_enabled(
-                self.artwork.sidebar.is_some(),
-                egui::Button::new("Use default left pane"),
-            )
-            .clicked()
+        if help(
+            ui.add_enabled(self.artwork.sidebar.is_some(), egui::Button::new("Use default left pane")),
+            "Remove your custom artwork for the left pane and use the installer’s built-in artwork.",
+        ).clicked()
         {
             self.artwork.sidebar = None;
             self.changed();
@@ -376,9 +432,10 @@ impl Draft {
             let recolored = ui
                 .horizontal(|ui| {
                     let label = ui.label("Background");
-                    let picker = ui
-                        .color_edit_button_srgb(&mut pane.background)
-                        .labelled_by(label.id);
+                    let picker = help(
+                        ui.color_edit_button_srgb(&mut pane.background).labelled_by(label.id),
+                        "Choose the color behind transparent areas and around pictures that do not fill the pane.",
+                    );
                     let [r, g, b] = pane.background;
                     ui.monospace(format!("#{r:02X}{g:02X}{b:02X}"));
                     picker.changed()
@@ -390,7 +447,7 @@ impl Draft {
         }
     }
 
-    fn import_image(&mut self) {
+    fn import_image(&mut self, tab: Tab) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Choose artwork")
             .add_filter("PNG or ICO image", &["png", "ico"])
@@ -400,7 +457,7 @@ impl Draft {
         };
         match Raster::load(&path) {
             Ok(source) => {
-                match self.tab {
+                match tab {
                     Tab::Icon => {
                         self.artwork.icon = Some(IconArtwork {
                             source,
@@ -427,16 +484,17 @@ impl Draft {
     }
 
     fn changed(&mut self) {
-        self.dirty_preview = true;
+        self.dirty_previews = [true; 2];
         self.problem = None;
     }
 
-    fn update_preview(&mut self, ctx: &egui::Context) {
-        if !self.dirty_preview {
+    fn update_preview(&mut self, ctx: &egui::Context, tab: Tab) {
+        let index = tab.index();
+        if !self.dirty_previews[index] {
             return;
         }
-        self.dirty_preview = false;
-        let rendered = match self.tab {
+        self.dirty_previews[index] = false;
+        let rendered = match tab {
             Tab::Icon => self.icon_preview(),
             Tab::Sidebar => self.artwork.sidebar.as_ref().map_or(Ok(None), |pane| {
                 let icon = if pane.source.is_none() {
@@ -447,7 +505,7 @@ impl Draft {
                 render_sidebar(pane, icon.as_ref()).map(Some)
             }),
         };
-        self.preview = match rendered {
+        self.previews[index] = match rendered {
             Ok(Some(raster)) => Some(ctx.load_texture(
                 self.copy.modal_id,
                 egui::ColorImage::from_rgba_unmultiplied(
@@ -487,14 +545,26 @@ impl Draft {
         self.effective_icon(self.icon_size)
     }
 
-    fn show_preview(&self, ui: &mut egui::Ui, width: f32) {
-        ui.label(egui::RichText::new("Preview").strong());
-        let size = match self.tab {
-            Tab::Icon => egui::vec2(128.0, 128.0),
-            Tab::Sidebar => egui::vec2(184.0 * SIDEBAR_WIDTH as f32 / SIDEBAR_HEIGHT as f32, 184.0),
+    fn show_preview(&self, ui: &mut egui::Ui, width: f32, tab: Tab, paired: bool) {
+        if !paired {
+            ui.label(egui::RichText::new("Preview").strong());
+        }
+        let pane_height = match (paired, ui.ctx().content_rect().height()) {
+            (true, height) if height < 620.0 => 112.0,
+            (true, _) => 144.0,
+            (false, _) => 184.0,
         };
-        let (panel, response) =
-            ui.allocate_exact_size(egui::vec2(width, size.y), egui::Sense::hover());
+        let size = match tab {
+            Tab::Icon => egui::Vec2::splat(128.0_f32.min(pane_height)),
+            Tab::Sidebar => egui::vec2(
+                pane_height * SIDEBAR_WIDTH as f32 / SIDEBAR_HEIGHT as f32,
+                pane_height,
+            ),
+        };
+        let (panel, response) = ui.allocate_exact_size(
+            egui::vec2(width, if paired { pane_height } else { size.y }),
+            egui::Sense::hover(),
+        );
         let image = egui::Rect::from_center_size(panel.center(), size);
         let painter = ui.painter_at(panel);
         painter.rect_filled(image, 0.0, ui.visuals().extreme_bg_color);
@@ -504,8 +574,8 @@ impl Draft {
             ui.visuals().widgets.noninteractive.bg_stroke,
             egui::StrokeKind::Inside,
         );
-        if let Some(preview) = &self.preview {
-            let label = match self.tab {
+        if let Some(preview) = &self.previews[tab.index()] {
+            let label = match tab {
                 Tab::Icon => format!("App icon preview at {} pixels", self.icon_size),
                 Tab::Sidebar => "Installer left pane preview".into(),
             };
@@ -513,7 +583,7 @@ impl Draft {
                 .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, true, &label));
             let size = preview.size_vec2();
             let mut ratio = (image.width() / size.x).min(image.height() / size.y);
-            if self.tab == Tab::Icon {
+            if tab == Tab::Icon {
                 ratio = ratio.min(self.icon_size as f32 / size.x.max(size.y));
             }
             let bounds = egui::Rect::from_center_size(image.center(), size * ratio);
@@ -524,7 +594,7 @@ impl Draft {
                 egui::Color32::WHITE,
             );
         } else {
-            let label = match self.tab {
+            let label = match tab {
                 Tab::Icon if self.captured_load.is_some() => "Loading icon…",
                 Tab::Icon => "No preview",
                 Tab::Sidebar => "Default pane",
@@ -539,41 +609,58 @@ impl Draft {
                 ui.visuals().weak_text_color(),
             );
         }
-        if self.tab == Tab::Sidebar {
-            ui.label(egui::RichText::new("328 × 628 px").small().weak());
+        if paired || tab == Tab::Sidebar {
+            let dimensions = match tab {
+                Tab::Icon => format!("{} × {} px", self.icon_size, self.icon_size),
+                Tab::Sidebar => "328 × 628 px".into(),
+            };
+            ui.label(egui::RichText::new(dimensions).small().weak());
         }
     }
+}
+
+fn help(response: egui::Response, explanation: &str) -> egui::Response {
+    dense::explained(response, explanation)
 }
 
 fn show_transform(ui: &mut egui::Ui, transform: &mut Transform) -> bool {
     let before = *transform;
     ui.horizontal_wrapped(|ui| {
-        if ui.button("Rotate 90°").clicked() {
+        if help(
+            ui.button("Rotate 90°"),
+            "Turn the image one quarter clockwise. Select this again to keep rotating.",
+        )
+        .clicked()
+        {
             transform.quarter_turns = transform.quarter_turns.wrapping_add(1) % 4;
         }
-        if ui
-            .selectable_label(transform.flip_horizontal, "Flip horizontal")
-            .clicked()
+        if help(
+            ui.selectable_label(transform.flip_horizontal, "Flip horizontal"),
+            "Mirror the picture from left to right. Select again to undo the mirror.",
+        )
+        .clicked()
         {
             transform.flip_horizontal = !transform.flip_horizontal;
         }
-        if ui
-            .selectable_label(transform.flip_vertical, "Flip vertical")
-            .clicked()
+        if help(
+            ui.selectable_label(transform.flip_vertical, "Flip vertical"),
+            "Mirror the picture from top to bottom. Select again to undo the mirror.",
+        )
+        .clicked()
         {
             transform.flip_vertical = !transform.flip_vertical;
         }
     });
     ui.horizontal_wrapped(|ui| {
         ui.label("Placement");
-        ui.selectable_value(&mut transform.fit, FitMode::Fit, "Fit");
-        ui.selectable_value(&mut transform.fit, FitMode::Crop, "Crop");
-        if ui
-            .add_enabled(
-                *transform != Transform::default(),
-                egui::Button::new("Reset adjustments"),
-            )
-            .clicked()
+        help(ui.selectable_value(&mut transform.fit, FitMode::Fit, "Fit"),
+            "Show the entire image. The empty area around it stays transparent for the icon or uses the background color for the pane.");
+        help(ui.selectable_value(&mut transform.fit, FitMode::Crop, "Crop"),
+            "Fill the available space by trimming the image edges. Check the preview to make sure the subject stays visible.");
+        if help(
+            ui.add_enabled(*transform != Transform::default(), egui::Button::new("Reset adjustments")),
+            "Undo rotation, mirroring and cropping and keep the imported picture.",
+        ).clicked()
         {
             *transform = Transform::default();
         }
@@ -631,8 +718,17 @@ mod tests {
 
     #[test]
     fn edited_artwork_tabs_fit_at_each_text_size() {
-        let bounds =
-            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(dense::MIN_CONTENT));
+        assert_artwork_fits(dense::MIN_CONTENT, false);
+    }
+
+    #[test]
+    fn paired_artwork_previews_fit_at_each_text_size() {
+        assert_artwork_fits([760.0, 560.0], true);
+        assert_artwork_fits([980.0, 620.0], true);
+    }
+
+    fn assert_artwork_fits(size: [f32; 2], paired: bool) {
+        let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, size.into());
         let icon = fixture_icon();
         for scale in [1.0, 1.25, 1.5] {
             for (tab, copy) in [
@@ -676,9 +772,10 @@ mod tests {
                 draw();
                 draw();
                 let output = draw();
-                for expected in [
+                let mut expected = vec![
                     copy.apply,
                     "Cancel",
+                    ARTWORK_HELP,
                     "Rotate 90°",
                     "Flip horizontal",
                     "Flip vertical",
@@ -689,16 +786,48 @@ mod tests {
                     } else {
                         "Background"
                     },
-                ] {
-                    let shape = output.shapes.iter().find(|clipped| {
+                ];
+                if paired {
+                    expected.extend(["Import Icon…", "Import Left Pane…", "Background", "256 px"]);
+                    let previews = &editor.editing.as_ref().unwrap().previews;
+                    let preview_bounds = previews.each_ref().map(|texture| {
+                        let id = texture.as_ref().unwrap().id();
+                        let shape = output.shapes.iter().find(|shape| {
+                            matches!(&shape.shape, egui::Shape::Mesh(mesh) if mesh.texture_id == id)
+                        }).expect("preview painted");
+                        let rect = shape.shape.visual_bounding_rect();
+                        assert!(bounds
+                            .intersect(shape.clip_rect)
+                            .expand(1.0)
+                            .contains_rect(rect));
+                        rect
+                    });
+                    assert!(preview_bounds[0].right() < preview_bounds[1].left());
+                }
+                for expected in expected {
+                    let shapes: Vec<_> = output.shapes.iter().filter(|clipped| {
                         matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text() == expected)
-                    }).unwrap_or_else(|| panic!("Missing {expected:?} at {scale}"));
-                    let visible = bounds.intersect(shape.clip_rect).expand(1.0);
+                    }).collect();
                     assert!(
-                        visible.contains_rect(shape.shape.visual_bounding_rect()),
-                        "{expected:?} clipped at {scale}: {:?} versus {visible:?}",
-                        shape.shape.visual_bounding_rect(),
+                        !shapes.is_empty(),
+                        "Missing {expected:?} at {scale}. Text: {:?}",
+                        output
+                            .shapes
+                            .iter()
+                            .filter_map(|s| match &s.shape {
+                                egui::Shape::Text(text) => Some((text.galley.text(), text.pos)),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
                     );
+                    for shape in shapes {
+                        let visible = bounds.intersect(shape.clip_rect).expand(1.0);
+                        assert!(
+                            visible.contains_rect(shape.shape.visual_bounding_rect()),
+                            "{expected:?} clipped at {scale}: {:?} versus {visible:?}",
+                            shape.shape.visual_bounding_rect(),
+                        );
+                    }
                 }
             }
         }

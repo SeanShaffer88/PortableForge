@@ -34,6 +34,59 @@ pub(super) fn palette(ctx: &egui::Context) -> Palette {
         .unwrap_or(tessel::DARK)
 }
 
+pub(super) fn paint_work_area(ui: &egui::Ui) {
+    if palette(ui.ctx()) != tessel::DARK {
+        return;
+    }
+
+    let bounds = ui
+        .max_rect()
+        .expand(f32::from(ui.spacing().window_margin.left));
+    let painter = ui.painter().with_clip_rect(bounds);
+    painter.rect_filled(bounds, 0.0, egui::Color32::from_rgb(23, 25, 29));
+
+    // Repeated board traces are decorative and stay behind the form.
+    let tile = egui::vec2(176.0, 124.0);
+    let traces: &[&[[f32; 2]]] = &[
+        &[
+            [0.0, 16.0],
+            [26.0, 16.0],
+            [46.0, 36.0],
+            [86.0, 36.0],
+            [107.0, 57.0],
+            [176.0, 57.0],
+        ],
+        &[[176.0, 79.0], [128.0, 79.0], [102.0, 105.0], [56.0, 105.0]],
+        &[[0.0, 88.0], [23.0, 88.0], [41.0, 70.0], [63.0, 70.0]],
+        &[[119.0, 0.0], [119.0, 15.0], [138.0, 34.0], [154.0, 34.0]],
+    ];
+    let dark_trace = egui::Color32::from_rgb(30, 34, 41);
+    let edge_trace = egui::Color32::from_rgb(39, 45, 54);
+    let rows = (bounds.height() / tile.y).ceil() as usize;
+    let columns = (bounds.width() / tile.x).ceil() as usize;
+    for row in 0..rows {
+        for column in 0..columns {
+            let origin = bounds.min + egui::vec2(column as f32 * tile.x, row as f32 * tile.y);
+            let color = if column * 2 < columns {
+                dark_trace
+            } else {
+                edge_trace
+            };
+            let stroke = egui::Stroke::new(1.0_f32, color);
+            for trace in traces {
+                let points: Vec<_> = trace
+                    .iter()
+                    .map(|&[x, y]| origin + egui::vec2(x, y))
+                    .collect();
+                if let Some(&end) = points.last() {
+                    painter.circle_stroke(end, 2.0, stroke);
+                }
+                painter.add(egui::Shape::line(points, stroke));
+            }
+        }
+    }
+}
+
 pub(super) fn success(ui: &egui::Ui) -> egui::Color32 {
     rgb(palette(ui.ctx()).success)
 }
@@ -156,6 +209,8 @@ fn style(palette: Palette, density: Density, dark: bool) -> egui::Style {
     };
     style.spacing.item_spacing = egui::vec2(tessel::CONTROL_GAP, tessel::CONTROL_GAP_MIN);
     style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    // Built-in widgets also use the fixed help bar instead of hover popups.
+    style.interaction.tooltip_delay = f32::INFINITY;
     style.spacing.interact_size = egui::vec2(32.0, density.control_min_height);
     style.spacing.window_margin = egui::Margin::same(density.panel_padding as i8);
     style.text_styles = [
