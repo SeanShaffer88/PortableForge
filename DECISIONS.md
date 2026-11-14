@@ -1,5 +1,12 @@
 # Decisions — PortableForge
 
+## 2026-11-14 — Resume an autonomous app package
+
+Save one paused app package independently of setup drafts and profile approvals.
+Store the original source selection and editable decisions locally. Resume through
+the same source inspection and build checks, using new temporary staging. Require
+explicit redistribution permission on every resumed run.
+
 ## 2026-11-12 — Package ZIPs and selected app files
 
 Treat each drop as one source for one app. A ZIP or a same-folder selection of

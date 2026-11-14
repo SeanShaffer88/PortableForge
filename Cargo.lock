@@ -2260,6 +2260,7 @@ dependencies = [
  "egui",
  "portableforge-core",
  "rfd",
+ "serde",
  "serde_json",
 ]
 

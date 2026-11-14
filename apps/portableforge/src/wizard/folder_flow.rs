@@ -21,9 +21,11 @@ use super::{artwork_ui, WizardApp};
 mod draft;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod runtime;
+mod saved_job;
 mod view;
 
 use draft::{suggested_id, Draft};
+use saved_job::{SavedJob, SourceKind};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Page {
@@ -51,6 +53,7 @@ enum DiscardStage {
     Back,
     Built,
     Close,
+    Saved,
     Stopped,
 }
 
@@ -59,6 +62,9 @@ pub(super) struct Flow {
     pub(super) open: bool,
     source: PathBuf,
     source_label: String,
+    original_inputs: Vec<PathBuf>,
+    source_kind: Option<SourceKind>,
+    restoring: Option<SavedJob>,
     staged: Option<Arc<StagedInput>>,
     mode: IntakeMode,
     build_attempted: bool,
@@ -114,7 +120,7 @@ struct Inspection {
     staged: Option<Arc<StagedInput>>,
     original: PathBuf,
     source_label: String,
-    loose_files: bool,
+    source_kind: SourceKind,
     scan: Arc<FolderScan>,
     selection: Option<Selection>,
     issues: Vec<FolderIssue>,
@@ -125,6 +131,7 @@ enum Outcome {
     DroppedSetup(PathBuf),
     IntakeStopped,
     StageDiscarded(DiscardStage, Result<(), Failure>),
+    SavedForLater,
     Selected(Selection, Vec<FolderIssue>),
     #[cfg(all(windows, target_arch = "x86_64"))]
     Built(Delivery),
@@ -157,7 +164,7 @@ fn inspect(
     root: &Path,
     original: PathBuf,
     source_label: String,
-    loose_files: bool,
+    source_kind: SourceKind,
 ) -> Result<Inspection, Failure> {
     let scan = folder::scan(root)
         .map_err(|error| Failure::new("The selected app files could not be read.", error))?;
@@ -182,7 +189,7 @@ fn inspect(
         staged: None,
         original,
         source_label,
-        loose_files,
+        source_kind,
         scan: Arc::new(scan),
         selection,
         issues,
@@ -377,9 +384,16 @@ impl Flow {
 
     fn after_discard(&mut self, after: DiscardStage) {
         match after {
-            DiscardStage::Back => self.open = false,
+            DiscardStage::Back => {
+                self.error = None;
+                self.open = false;
+            }
             DiscardStage::Built => {}
             DiscardStage::Close => self.close_ready = true,
+            DiscardStage::Saved => {
+                self.open = false;
+                self.status = Some("App job saved.");
+            }
             DiscardStage::Stopped => self.status = Some(copy::SOURCE_STOPPED),
         }
     }
@@ -391,7 +405,13 @@ impl Flow {
         }
     }
 
-    fn inspect(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, allow_setup: bool) {
+    fn inspect(
+        &mut self,
+        ctx: &egui::Context,
+        paths: Vec<PathBuf>,
+        allow_setup: bool,
+        saved_kind: Option<SourceKind>,
+    ) {
         let old_stage = self.staged.take();
         let source = if paths.len() == 1 {
             paths[0].clone()
@@ -399,6 +419,9 @@ impl Flow {
             PathBuf::new()
         };
         self.reset_source(source);
+        if self.mode == IntakeMode::Autonomous {
+            self.original_inputs = paths.clone();
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         self.start(ctx, copy::CHECKING_SELECTION, move |tx, ctx| {
@@ -412,6 +435,13 @@ impl Flow {
                 Ok(plan) => plan,
                 Err(error) => return intake_failure(error),
             };
+            let source_kind = SourceKind::from_plan(&plan);
+            if saved_kind.is_some_and(|expected| Some(expected) != source_kind) {
+                return Err(Failure::new(
+                    "The original app files changed. Choose them again to start a new job.",
+                    "The current source type does not match the saved app source.",
+                ));
+            }
             let plan = match plan {
                 DropPlan::Setup(path) if allow_setup => return Ok(Outcome::DroppedSetup(path)),
                 DropPlan::Setup(_) => {
@@ -423,7 +453,8 @@ impl Flow {
                 DropPlan::Folder(path) => {
                     show_stage(copy::SCANNING);
                     let label = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
-                    return inspect(&path, path.clone(), label, false).map(Outcome::Inspected);
+                    return inspect(&path, path.clone(), label, SourceKind::Folder)
+                        .map(Outcome::Inspected);
                 }
                 plan => plan,
             };
@@ -444,7 +475,7 @@ impl Flow {
             } else {
                 original.file_name().unwrap_or(original.as_os_str()).to_string_lossy().into_owned()
             };
-            match inspect(staged.root(), original, label, loose_files) {
+            match inspect(staged.root(), original, label, source_kind.expect("staged app source")) {
                 Ok(mut inspection) => {
                     inspection.staged = Some(staged);
                     Ok(Outcome::Inspected(inspection))
@@ -516,6 +547,86 @@ impl Flow {
         self.page = Page::Review;
     }
 
+    fn restore_after_scan(
+        &mut self,
+        ctx: &egui::Context,
+        saved: SavedJob,
+        recommendation: Option<Selection>,
+    ) {
+        let scan = self.scan.as_ref().expect("fresh inspection");
+        if !scan.complete
+            || scan.is_prepared()
+            || scan
+                .issues
+                .iter()
+                .any(|issue| issue.severity == IssueSeverity::Error)
+        {
+            return;
+        }
+        let eligible = saved.selected.as_ref().filter(|path| {
+            scan.candidates.iter().any(|candidate| {
+                &candidate.relative_path == *path
+                    && matches!(
+                        candidate.architecture,
+                        portableforge_core::snapshot::PeArch::X86
+                            | portableforge_core::snapshot::PeArch::X64
+                    )
+            })
+        });
+        if let Some(path) = eligible.cloned() {
+            if let Some(selection) = recommendation.filter(|selection| selection.relative == path) {
+                self.accept_selection(ctx, selection);
+                self.restore_choices(saved);
+            } else {
+                self.page = Page::Program;
+                self.select(ctx, path);
+                if self.busy() {
+                    self.restoring = Some(saved);
+                }
+            }
+            return;
+        }
+
+        let has_candidates = !scan.candidates.is_empty();
+        self.restore_locations(&saved);
+        if saved.selected.is_some() {
+            self.status =
+                Some("The saved start file is unavailable. Choose the file that starts the app.");
+            if has_candidates {
+                self.page = Page::Program;
+            }
+        } else if let Some(selection) = recommendation {
+            self.accept_selection(ctx, selection);
+        } else if has_candidates {
+            self.page = Page::Program;
+        }
+    }
+
+    fn restore_locations(&mut self, saved: &SavedJob) {
+        self.launcher_tools.clone_from(&saved.launcher_tools);
+        self.installer_tools.clone_from(&saved.installer_tools);
+        self.output_parent.clone_from(&saved.output_parent);
+    }
+
+    fn restore_choices(&mut self, saved: SavedJob) {
+        self.restore_locations(&saved);
+        self.draft = saved.draft;
+        self.draft.rights = false;
+        self.inferred_name = false;
+    }
+
+    fn can_save_for_later(&self) -> bool {
+        self.mode == IntakeMode::Autonomous
+            && matches!(self.page, Page::Review | Page::Program)
+            && self.source_kind.is_some()
+            && self
+                .scan
+                .as_ref()
+                .is_some_and(|scan| scan.complete && !scan.is_prepared())
+            && !self.busy()
+            && !self.modal_open()
+    }
+
     pub(super) fn poll(&mut self, ctx: &egui::Context) -> Option<PathBuf> {
         if let Some(after) = self.discard_stage.take() {
             let stage = self.staged.take();
@@ -560,6 +671,7 @@ impl Flow {
         self.stop_pending = false;
         self.status = None;
         if intake_cancelled {
+            self.restoring = None;
             match result {
                 Ok(Outcome::Inspected(inspection)) => {
                     self.staged = inspection.staged;
@@ -582,10 +694,12 @@ impl Flow {
                 self.discard_failed();
                 self.error = Some(failure);
             }
+            Ok(Outcome::SavedForLater) => self.discard(DiscardStage::Saved),
             Ok(Outcome::Inspected(inspection)) => {
                 self.source = inspection.original;
                 self.source_label = inspection.source_label;
-                self.output_parent = if inspection.loose_files {
+                self.source_kind = Some(inspection.source_kind);
+                self.output_parent = if inspection.source_kind == SourceKind::Files {
                     self.source.clone()
                 } else {
                     self.source
@@ -600,7 +714,9 @@ impl Flow {
                 );
                 self.issues = inspection.issues;
                 self.scan = Some(inspection.scan);
-                if let Some(selection) = inspection.selection {
+                if let Some(saved) = self.restoring.take() {
+                    self.restore_after_scan(ctx, saved, inspection.selection);
+                } else if let Some(selection) = inspection.selection {
                     self.accept_selection(ctx, selection);
                 } else if self.mode == IntakeMode::Autonomous
                     && self
@@ -613,6 +729,9 @@ impl Flow {
             Ok(Outcome::Selected(selection, issues)) => {
                 self.issues = issues;
                 self.accept_selection(ctx, selection);
+                if let Some(saved) = self.restoring.take() {
+                    self.restore_choices(saved);
+                }
             }
             #[cfg(all(windows, target_arch = "x86_64"))]
             Ok(Outcome::Built(delivery)) => {
@@ -633,7 +752,10 @@ impl Flow {
                     failure.detail,
                 )));
             }
-            Err(failure) => self.error = Some(failure),
+            Err(failure) => {
+                self.restoring = None;
+                self.error = Some(failure);
+            }
         }
         if self.discard_stage.is_some() {
             ctx.request_repaint();
@@ -844,6 +966,84 @@ impl Flow {
 }
 
 impl WizardApp {
+    fn save_app_job(&mut self, ctx: &egui::Context) {
+        let flow = &mut self.folder_flow;
+        if !flow.can_save_for_later() {
+            return;
+        }
+        let path = saved_job::path(&self.settings_path);
+        let revision = match saved_job::revision(&path) {
+            Ok(revision) => revision,
+            Err(error) => {
+                flow.error = Some(Failure::new("Could not access the saved job.", error));
+                return;
+            }
+        };
+        let replace = revision.is_some();
+        if replace
+            && !confirm_saved_job(
+                "Replace saved job?",
+                "Save this job in place of the currently saved app job?",
+            )
+        {
+            return;
+        }
+        let job = SavedJob::from_flow(flow, flow.source_kind.expect("inspected source"));
+        flow.start(ctx, saved_job::SAVING, move |_, _| {
+            saved_job::save(&path, revision, &job).map_err(|error| {
+                Failure::new(
+                    "Could not save the app job. Open Show Details for the reason.",
+                    error,
+                )
+            })?;
+            Ok(Outcome::SavedForLater)
+        });
+    }
+
+    fn resume_app_job(&mut self, ctx: &egui::Context) {
+        if self.folder_flow.busy() || self.folder_flow.modal_open() || self.profile_flow.busy() {
+            return;
+        }
+        match saved_job::load(&saved_job::path(&self.settings_path)) {
+            Ok(job) => {
+                let paths = job.inputs.clone();
+                self.folder_flow.mode = IntakeMode::Autonomous;
+                self.folder_flow.inspect(ctx, paths, false, Some(job.kind));
+                if self.folder_flow.busy() {
+                    self.folder_flow.restoring = Some(job);
+                }
+            }
+            Err(error) => {
+                self.folder_flow.error = Some(Failure::new(
+                    "The saved job could not be opened. Remove it or choose the app files again.",
+                    error,
+                ));
+            }
+        }
+    }
+
+    fn remove_app_job(&mut self) {
+        let path = saved_job::path(&self.settings_path);
+        let result = saved_job::revision(&path).and_then(|revision| {
+            if let Some(revision) = revision {
+                if confirm_saved_job(
+                    "Remove saved job?",
+                    "Remove the saved choices? Your app files stay in place.",
+                ) {
+                    saved_job::remove(&path, revision)?;
+                }
+            }
+            Ok(())
+        });
+        self.folder_flow.error = result.err().map(|error| {
+            Failure::new(
+                "Could not remove the saved job. Open Show Details for the reason.",
+                error,
+            )
+        });
+        self.folder_flow.status = None;
+    }
+
     pub(super) fn choose_app_folder(&mut self, ctx: &egui::Context) {
         let dialog = rfd::FileDialog::new().set_title("Choose the unpacked app folder");
         if let Some(path) = dialog.pick_folder() {
@@ -901,8 +1101,17 @@ impl WizardApp {
         if self.folder_flow.installer_tools.as_os_str().is_empty() {
             self.folder_flow.installer_tools = installer;
         }
-        self.folder_flow.inspect(ctx, paths, allow_setup);
+        self.folder_flow.inspect(ctx, paths, allow_setup, None);
     }
+}
+
+fn confirm_saved_job(title: &str, description: &str) -> bool {
+    rfd::MessageDialog::new()
+        .set_title(title)
+        .set_description(description)
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show()
+        == rfd::MessageDialogResult::Yes
 }
 
 #[cfg(test)]
@@ -1077,6 +1286,221 @@ mod tests {
         pe[88..90].copy_from_slice(&0x20bu16.to_le_bytes());
         pe[156] = 2;
         pe
+    }
+
+    struct AppJobFixture {
+        root: PathBuf,
+        folder: PathBuf,
+        app: PathBuf,
+        config: PathBuf,
+        zip: PathBuf,
+    }
+
+    impl AppJobFixture {
+        fn new() -> Self {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root =
+                std::env::temp_dir().join(format!("pf-app-job-{}-{stamp}", std::process::id()));
+            let folder = root.join("App");
+            let app = folder.join("Widget.exe");
+            let config = folder.join("settings.ini");
+            let zip = root.join("Widget.zip");
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(&app, inert_desktop_pe()).unwrap();
+            std::fs::write(&config, "example=true").unwrap();
+            portableforge_core::build::write_package_zip(&folder, &zip).unwrap();
+            Self {
+                root,
+                folder,
+                app,
+                config,
+                zip,
+            }
+        }
+
+        fn wizard(&self) -> WizardApp {
+            WizardApp {
+                settings_path: self.root.join("state/wizard-settings.json"),
+                settings: Default::default(),
+                resume_offer: false,
+                ..Default::default()
+            }
+        }
+    }
+
+    impl Drop for AppJobFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn finish_folder_work(flow: &mut Flow, ctx: &egui::Context) {
+        let expires = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while flow.busy() {
+            assert!(std::time::Instant::now() < expires, "Folder job timed out");
+            assert!(
+                flow.poll(ctx).is_none(),
+                "Saved app job became a setup task"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn autonomous_jobs_save_fresh_zip_or_exact_loose_selection_and_recheck_rights() {
+        for kind in [SourceKind::Zip, SourceKind::Files] {
+            let fixture = AppJobFixture::new();
+            let ctx = egui::Context::default();
+            let paths = match kind {
+                SourceKind::Zip => vec![fixture.zip.clone()],
+                SourceKind::Files => vec![fixture.app.clone(), fixture.config.clone()],
+                SourceKind::Folder => unreachable!(),
+            };
+            std::fs::write(fixture.folder.join("Excluded.txt"), "keep out").unwrap();
+            let mut wizard = fixture.wizard();
+            wizard.settings.draft = Some(portableforge_core::settings::WizardDraft {
+                step: "pick".into(),
+                installer_path: "example setup.exe".into(),
+                ..Default::default()
+            });
+            portableforge_core::settings::save(&wizard.settings_path, &wizard.settings).unwrap();
+            let setup_draft = std::fs::read(&wizard.settings_path).unwrap();
+            wizard.folder_flow.mode = IntakeMode::Autonomous;
+            wizard.inspect_app_inputs(&ctx, paths.clone(), false);
+            finish_folder_work(&mut wizard.folder_flow, &ctx);
+            let flow = &mut wizard.folder_flow;
+            assert!(flow.can_save_for_later());
+            assert_eq!(flow.source_kind, Some(kind));
+            flow.draft.name = "Reviewed Widget".into();
+            flow.draft.version = "4.1".into();
+            flow.draft.rights = true;
+            flow.build_attempted = true;
+            flow.launcher_tools = fixture.root.join("Launcher");
+            flow.installer_tools = fixture.root.join("Installer");
+            flow.output_parent = fixture.root.join("Output");
+            let first_stage = flow.staged.as_ref().unwrap().root().to_owned();
+            wizard.save_app_job(&ctx);
+            finish_folder_work(&mut wizard.folder_flow, &ctx);
+            assert!(!wizard.folder_flow.open);
+            assert!(!first_stage.exists());
+
+            let file = saved_job::path(&wizard.settings_path);
+            let persisted = saved_job::load(&file).unwrap();
+            assert_eq!(persisted.inputs, paths);
+            assert_eq!(persisted.kind, kind);
+            assert!(!persisted.draft.rights);
+            assert_eq!(std::fs::read(&wizard.settings_path).unwrap(), setup_draft);
+            let mut json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            json["draft"]["rights"] = serde_json::Value::Bool(true);
+            std::fs::write(&file, serde_json::to_vec(&json).unwrap()).unwrap();
+            let mut reopened = fixture.wizard();
+            assert!(!reopened.folder_flow.open);
+            reopened.resume_app_job(&ctx);
+            finish_folder_work(&mut reopened.folder_flow, &ctx);
+            let flow = &mut reopened.folder_flow;
+            let stage = flow.staged.as_ref().unwrap().root().to_owned();
+            assert_ne!(first_stage, stage);
+            assert!(stage.join("settings.ini").is_file());
+            assert!(!stage.join("Excluded.txt").exists());
+            assert_eq!(flow.selected.as_deref(), Some(Path::new("Widget.exe")));
+            assert_eq!(flow.draft.name, "Reviewed Widget");
+            assert_eq!(flow.draft.version, "4.1");
+            assert_eq!(flow.launcher_tools, fixture.root.join("Launcher"));
+            assert_eq!(flow.installer_tools, fixture.root.join("Installer"));
+            assert_eq!(flow.output_parent, fixture.root.join("Output"));
+            assert!(!flow.draft.rights);
+            assert!(!flow.build_attempted);
+            assert!(!flow.autonomous_ready());
+            assert!(reopened.installer_path.is_empty());
+            assert!(file.is_file());
+            reopened.folder_flow.back();
+            finish_folder_work(&mut reopened.folder_flow, &ctx);
+            assert!(!stage.exists());
+        }
+    }
+
+    #[test]
+    fn saved_app_job_rejects_missing_or_reclassified_sources_and_reopens_ambiguous_choice() {
+        let fixture = AppJobFixture::new();
+        let ctx = egui::Context::default();
+        let mut wizard = fixture.wizard();
+        let extra = fixture.folder.join("Other.exe");
+        std::fs::write(&extra, inert_desktop_pe()).unwrap();
+        wizard.folder_flow.mode = IntakeMode::Autonomous;
+        wizard.inspect_app_inputs(&ctx, vec![fixture.folder.clone()], false);
+        finish_folder_work(&mut wizard.folder_flow, &ctx);
+        assert_eq!(wizard.folder_flow.page, Page::Program);
+        assert!(wizard.folder_flow.selected.is_none());
+        wizard.folder_flow.select(&ctx, "Other.exe".into());
+        finish_folder_work(&mut wizard.folder_flow, &ctx);
+        wizard.folder_flow.draft.name = "Other Reviewed".into();
+        wizard.save_app_job(&ctx);
+        finish_folder_work(&mut wizard.folder_flow, &ctx);
+
+        let mut reopened = fixture.wizard();
+        reopened.resume_app_job(&ctx);
+        finish_folder_work(&mut reopened.folder_flow, &ctx);
+        assert_eq!(
+            reopened.folder_flow.selected.as_deref(),
+            Some(Path::new("Other.exe"))
+        );
+        assert_eq!(reopened.folder_flow.draft.name, "Other Reviewed");
+
+        std::fs::remove_file(&extra).unwrap();
+        reopened.resume_app_job(&ctx);
+        finish_folder_work(&mut reopened.folder_flow, &ctx);
+        assert!(reopened.folder_flow.selected.is_none());
+        assert_eq!(reopened.folder_flow.page, Page::Program);
+        assert_ne!(reopened.folder_flow.draft.name, "Other Reviewed");
+        assert!(!reopened.folder_flow.build_ready());
+
+        std::fs::rename(&fixture.folder, fixture.root.join("Unavailable")).unwrap();
+        reopened.resume_app_job(&ctx);
+        finish_folder_work(&mut reopened.folder_flow, &ctx);
+        assert!(reopened.folder_flow.error.is_some());
+        assert!(reopened.folder_flow.scan.is_none());
+        assert!(saved_job::path(&reopened.settings_path).is_file());
+
+        let setup = fixture.root.join("DifferentSetup.exe");
+        std::fs::write(&setup, "inert").unwrap();
+        let job_file = saved_job::path(&reopened.settings_path);
+        let mut job = saved_job::load(&job_file).unwrap();
+        job.inputs = vec![setup];
+        saved_job::save(&job_file, saved_job::revision(&job_file).unwrap(), &job).unwrap();
+        reopened.resume_app_job(&ctx);
+        finish_folder_work(&mut reopened.folder_flow, &ctx);
+        assert!(reopened.folder_flow.error.is_some());
+        assert!(reopened.folder_flow.scan.is_none());
+        assert!(reopened.installer_path.is_empty());
+        assert!(job_file.is_file());
+    }
+
+    #[test]
+    fn stale_or_invalid_saved_job_writes_keep_the_current_snapshot() {
+        let fixture = AppJobFixture::new();
+        let path = saved_job::path(&fixture.wizard().settings_path);
+        let flow = Flow {
+            original_inputs: vec![fixture.zip.clone()],
+            ..Default::default()
+        };
+        let mut job = SavedJob::from_flow(&flow, SourceKind::Zip);
+        saved_job::save(&path, None, &job).unwrap();
+        let first = saved_job::revision(&path).unwrap().unwrap();
+        job.draft.name = "new revision".into();
+        saved_job::save(&path, Some(first), &job).unwrap();
+        let current = std::fs::read(&path).unwrap();
+        assert!(saved_job::save(&path, Some(first), &job).is_err());
+        assert!(saved_job::remove(&path, first).is_err());
+        job.selected = Some("../outside.exe".into());
+        let replacement = saved_job::revision(&path).unwrap().unwrap();
+        assert!(saved_job::save(&path, Some(replacement), &job).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), current);
+        saved_job::remove(&path, replacement).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]
@@ -1305,7 +1729,20 @@ mod tests {
     #[test]
     fn folder_views_fit_at_minimum_size_at_all_text_sizes() {
         for scale in [1.0, 1.25, 1.5] {
+            let fixture = AppJobFixture::new();
             let mut wizard = populated();
+            wizard.settings_path = fixture.wizard().settings_path;
+            let path = saved_job::path(&wizard.settings_path);
+            let snapshot = Flow {
+                original_inputs: vec![fixture.zip.clone()],
+                ..Default::default()
+            };
+            saved_job::save(
+                &path,
+                None,
+                &SavedJob::from_flow(&snapshot, SourceKind::Zip),
+            )
+            .unwrap();
             wizard.settings.text_scale = scale;
             let ctx = egui::Context::default();
             super::super::theme::install_fonts(&ctx);
@@ -1315,7 +1752,7 @@ mod tests {
             );
             let mut frame = eframe::Frame::_new_kittest();
             wizard.folder_flow.open = false;
-            wizard.resume_offer = false;
+            wizard.resume_offer = true;
             wizard.settings.welcomed = true;
             {
                 let mut draw = || {
@@ -1335,6 +1772,9 @@ mod tests {
                     copy::AUTONOMOUS,
                     copy::CHOOSE_FILES,
                     copy::CHOOSE_FOLDER,
+                    saved_job::RESUME,
+                    saved_job::REMOVE,
+                    "Pick up where I left off",
                 ] {
                     let shape = output.shapes.iter().find(|shape| {
                         matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == label)
@@ -1346,6 +1786,9 @@ mod tests {
                 }
             }
             wizard.folder_flow.open = true;
+            wizard.folder_flow.mode = IntakeMode::Autonomous;
+            wizard.folder_flow.source_kind = Some(SourceKind::Zip);
+            wizard.folder_flow.build_attempted = true;
             for (page, labels) in [
                 (
                     Page::Review,
@@ -1355,6 +1798,7 @@ mod tests {
                         #[cfg(windows)]
                         "Edit Package Artwork…",
                         "Build Installer",
+                        saved_job::SAVE,
                         copy::RIGHTS,
                     ][..],
                 ),

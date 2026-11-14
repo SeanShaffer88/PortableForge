@@ -7,6 +7,7 @@ use portableforge_core::paf::CATEGORIES;
 
 use super::super::{dense, open_folder, package_review, shell, theme, WizardApp};
 use super::draft::{suggested_id, Language};
+use super::saved_job;
 use super::{Failure, Flow, IntakeMode, Page};
 
 enum SourcePicker {
@@ -36,6 +37,26 @@ impl WizardApp {
                 self.choose_app_folder(ui.ctx());
             }
         });
+        let saved_path = saved_job::path(&self.settings_path);
+        if saved_job::revision(&saved_path).is_ok_and(|slot| slot.is_some()) {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button(saved_job::RESUME)
+                    .on_hover_text("Check the original files again and reopen the saved choices.")
+                    .clicked()
+                {
+                    self.resume_app_job(ui.ctx());
+                }
+                if ui.button(saved_job::REMOVE).clicked() {
+                    self.remove_app_job();
+                }
+            });
+        }
+        if let Some(error) = &self.folder_flow.error {
+            ui.colored_label(ui.visuals().error_fg_color, error.message);
+        } else if let Some(status) = self.folder_flow.status {
+            status_label(ui, status);
+        }
     }
 
     pub(in crate::wizard) fn show_folder_flow(&mut self, ctx: &egui::Context) {
@@ -58,6 +79,7 @@ impl WizardApp {
         egui::TopBottomPanel::bottom("folder-actions")
             .frame(frame)
             .show(ctx, |ui| {
+                let mut save = false;
                 ui.horizontal(|ui| {
                     let flow = &mut self.folder_flow;
                     let back = ui.add_enabled(
@@ -73,6 +95,11 @@ impl WizardApp {
                     }
                     if !flow.busy() && !flow.modal_open() {
                         shell::register_region(ui, shell::Region::Footer, back.id);
+                    }
+                    if flow.can_save_for_later() {
+                        let save_job = ui.button(saved_job::SAVE).on_hover_text("Keep your choices for later. You’ll confirm sharing permission when you resume.");
+                        shell::register_region(ui, shell::Region::Footer, save_job.id);
+                        save = save_job.clicked();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if flow.test_in_progress() {
@@ -131,6 +158,9 @@ impl WizardApp {
                         }
                     });
                 });
+                if save {
+                    self.save_app_job(ctx);
+                }
             });
         if !self.folder_flow.open {
             ctx.request_repaint();
@@ -167,6 +197,8 @@ impl Flow {
         if self.busy() {
             let title = if self.test_in_progress() {
                 copy::TEST_RUNNING
+            } else if self.status == Some(saved_job::SAVING) {
+                "Save App Job"
             } else if self.discard_stage.is_some() || self.status == Some(copy::CLEANING_SOURCE) {
                 copy::CLEANING_SOURCE_TITLE
             } else if self.scan.is_none() {
@@ -415,7 +447,12 @@ impl Flow {
                     .num_columns(3)
                     .show(ui, |ui| {
                         for (index, &category) in CATEGORIES.iter().enumerate() {
-                            ui.radio_value(&mut self.draft.category, category, category);
+                            if ui
+                                .radio(self.draft.category == category, category)
+                                .clicked()
+                            {
+                                self.draft.category = category.to_owned();
+                            }
                             if (index + 1) % 3 == 0 {
                                 ui.end_row();
                             }

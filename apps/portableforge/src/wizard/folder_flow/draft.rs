@@ -1,11 +1,13 @@
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use portableforge_core::paf::{pad_package_version, valid_app_id, CATEGORIES};
 use portableforge_core::{Distribution, PafMetadata};
 
 use super::Page;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(super) enum Language {
     English,
     Multilingual,
@@ -20,6 +22,7 @@ impl Language {
     }
 }
 
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct Draft {
     pub(super) name: String,
     pub(super) publisher: String,
@@ -27,12 +30,13 @@ pub(super) struct Draft {
     pub(super) description: String,
     pub(super) version: String,
     pub(super) id: String,
-    pub(super) category: &'static str,
+    pub(super) category: String,
     pub(super) language: Option<Language>,
     pub(super) open_source: bool,
     pub(super) freeware: bool,
     pub(super) commercial_use: bool,
     pub(super) requires_admin: bool,
+    #[serde(skip)]
     pub(super) rights: bool,
 }
 
@@ -45,7 +49,7 @@ impl Default for Draft {
             description: String::new(),
             version: String::new(),
             id: String::new(),
-            category: "Utilities",
+            category: "Utilities".into(),
             language: None,
             open_source: false,
             freeware: false,
@@ -110,7 +114,7 @@ impl Draft {
                 Page::Package,
                 "Choose a package name with no spaces, such as WidgetPortable.",
             ))
-        } else if !CATEGORIES.contains(&self.category) {
+        } else if !CATEGORIES.contains(&self.category.as_str()) {
             Some((Page::Package, "Choose an app category."))
         } else if self.language.is_none() {
             Some((
@@ -140,7 +144,7 @@ impl Draft {
             base_app_name: "Program".into(),
             publisher: self.publisher.trim().into(),
             homepage: self.homepage.trim().into(),
-            category: self.category.into(),
+            category: self.category.clone(),
             description: self.description.trim().into(),
             language: self.language?.label().into(),
             shareable: self.rights,
