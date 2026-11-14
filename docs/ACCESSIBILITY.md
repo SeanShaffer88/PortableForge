@@ -2,9 +2,9 @@
 
 ## Appearance
 
-PortableForge uses the GitHub palettes from TesselGUI revision 2. **Appearance**
-offers System, GitHub Dark, GitHub Light and three text sizes. The wizard
-starts in GitHub Dark and remembers explicit choices locally. System uses the
+PortableForge defaults to Dark High Contrast for new settings. **Appearance**
+also offers System, GitHub Dark and GitHub Light. The wizard
+remembers explicit choices locally. System uses the
 desktop scheme reported by egui and falls back to GitHub Dark.
 
 On Windows, a contrast theme takes precedence. PortableForge reads native
@@ -35,11 +35,19 @@ PortableForge exposes native accessibility information through egui and
 AccessKit. Screen-reader behavior, including announcements of progress and
 validation, needs a separate Windows assistive-technology pass.
 
+## Activity and file selection
+
+**Activity** opens project progress in the current window. Close it to
+return focus to its opener. At compact widths, Activity takes the place of the
+current form until you close it. **Technical details** exposes available
+diagnostic messages separately. Windows contrast settings take precedence
+over the app appearance. File pickers stay inside the current window and
+accept keyboard navigation and typed paths.
+
 ## Text and layout
 
-Standard, Large and Extra large use 100%, 125% and 150% text zoom. The
-640 × 480 logical minimum is tested with populated controls, long paths,
-the artwork tabs, and paged review. A long path can wrap in the field and
+Drag a window corner to scale the window, text, and controls together.
+Long paths stay available in full. A long path can wrap in the field and
 opens in a full-value dialog when more room is needed. A copy action is
 available in that dialog.
 
@@ -54,17 +62,14 @@ plain backgrounds.
 
 The interface uses flat task surfaces and a fixed action strip. Task
 progress appears as status text. Geometry tests establish layout fit for
-the exercised states. The fit tests cover up to 150%. Physical DPI
-transitions, 200% text scaling, Windows contrast theme switching, and
+the exercised states. Physical DPI transitions, Windows contrast theme switching, and
 Narrator interaction require separate live checks.
 
 ## Build from a ZIP, app folder, or selected app files
 
 **Choose App Folder** and **Choose App Files** provide keyboard alternatives
 to dragging a source onto the first screen. **Choose App Files** accepts
-one ZIP or several files for the same app. **Guided** is the default.
-**Autonomous** checks the same information and starts the build once the
-required decisions are complete. Use **Cancel Preparation** to stop a ZIP
+one ZIP or several files for the same app. Review the suggested choices and choose **Build Installer** once the required decisions are complete. Use **Cancel Preparation** to stop a ZIP
 or file selection while it is being prepared. **Save for Later** returns to
 the source screen. **Resume App Package** reopens the saved selection for
 review.

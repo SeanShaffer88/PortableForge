@@ -14,8 +14,10 @@ use portableforge_core::review::Review;
 use portableforge_core::session::Phase;
 use portableforge_core::settings::{self, WizardDraft, WizardSettings};
 
+mod activity;
 mod artwork_ui;
 mod dense;
+mod file_picker;
 mod folder_flow;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod installer_test;
@@ -23,6 +25,7 @@ mod package_review;
 mod profiles;
 mod shell;
 mod theme;
+mod window_scale;
 
 pub struct WizardApp {
     profile_flow: profiles::ProfileFlow,
@@ -30,6 +33,7 @@ pub struct WizardApp {
     artwork: artwork_ui::Editor,
     theme_state: theme::State,
     shell: shell::State,
+    activity: activity::Activity,
     step: usize,
     show_details: bool,
     detail_page: usize,
@@ -40,6 +44,7 @@ pub struct WizardApp {
     safety_page: usize,
     recent_page: usize,
     applied_layout_zoom: f32,
+    proportional_window: bool,
     installer_path: String,
     app_name: String,
     description: String,
@@ -103,6 +108,7 @@ impl Default for WizardApp {
             artwork: artwork_ui::Editor::default(),
             theme_state: theme::State::default(),
             shell: shell::State::default(),
+            activity: activity::Activity::default(),
             step: 0,
             show_details: false,
             detail_page: 0,
@@ -113,6 +119,7 @@ impl Default for WizardApp {
             safety_page: 0,
             recent_page: 0,
             applied_layout_zoom: 0.0,
+            proportional_window: false,
             installer_path: String::new(),
             app_name: String::new(),
             description: String::new(),
@@ -249,24 +256,6 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Open a folder in the computer's file manager. Best effort — the
-/// wizard always prints the path too, so a failure is never a trap.
-fn open_folder(path: &std::path::Path) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let program = "explorer";
-    #[cfg(target_os = "macos")]
-    let program = "open";
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    let program = "xdg-open";
-    std::process::Command::new(program)
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("We could not open {}: {e}", path.display()))
-}
-
-/// Where session folders live: a `PortableForge Sessions` folder in
-/// the person's home folder (current directory as a last resort).
 fn sessions_base() -> std::path::PathBuf {
     if let Some(root) = test_state_root() {
         return root.join("sessions");
@@ -458,15 +447,15 @@ impl WizardApp {
         out
     }
 
-    fn export_run_log(&mut self) {
-        let text = self.run_log_text();
-        let picked = rfd::FileDialog::new()
-            .set_title("Save the run log")
-            .set_file_name("portableforge-run-log.txt")
-            .add_filter("Text file", &["txt"])
-            .save_file();
-        if let Some(path) = picked {
-            match std::fs::write(&path, text) {
+    fn export_run_log(&mut self, opener: &egui::Response) {
+        let picked = file_picker::choose(
+            opener,
+            "Save the run log",
+            file_picker::Mode::Save("portableforge-run-log.txt", &["txt"]),
+            None,
+        );
+        if let Some(path) = picked.and_then(|paths| paths.into_iter().next()) {
+            match file_picker::save_new(&path, self.run_log_text()) {
                 Ok(()) => self
                     .log
                     .push(format!("Run log saved to {}.", path.display())),
@@ -592,15 +581,8 @@ impl WizardApp {
             folder.join("SandMan.exe").is_file().then_some(folder)
         });
         ui.horizontal_wrapped(|ui| {
-            let open = ui
-                .add_enabled(folder.is_some(), egui::Button::new("Open bundled test box folder"))
-                .on_disabled_hover_text("The portable test box files are missing from this copy.");
-            if open.clicked() {
-                if let Some(folder) = folder {
-                    if let Err(error) = open_folder(&folder) {
-                        self.log.push(error);
-                    }
-                }
+            if let Some(folder) = folder {
+                dense::view_text(ui, "View bundled test box location", "Bundled test box", &folder.display().to_string(), true);
             }
             dense::view_text(
                 ui,
@@ -1099,6 +1081,14 @@ impl WizardApp {
 
 impl eframe::App for WizardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.update_wizard(ctx);
+        self.activity.finish_frame(ctx);
+        file_picker::show(ctx);
+    }
+}
+
+impl WizardApp {
+    fn update_wizard(&mut self, ctx: &egui::Context) {
         self.apply_layout_zoom(ctx);
         self.theme_state.apply(ctx, self.settings.appearance);
         if self.finished {
@@ -1123,8 +1113,21 @@ impl eframe::App for WizardApp {
             ctx.request_repaint();
         }
         self.persist_if_due();
-        let modal_open = self.artwork.is_open() || self.folder_flow.modal_open();
-        if !modal_open && !close_after_cleanup {
+        self.record_activity();
+        let modal_open = self.artwork.is_open()
+            || self.folder_flow.modal_open()
+            || file_picker::is_active(ctx)
+            || ctx.memory(|memory| memory.top_modal_layer().is_some());
+        if self.activity.compact(ctx) && !modal_open && !close_after_cleanup {
+            self.activity.handle_escape(ctx);
+            if self.activity.compact(ctx) {
+                self.activity.handle_compact_focus(ctx);
+                self.show_activity_compact(ctx);
+                self.show_shell_popup(ctx);
+                return;
+            }
+        }
+        if !modal_open && !close_after_cleanup && !self.activity.handle_escape(ctx) {
             self.handle_shell_keys(ctx);
         }
         self.update_heading_focus(ctx);
@@ -1148,9 +1151,6 @@ impl eframe::App for WizardApp {
             }
         }
         if self.folder_flow.open {
-            if !close_after_cleanup {
-                self.folder_flow.advance_autonomously(ctx);
-            }
             self.show_folder_flow(ctx);
             self.show_shell_popup(ctx);
             self.folder_flow.show_artwork(ctx);
@@ -1237,6 +1237,7 @@ impl eframe::App for WizardApp {
         if self.step == shown_step {
             self.update_heading_focus(ctx);
         }
+        self.show_activity_side(ctx);
         egui::CentralPanel::default()
             .frame(dense::content_frame(ctx))
             .show(ctx, |ui| {
@@ -1517,17 +1518,13 @@ impl eframe::App for WizardApp {
                         self.review.items = items;
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            if dense::explained(ui
-                                .button("Save these choices to a file"), "Keep the choices you made here in a file, so they can be used again or sent with a problem report.")
-                                .clicked()
-                            {
-                                if let Some(path) = rfd::FileDialog::new()
-                                    .set_title("Save these choices")
-                                    .set_file_name("review.json")
-                                    .add_filter("Choices file", &["json"])
-                                    .save_file()
+                            let save = dense::explained(ui
+                                .button("Save these choices to a file"), "Keep the choices you made here in a file, so they can be used again or sent with a problem report.");
+                            if let Some(path) = file_picker::choose(
+                                    &save, "Save these choices", file_picker::Mode::Save("review.json", &["json"]), None,
+                                ).and_then(|paths| paths.into_iter().next())
                                 {
-                                    match std::fs::write(&path, self.review.to_json()) {
+                                    match file_picker::save_new(&path, self.review.to_json()) {
                                         Ok(()) => self.log.push(format!(
                                             "Choices saved to {}",
                                             path.display()
@@ -1537,15 +1534,11 @@ impl eframe::App for WizardApp {
                                             .push(format!("Saving the choices failed: {e}")),
                                     }
                                 }
-                            }
-                            if !verified && dense::explained(ui
-                                .button("Load choices from a file"), "Bring back choices saved earlier and apply them to this list.")
-                                .clicked()
-                            {
-                                if let Some(path) = rfd::FileDialog::new()
-                                    .set_title("Load choices")
-                                    .add_filter("Choices file", &["json"])
-                                    .pick_file()
+                            if !verified {
+                                let load = dense::explained(ui
+                                    .button("Load choices from a file"), "Bring back choices saved earlier and apply them to this list.");
+                                if let Some(path) = file_picker::choose(&load, "Load choices", file_picker::Mode::File(&["json"]), None)
+                                    .and_then(|paths| paths.into_iter().next())
                                 {
                                     match std::fs::read_to_string(&path)
                                         .map_err(|e| e.to_string())
@@ -1580,7 +1573,7 @@ impl eframe::App for WizardApp {
                         });
                     }
                     self.show_app_intake_picker(ui);
-                    let setup_label = ui.label("Setup file (.exe or .msi)");
+                    let setup_label = ui.label(egui::RichText::new("Setup file (.exe or .msi)").strong());
                     ui.horizontal(|ui| {
                         let width = dense::width_with_button(ui, "Browse…");
                         let (response, view) = dense::path_edit(ui, &mut self.installer_path, width);
@@ -1592,22 +1585,15 @@ impl eframe::App for WizardApp {
                         {
                             self.setup_changed();
                         }
-                        if dense::explained(ui
-                            .button("Browse…"), "Open a file chooser to find the setup file.")
-                            .clicked()
-                        {
-                            let mut dialog = rfd::FileDialog::new()
-                                .set_title("Pick the program's setup file")
-                                .add_filter("Setup files", &["exe", "msi"]);
-                            if let Some(dir) = picker_start_dir(&self.installer_path) {
-                                dialog = dialog.set_directory(dir);
-                            }
-                            if let Some(path) = dialog.pick_file() {
+                        let browse = dense::explained(ui
+                            .button("Browse…"), "Open a file chooser to find the setup file.");
+                        if let Some(path) = file_picker::choose(&browse, "Pick the program's setup file", file_picker::Mode::File(&["exe", "msi"]),
+                            browse.clicked().then(|| picker_start_dir(&self.installer_path)).flatten(),
+                        ).and_then(|paths| paths.into_iter().next()) {
                                 self.installer_path = path.to_string_lossy().into_owned();
                                 self.settings
                                     .remember_installer(&self.installer_path.clone());
                                 self.setup_changed();
-                            }
                         }
                         dense::view_text(ui, "View path", "Setup path", &self.installer_path, view);
                     });
@@ -1617,13 +1603,8 @@ impl eframe::App for WizardApp {
                         let name = std::path::Path::new(&typed).file_name().unwrap_or_default().to_string_lossy();
                         let description = format!("Ready · {name} · {}", format_size(size));
                         dense::explained(ui.add(egui::Label::new(&description).truncate()), description);
-                    } else if let Some(problem) = input.problem() {
-                        let color = if input == SetupInput::Empty {
-                            ui.visuals().weak_text_color()
-                        } else {
-                            ui.visuals().error_fg_color
-                        };
-                        ui.colored_label(color, problem);
+                    } else if let Some(problem) = input.problem().filter(|_| input != SetupInput::Empty) {
+                        ui.colored_label(ui.visuals().error_fg_color, problem);
                     }
                     ui.horizontal_wrapped(|ui| {
                         if !guided_msi
@@ -1744,33 +1725,16 @@ impl eframe::App for WizardApp {
                     }
                     if step.id == "done" {
                         ui.add_space(6.0);
-                        if let Some(dir) = self.built_dir.clone() {
-                            if dense::explained(ui
-                                .button("Open the folder with your portable copy"), "Open the published package folder to find the portable app and its files.")
-                                .clicked()
-                            {
-                                if let Err(e) = open_folder(&dir) {
-                                    self.log.push(e);
-                                }
-                            }
+                        if let Some(dir) = &self.built_dir {
+                            dense::view_text(ui, "View portable copy location", "Portable copy", &dir.display().to_string(), true);
                         }
-                        if let Some(layout) = self.layout.clone() {
-                            if dense::explained(ui
-                                .button("Open the work folder"), "Open the work folder to see the capture records and logs for this session.")
-                                .clicked()
-                            {
-                                if let Err(e) = open_folder(&layout.root) {
-                                    self.log.push(e);
-                                }
-                            }
+                        if let Some(layout) = &self.layout {
+                            dense::view_text(ui, "View work folder location", "Work folder", &layout.root.display().to_string(), true);
                         }
                         ui.add_space(6.0);
-                        if dense::explained(ui
-                            .button("Save the run log"), "Save one plain text file with everything this run did and decided — handy to keep, or to send to whoever helps you.")
-                            .clicked()
-                        {
-                            self.export_run_log();
-                        }
+                        let save = dense::explained(ui
+                            .button("Save the run log"), "Save one plain text file with everything this run did and decided — handy to keep, or to send to whoever helps you.");
+                        self.export_run_log(&save);
                     }
                 }
                 "name" => {
@@ -1855,8 +1819,9 @@ impl eframe::App for WizardApp {
 pub fn run_gui() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1160.0, 800.0])
-            .with_min_inner_size(dense::MIN_CONTENT)
+            .with_inner_size(window_scale::CANVAS)
+            .with_resizable(cfg!(windows))
+            .with_maximize_button(false)
             .with_title("PortableForge"),
         ..Default::default()
     };
@@ -1865,7 +1830,14 @@ pub fn run_gui() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             theme::install_fonts(&cc.egui_ctx);
-            Ok(Box::new(WizardApp::default()))
+            cc.egui_ctx
+                .options_mut(|options| options.zoom_with_keyboard = false);
+            #[cfg(windows)]
+            window_scale::install(cc)?;
+            Ok(Box::new(WizardApp {
+                proportional_window: true,
+                ..WizardApp::default()
+            }))
         }),
     )
 }

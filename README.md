@@ -6,7 +6,7 @@ PortableForge is a PortableApps.com development workspace. Drop a ZIP, unpacked 
 
 ## Who it is for
 
-The desktop wizard guides capture, review, and packaging. GitHub Dark is the default. **Appearance** also offers System and GitHub Light, plus three text sizes. Use **Commands** or **Ctrl+K** to find an action and **Status and details** for diagnostics.
+The desktop wizard guides capture, review, and packaging. Dark High Contrast is the default for new settings. **Appearance** also offers System, GitHub Dark, and GitHub Light. Drag a window corner to scale the workspace and text together. Use **Commands** or **Ctrl+K** to find an action and **Status and details** for diagnostics.
 
 ## What you need
 
@@ -25,6 +25,12 @@ The roadmap keeps the current step visible. On wider windows it sits on the
 left, with configuration on the right and actions at the bottom. Narrow
 windows move the roadmap above the configuration. Focus a field or point to it to read plain-language help in the bottom status bar.
 
+Choose **Activity** for project progress and **Technical details** for
+diagnostic messages. The panel opens on the right when space allows and
+uses the same workspace at smaller widths. File selection and review stay in
+PortableForge. During setup capture and installer testing, interact with the
+isolated setup or app when prompted.
+
 ## How it works
 
 In the standard package flow, select a setup file and review the system checks. Install and try the app in the selected test environment. Close the app and collect the final capture before closing Windows Sandbox. Open **Review Your Package** to see the selected source and next steps. Review captured findings, enter the app details and sharing choice, and prepare the package folder. The wizard displays recorded test results when available.
@@ -32,10 +38,10 @@ In the standard package flow, select a setup file and review the system checks. 
 ## Build from a ZIP, app folder, or app files
 
 1. Drop one ZIP or app folder on the first page, or select the files for one app together. For loose files, include the app's executable and its companion files from the same folder. To include subfolders, drop the whole app folder or its ZIP. Setup files still use the capture workflow.
-2. In **Guided**, use **Review Your Package** to review the suggested program, name, version, publisher, and icon. Choose the main program if several look plausible. Fill in missing details, confirm permission to include the files, and select the official Launcher Generator 2.2.9 and Installer 3.9.19 folders.
-3. Choose a new output folder and build. In **Autonomous**, PortableForge starts the build once the required choices and checks are complete. The installer and build receipt appear together in the output folder.
+2. Open **Review Your Package** to check the suggested program, name, version, publisher, and icon. Choose the main program if several look plausible. Fill in missing details, confirm permission to include the files, and select the official Launcher Generator 2.2.9 and Installer 3.9.19 folders.
+3. Choose a new output folder and select **Build Installer** when your review is complete. The installer and build receipt appear together in the output folder.
 
-In **Autonomous**, use **Save for Later** to pause one app package. Choose **Resume App Package** from the first page to scan the original files again and pick up your saved choices. Review the current files and confirm permission to include them before building. Artwork you applied, including the custom icon and installer left pane, returns with the saved start file. The saved job stays available after building. Use **Remove Saved Job** to clear it.
+Use **Save for Later** to pause one app package. Choose **Resume App Package** from the first page to scan the original files again and pick up your saved choices. Review the current files and confirm permission to include them before building. Artwork you applied, including the custom icon and installer left pane, returns with the saved start file. The saved job stays available after building. Use **Remove Saved Job** to clear it.
 
 ZIP and loose-file staging on Windows x64 leaves your originals intact and never runs them. ZIPs use standard stored or deflated files. If PortableForge cannot open an archive format, extract it with a trusted tool and drop the resulting app folder.
 
@@ -57,7 +63,7 @@ Use printable ASCII for the capture and build paths. Leave out `$`, `%`, single 
 
 ### Start the bundled portable test box
 
-PortableForge reuses a compatible running Sandboxie-Plus engine for verified capture and installer testing. To start the bundled Sandboxie-Plus 1.18.8 x64 portable files, choose **Open bundled test box folder** and copy the whole folder to a new protected local location under Program Files. Open `SandMan.exe` from that copy and approve its administrator prompts to start the Sandboxie-Plus service and driver. Return to **Capture with Sandboxie-Plus** and choose **Check prerequisites**. After using the portable engine, close SandMan and approve its service cleanup prompt. [Sandboxie-Plus portable startup and cleanup](https://github.com/sandboxie-plus/Sandboxie/blob/v1.18.8/SandboxiePlus/SandMan/SandMan.cpp)
+PortableForge reuses a compatible running Sandboxie-Plus engine for verified capture and installer testing. To start the bundled Sandboxie-Plus 1.18.8 x64 portable files, choose **View bundled test box location** and copy its path. Copy the whole folder to a new protected local location under Program Files. Open `SandMan.exe` from that copy and approve its administrator prompts to start the Sandboxie-Plus service and driver. Return to **Capture with Sandboxie-Plus** and choose **Check prerequisites**. After using the portable engine, close SandMan and approve its service cleanup prompt. [Sandboxie-Plus portable startup and cleanup](https://github.com/sandboxie-plus/Sandboxie/blob/v1.18.8/SandboxiePlus/SandMan/SandMan.cpp)
 
 ### Customize package artwork
 
@@ -98,17 +104,23 @@ Your answer is written into the package's notes, so anyone can see which kind of
 - The official PortableApps.com Launcher and Installer tools are used at the building step (they are separate programs, kept under their own licenses — see the notes inside any package PortableForge makes). They are checked by fingerprint before every use.
 - TesselGUI revision 2 uses flat task surfaces, one finding per review page, and a consistent status and action strip. The generated Rust tokens are used under the project's MIT license. [Pinned TesselGUI source](https://github.com/SeanShaffer88/TesselGUI/tree/a689a5e3bfadf9e1e77a3acea826bea5cc717e94)
 
-## Packaging roadmap
+## Packaging references
 
-The planned workspace puts package tools and icon preparation within reach
-of the capture and review steps. Signing and publishing are planned as
-explicit actions with user-selected credentials and destinations.
+- **Start or customize a project.** PortableForge writes the folder tree and app metadata from the guided fields. To build a package by hand, start with the official Application Template. Browse AppConfigs for examples of metadata, launcher settings, installer settings, and custom NSIS code. [PortableApps.com development resources](https://portableapps.com/development) · [Format specification](https://portableapps.com/development/portableapps.com_format) · [AppConfigs](https://github.com/PortableApps/AppConfigs)
+- **Prepare the launcher.** The launcher can preserve settings and adjust paths when the app moves. The Launcher Generator uses NSIS to compile the launcher. Finish and validate the package before passing its root folder to the Installer builder. [Launcher manual](https://portableapps.com/manuals/PortableApps.comLauncher/) · [Installer builder](https://portableapps.com/apps/development/portableapps.com_installer)
+- **Verify what you distribute.** Compare the source file's SHA-256 with a fingerprint published by its developer when available. On Windows, run `Get-FileHash -Algorithm SHA256 -LiteralPath 'C:\path\to\file.exe'` for a local check. The PortableForge build receipt records the finished installer's SHA-256. Test installation and settings persistence before sharing.
+- **Check reputation by hash.** Search an installer SHA-256 on VirusTotal for existing scan results. Review its sharing terms before submitting a file. [VirusTotal documentation](https://docs.virustotal.com/docs/how-it-works)
+- **Get help.** The official development forum can help with package conventions and app-specific behavior. [Development resources and forum](https://portableapps.com/development)
 
 ## Command line (optional)
 
 The window guides the capture and review. For scripts and testing, each
 step is also a command. The commands below finish installers and reuse
 approved captures. Run `portableforge help` for the list.
+
+For generated installers that honor NSIS command-line options, `/S` runs
+setup silently. Put an absolute, unquoted `/D=` destination last. Test the
+exact installer you plan to deploy. [NSIS installer options](https://nsis.sourceforge.io/Docs/Chapter3.html#installerusage)
 
 ### Build an installer without clicking through the maker
 

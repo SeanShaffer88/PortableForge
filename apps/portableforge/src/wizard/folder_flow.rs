@@ -16,7 +16,7 @@ use portableforge_core::folder::{
 };
 use portableforge_core::guide::folder_flow as copy;
 
-use super::{artwork_ui, WizardApp};
+use super::{activity::Notice, artwork_ui, file_picker, WizardApp};
 
 mod draft;
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -41,13 +41,6 @@ pub(super) enum Page {
     Done,
 }
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-enum IntakeMode {
-    #[default]
-    Guided,
-    Autonomous,
-}
-
 #[derive(Clone, Copy)]
 enum DiscardStage {
     Back,
@@ -66,8 +59,6 @@ pub(super) struct Flow {
     source_kind: Option<SourceKind>,
     restoring: Option<SavedJob>,
     staged: Option<Arc<StagedInput>>,
-    mode: IntakeMode,
-    build_attempted: bool,
     scan: Option<Arc<FolderScan>>,
     selected: Option<PathBuf>,
     inferred_name: bool,
@@ -221,6 +212,32 @@ fn intake_failure(error: ScanError) -> Result<Outcome, Failure> {
 }
 
 impl Flow {
+    pub(super) fn activity_notice(&self) -> Notice {
+        if self.error.is_some() {
+            return Notice::Problem("The current task hit a problem. Check the suggested fix.");
+        }
+        if let Some(status) = self.status {
+            return Notice::Progress(status);
+        }
+        Notice::Progress(match self.page() {
+            Page::Done if self.busy() => {
+                "The installer is built. The current check is still running."
+            }
+            Page::Done => "The installer is ready.",
+            _ if self.busy() => "PortableForge is preparing your package.",
+            Page::Program => "Choose the file that opens the app.",
+            Page::App | Page::About | Page::Package => "Review the app details.",
+            Page::Rights => "Review permission to include the files.",
+            Page::Files => "Choose the tools and output folder.",
+            Page::Findings => "Review the findings.",
+            Page::Review => "Review the source files and package choices.",
+        })
+    }
+
+    pub(super) fn activity_problem(&self) -> Option<&str> {
+        self.error.as_ref().map(|failure| failure.detail.as_str())
+    }
+
     pub(super) fn busy(&self) -> bool {
         self.job.is_some() || self.discard_stage.is_some()
     }
@@ -368,7 +385,6 @@ impl Flow {
         *self = Self {
             open: true,
             source,
-            mode: self.mode,
             launcher_tools,
             installer_tools,
             ..Self::default()
@@ -422,9 +438,7 @@ impl Flow {
             PathBuf::new()
         };
         self.reset_source(source);
-        if self.mode == IntakeMode::Autonomous {
-            self.original_inputs = paths.clone();
-        }
+        self.original_inputs = paths.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         self.start(ctx, copy::CHECKING_SELECTION, move |tx, ctx| {
@@ -524,9 +538,7 @@ impl Flow {
             return;
         }
         self.draft = Draft::default();
-        if self.mode == IntakeMode::Autonomous {
-            self.draft.language = Some(draft::Language::English);
-        }
+        self.draft.language = Some(draft::Language::English);
         self.artwork = artwork_ui::Editor::default();
         let properties = selection.properties;
         self.draft.name = if properties.name_inferred && self.staged.is_some() {
@@ -623,8 +635,7 @@ impl Flow {
     }
 
     fn can_save_for_later(&self) -> bool {
-        self.mode == IntakeMode::Autonomous
-            && matches!(self.page, Page::Review | Page::Program)
+        matches!(self.page, Page::Review | Page::Program)
             && self.source_kind.is_some()
             && self
                 .scan
@@ -703,7 +714,6 @@ impl Flow {
             }
             Ok(Outcome::LoadedSavedJob(result)) => match result {
                 Ok(saved) => {
-                    self.mode = IntakeMode::Autonomous;
                     self.inspect(ctx, saved.inputs.clone(), false, Some(saved.kind));
                     if self.busy() {
                         self.restoring = Some(saved);
@@ -738,10 +748,9 @@ impl Flow {
                     self.restore_after_scan(ctx, saved, inspection.selection);
                 } else if let Some(selection) = inspection.selection {
                     self.accept_selection(ctx, selection);
-                } else if self.mode == IntakeMode::Autonomous
-                    && self
-                        .blocker()
-                        .is_some_and(|(page, _)| page == Page::Program)
+                } else if self
+                    .blocker()
+                    .is_some_and(|(page, _)| page == Page::Program)
                 {
                     self.page = Page::Program;
                 }
@@ -863,22 +872,6 @@ impl Flow {
             && !self.busy()
     }
 
-    fn autonomous_ready(&self) -> bool {
-        self.mode == IntakeMode::Autonomous
-            && !self.build_attempted
-            && self.result.is_none()
-            && self.build_ready()
-    }
-
-    pub(super) fn advance_autonomously(&mut self, ctx: &egui::Context) {
-        if self.autonomous_ready()
-            && !ctx.input(|input| input.viewport().close_requested())
-            && ctx.memory(|memory| memory.top_modal_layer().is_none())
-        {
-            self.build(ctx);
-        }
-    }
-
     #[cfg(all(windows, target_arch = "x86_64"))]
     pub(super) fn build(&mut self, ctx: &egui::Context) {
         if !self.build_ready() {
@@ -897,7 +890,6 @@ impl Flow {
         let staged = self.staged.clone();
         let control = FolderBuildControl::default();
         self.control = Some(control.clone());
-        self.build_attempted = true;
         self.start(ctx, "Checking the app files…", move |tx, ctx| {
             let _staged = staged;
             use portableforge_core::folder::{build_with_artwork, FolderBuildRequest};
@@ -986,28 +978,37 @@ impl Flow {
 }
 
 impl WizardApp {
-    fn save_app_job(&mut self, ctx: &egui::Context) {
+    fn choose_save_location(&mut self, opener: &egui::Response) {
+        let path = saved_job::path(&self.settings_path);
+        let revision = if opener.clicked() {
+            match saved_job::revision(&path) {
+                Ok(None) => return self.save_app_job(&opener.ctx, None),
+                Ok(Some(revision)) => Some(revision),
+                Err(error) => {
+                    self.folder_flow.error =
+                        Some(Failure::new("Could not access the saved job.", error));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(revision) = file_picker::confirmed(
+            opener,
+            "Replace saved job?",
+            "Save this job in place of the currently saved app job?",
+            revision,
+        ) {
+            self.save_app_job(&opener.ctx, Some(revision));
+        }
+    }
+
+    fn save_app_job(&mut self, ctx: &egui::Context, revision: Option<saved_job::Revision>) {
         let flow = &mut self.folder_flow;
         if !flow.can_save_for_later() {
             return;
         }
         let path = saved_job::path(&self.settings_path);
-        let revision = match saved_job::revision(&path) {
-            Ok(revision) => revision,
-            Err(error) => {
-                flow.error = Some(Failure::new("Could not access the saved job.", error));
-                return;
-            }
-        };
-        let replace = revision.is_some();
-        if replace
-            && !confirm_saved_job(
-                "Replace saved job?",
-                "Save this job in place of the currently saved app job?",
-            )
-        {
-            return;
-        }
         let job = SavedJob::from_flow(flow, flow.source_kind.expect("inspected source"));
         flow.start(ctx, saved_job::SAVING, move |_, _| {
             saved_job::save(&path, revision, &job).map_err(|error| {
@@ -1040,19 +1041,29 @@ impl WizardApp {
         }
     }
 
-    fn remove_app_job(&mut self) {
+    fn remove_app_job(&mut self, opener: &egui::Response) {
         let path = saved_job::path(&self.settings_path);
-        let result = saved_job::revision(&path).and_then(|revision| {
-            if let Some(revision) = revision {
-                if confirm_saved_job(
-                    "Remove saved job?",
-                    "Remove the saved choices? Your app files stay in place.",
-                ) {
-                    saved_job::remove(&path, revision)?;
+        let revision = if opener.clicked() {
+            match saved_job::revision(&path) {
+                Ok(revision) => revision,
+                Err(error) => {
+                    self.folder_flow.error =
+                        Some(Failure::new("Could not access the saved job.", error));
+                    return;
                 }
             }
-            Ok(())
-        });
+        } else {
+            None
+        };
+        let Some(revision) = file_picker::confirmed(
+            opener,
+            "Remove saved job?",
+            "Remove the saved choices? Your app files stay in place.",
+            revision,
+        ) else {
+            return;
+        };
+        let result = saved_job::remove(&path, revision);
         self.folder_flow.error = result.err().map(|error| {
             Failure::new(
                 "Could not remove the saved job. Open Show Details for the reason.",
@@ -1062,17 +1073,25 @@ impl WizardApp {
         self.folder_flow.status = None;
     }
 
-    pub(super) fn choose_app_folder(&mut self, ctx: &egui::Context) {
-        let dialog = rfd::FileDialog::new().set_title("Choose the unpacked app folder");
-        if let Some(path) = dialog.pick_folder() {
-            self.inspect_app_inputs(ctx, vec![path], false);
+    pub(super) fn choose_app_folder(&mut self, opener: &egui::Response) {
+        if let Some(paths) = file_picker::choose(
+            opener,
+            "Choose the unpacked app folder",
+            file_picker::Mode::Folder,
+            None,
+        ) {
+            self.inspect_app_inputs(&opener.ctx, paths, false);
         }
     }
 
-    pub(super) fn choose_app_files(&mut self, ctx: &egui::Context) {
-        let dialog = rfd::FileDialog::new().set_title("Choose a ZIP or files for one app");
-        if let Some(paths) = dialog.pick_files() {
-            self.inspect_app_inputs(ctx, paths, false);
+    pub(super) fn choose_app_files(&mut self, opener: &egui::Response) {
+        if let Some(paths) = file_picker::choose(
+            opener,
+            "Choose a ZIP or files for one app",
+            file_picker::Mode::Files(&[]),
+            None,
+        ) {
+            self.inspect_app_inputs(&opener.ctx, paths, false);
         }
     }
 
@@ -1121,15 +1140,6 @@ impl WizardApp {
         }
         self.folder_flow.inspect(ctx, paths, allow_setup, None);
     }
-}
-
-fn confirm_saved_job(title: &str, description: &str) -> bool {
-    rfd::MessageDialog::new()
-        .set_title(title)
-        .set_description(description)
-        .set_buttons(rfd::MessageButtons::YesNo)
-        .show()
-        == rfd::MessageDialogResult::Yes
 }
 
 #[cfg(test)]
@@ -1249,32 +1259,21 @@ mod tests {
         assert!(!flow.build_ready());
     }
 
+    #[cfg(all(windows, target_arch = "x86_64"))]
     #[test]
-    fn autonomous_requires_a_ready_review_and_never_retries_or_remembers_permission() {
+    fn a_ready_review_waits_for_an_explicit_build() {
         let mut wizard = populated();
-        let flow = &mut wizard.folder_flow;
-        assert_eq!(flow.mode, IntakeMode::Guided);
-        assert!(!flow.autonomous_ready());
-        flow.mode = IntakeMode::Autonomous;
-        flow.draft.rights = false;
-        assert!(!flow.autonomous_ready());
-        flow.draft.rights = true;
-        let selected = flow.selected.take();
-        assert!(!flow.autonomous_ready());
-        flow.selected = selected;
-        flow.page = Page::App;
-        assert!(!flow.autonomous_ready());
-        flow.page = Page::Review;
-        assert_eq!(
-            flow.autonomous_ready(),
-            cfg!(all(windows, target_arch = "x86_64"))
-        );
-        flow.build_attempted = true;
-        assert!(!flow.autonomous_ready());
-        flow.reset_source(PathBuf::from("new source"));
-        assert_eq!(flow.mode, IntakeMode::Autonomous);
-        assert!(!flow.draft.rights);
-        assert!(!flow.autonomous_ready());
+        let ctx = egui::Context::default();
+        super::super::theme::install_fonts(&ctx);
+        let mut frame = eframe::Frame::_new_kittest();
+        for _ in 0..3 {
+            assert!(wizard.folder_flow.build_ready());
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                eframe::App::update(&mut wizard, ctx, &mut frame);
+            });
+            assert!(!wizard.folder_flow.busy());
+            assert!(wizard.folder_flow.result.is_none());
+        }
     }
 
     #[test]
@@ -1386,7 +1385,6 @@ mod tests {
             });
             portableforge_core::settings::save(&wizard.settings_path, &wizard.settings).unwrap();
             let setup_draft = std::fs::read(&wizard.settings_path).unwrap();
-            wizard.folder_flow.mode = IntakeMode::Autonomous;
             wizard.inspect_app_inputs(&ctx, paths.clone(), false);
             finish_folder_work(&mut wizard.folder_flow, &ctx);
             let flow = &mut wizard.folder_flow;
@@ -1395,12 +1393,11 @@ mod tests {
             flow.draft.name = "Reviewed Widget".into();
             flow.draft.version = "4.1".into();
             flow.draft.rights = true;
-            flow.build_attempted = true;
             flow.launcher_tools = fixture.root.join("Launcher");
             flow.installer_tools = fixture.root.join("Installer");
             flow.output_parent = fixture.root.join("Output");
             let first_stage = flow.staged.as_ref().unwrap().root().to_owned();
-            wizard.save_app_job(&ctx);
+            wizard.save_app_job(&ctx, None);
             finish_folder_work(&mut wizard.folder_flow, &ctx);
             assert!(!wizard.folder_flow.open);
             assert!(!first_stage.exists());
@@ -1432,8 +1429,6 @@ mod tests {
             assert_eq!(flow.installer_tools, fixture.root.join("Installer"));
             assert_eq!(flow.output_parent, fixture.root.join("Output"));
             assert!(!flow.draft.rights);
-            assert!(!flow.build_attempted);
-            assert!(!flow.autonomous_ready());
             assert!(reopened.installer_path.is_empty());
             assert!(file.is_file());
             reopened.folder_flow.back();
@@ -1455,7 +1450,6 @@ mod tests {
                 SourceKind::Folder => unreachable!(),
             };
             let mut wizard = fixture.wizard();
-            wizard.folder_flow.mode = IntakeMode::Autonomous;
             wizard.inspect_app_inputs(&ctx, paths, false);
             finish_folder_work(&mut wizard.folder_flow, &ctx);
             let initial_stage = wizard
@@ -1473,7 +1467,7 @@ mod tests {
             )
             .unwrap();
             wizard.folder_flow.artwork.set_applied(artwork.clone());
-            wizard.save_app_job(&ctx);
+            wizard.save_app_job(&ctx, None);
             finish_folder_work(&mut wizard.folder_flow, &ctx);
             assert!(!initial_stage.exists());
             drop(wizard);
@@ -1552,7 +1546,6 @@ mod tests {
         let mut wizard = fixture.wizard();
         let extra = fixture.folder.join("Other.exe");
         std::fs::write(&extra, inert_desktop_pe()).unwrap();
-        wizard.folder_flow.mode = IntakeMode::Autonomous;
         wizard.inspect_app_inputs(&ctx, vec![fixture.folder.clone()], false);
         finish_folder_work(&mut wizard.folder_flow, &ctx);
         assert_eq!(wizard.folder_flow.page, Page::Program);
@@ -1561,7 +1554,7 @@ mod tests {
         finish_folder_work(&mut wizard.folder_flow, &ctx);
         wizard.folder_flow.draft.name = "Other Reviewed".into();
         wizard.folder_flow.artwork.set_applied(job_artwork(true));
-        wizard.save_app_job(&ctx);
+        wizard.save_app_job(&ctx, None);
         finish_folder_work(&mut wizard.folder_flow, &ctx);
 
         let mut reopened = fixture.wizard();
@@ -1853,8 +1846,29 @@ mod tests {
         assert!(flow.artwork.artwork().is_none());
     }
 
+    fn assert_visible_text(
+        output: &egui::FullOutput,
+        bounds: egui::Rect,
+        label: &str,
+    ) -> egui::Rect {
+        let shape = output
+            .shapes
+            .iter()
+            .find(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == label)
+            })
+            .unwrap_or_else(|| panic!("Missing {label:?} at {bounds:?}"));
+        let rect = shape.shape.visual_bounding_rect();
+        let visible = bounds.intersect(shape.clip_rect).expand(1.0);
+        assert!(
+            visible.contains_rect(rect),
+            "{label:?} clipped at {bounds:?}"
+        );
+        rect
+    }
+
     #[test]
-    fn folder_views_fit_at_minimum_size_at_all_text_sizes() {
+    fn folder_views_fit_at_minimum_size_and_with_activity() {
         for scale in [1.0, 1.25, 1.5] {
             let fixture = AppJobFixture::new();
             let mut wizard = populated();
@@ -1895,28 +1909,20 @@ mod tests {
                 draw();
                 let output = draw();
                 for label in [
-                    copy::GUIDED,
-                    copy::AUTONOMOUS,
+                    "Archive or program files",
+                    "Help me choose",
                     copy::CHOOSE_FILES,
                     copy::CHOOSE_FOLDER,
                     saved_job::RESUME,
                     saved_job::REMOVE,
                     "Pick up where I left off",
                 ] {
-                    let shape = output.shapes.iter().find(|shape| {
-                        matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == label)
-                    }).unwrap_or_else(|| panic!("Missing intake action {label:?} at {scale}"));
-                    assert!(bounds
-                        .intersect(shape.clip_rect)
-                        .expand(1.0)
-                        .contains_rect(shape.shape.visual_bounding_rect()));
+                    assert_visible_text(&output, bounds, label);
                 }
             }
             wizard.folder_flow.open = true;
-            wizard.folder_flow.mode = IntakeMode::Autonomous;
             wizard.folder_flow.source_kind = Some(SourceKind::Zip);
-            wizard.folder_flow.build_attempted = true;
-            for (page, labels) in [
+            let pages = [
                 (
                     Page::Review,
                     &[
@@ -1960,12 +1966,13 @@ mod tests {
                     &[
                         "Installer Built",
                         "Build Receipt",
-                        "Open Output Folder",
+                        "View Output Folder",
                         #[cfg(all(windows, target_arch = "x86_64"))]
                         copy::TEST_INSTALLER,
                     ][..],
                 ),
-            ] {
+            ];
+            for (page, labels) in pages {
                 wizard.folder_flow.page = page;
                 if page == Page::Done {
                     wizard.folder_flow.result = Some(Delivery {
@@ -1995,14 +2002,66 @@ mod tests {
                 draw();
                 let output = draw();
                 for &label in labels {
-                    let shape = output.shapes.iter().find(|shape| {
-                        matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == label)
-                    }).unwrap_or_else(|| panic!("Missing {label:?} on {page:?} at {scale}"));
-                    let visible = bounds.intersect(shape.clip_rect).expand(1.0);
+                    assert_visible_text(&output, bounds, label);
+                }
+                let roadmap = assert_visible_text(&output, bounds, "Review package");
+                for label in ["PortableForge", "Commands", "Activity", "Appearance"] {
+                    let header = assert_visible_text(&output, bounds, label);
                     assert!(
-                        visible.contains_rect(shape.shape.visual_bounding_rect()),
-                        "{label:?} clipped on {page:?} at {scale}"
+                        header.bottom() < roadmap.top(),
+                        "{label:?} overlaps roadmap"
                     );
+                }
+            }
+            let bounds = egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::from(super::super::window_scale::CANVAS),
+            );
+            let mut draw = |wizard: &mut WizardApp, events| {
+                ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(bounds),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| eframe::App::update(wizard, ctx, &mut frame),
+                )
+            };
+            draw(&mut wizard, vec![]);
+            let output = draw(&mut wizard, vec![]);
+            let activity = output
+                .shapes
+                .iter()
+                .find(|shape| {
+                    matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Activity")
+                })
+                .expect("Activity toggle")
+                .shape
+                .visual_bounding_rect()
+                .center();
+            for pressed in [true, false] {
+                draw(
+                    &mut wizard,
+                    vec![
+                        egui::Event::PointerMoved(activity),
+                        egui::Event::PointerButton {
+                            pos: activity,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            for (page, labels) in pages {
+                wizard.folder_flow.page = page;
+                draw(&mut wizard, vec![egui::Event::PointerGone]);
+                let output = draw(&mut wizard, vec![]);
+                for &label in labels
+                    .iter()
+                    .chain(["Technical details", "Hide Activity"].iter())
+                {
+                    assert_visible_text(&output, bounds, label);
                 }
             }
         }

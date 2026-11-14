@@ -5,38 +5,32 @@ use portableforge_core::folder::IssueSeverity;
 use portableforge_core::guide::folder_flow as copy;
 use portableforge_core::paf::CATEGORIES;
 
-use super::super::{dense, open_folder, package_review, shell, theme, WizardApp};
+use super::super::{dense, file_picker, package_review, shell, theme, WizardApp};
 use super::draft::{suggested_id, Language};
 use super::saved_job;
-use super::{Failure, Flow, IntakeMode, Page};
-
-enum SourcePicker {
-    Files,
-    Folder,
-}
+use super::{Flow, Page};
 
 impl WizardApp {
     pub(in crate::wizard) fn show_app_intake_picker(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Archive or program files").strong());
         ui.horizontal_wrapped(|ui| {
-            let guided =
-                ui.selectable_value(&mut self.folder_flow.mode, IntakeMode::Guided, copy::GUIDED);
-            theme::focus_outline(ui, &guided);
-            let autonomous = dense::explained(
-                ui.selectable_value(
-                    &mut self.folder_flow.mode,
-                    IntakeMode::Autonomous,
-                    copy::AUTONOMOUS,
-                ),
-                copy::AUTONOMOUS_HELP,
+            let files = dense::explained(
+                ui.button(copy::CHOOSE_FILES),
+                "Choose a ZIP or select the program and its companion files together. For another archive format, extract it first and choose the extracted folder.",
             );
-            theme::focus_outline(ui, &autonomous);
-            ui.separator();
-            if ui.button(copy::CHOOSE_FILES).clicked() {
-                self.choose_app_files(ui.ctx());
-            }
-            if ui.button(copy::CHOOSE_FOLDER).clicked() {
-                self.choose_app_folder(ui.ctx());
-            }
+            self.choose_app_files(&files);
+            let folder = dense::explained(
+                ui.button(copy::CHOOSE_FOLDER),
+                "Choose the folder containing the program and its files. PortableForge will suggest the file that opens the program.",
+            );
+            self.choose_app_folder(&folder);
+            dense::view_text(
+                ui,
+                "Help me choose",
+                "Which source should I choose?",
+                "Choose Setup file below if the download page calls the file an installer or setup. If you downloaded a ZIP containing the app, choose the ZIP here. For other archive formats, extract the files first and choose the extracted folder.",
+                true,
+            );
         });
         let saved_path = saved_job::path(&self.settings_path);
         if saved_job::revision(&saved_path).is_ok_and(|slot| slot.is_some()) {
@@ -49,9 +43,8 @@ impl WizardApp {
                 {
                     self.resume_app_job(ui.ctx());
                 }
-                if ui.button(saved_job::REMOVE).clicked() {
-                    self.remove_app_job();
-                }
+                let remove = ui.button(saved_job::REMOVE);
+                self.remove_app_job(&remove);
             });
         }
         if let Some(error) = &self.folder_flow.error {
@@ -67,11 +60,7 @@ impl WizardApp {
             self.folder_flow.busy(),
             self.folder_flow.build_ready(),
         );
-        let heading = if self.folder_flow.mode == IntakeMode::Autonomous {
-            copy::AUTONOMOUS_HEADER
-        } else {
-            copy::HEADER
-        };
+        let heading = copy::HEADER;
         self.show_header(ctx, heading, None);
         dense::show_help_bar(
             ctx,
@@ -85,7 +74,7 @@ impl WizardApp {
         egui::TopBottomPanel::bottom("folder-actions")
             .frame(frame)
             .show(ctx, |ui| {
-                let mut save = false;
+                let mut save = None;
                 ui.horizontal(|ui| {
                     let flow = &mut self.folder_flow;
                     let back = ui.add_enabled(
@@ -107,7 +96,7 @@ impl WizardApp {
                     if flow.can_save_for_later() {
                         let save_job = dense::explained(ui.button(saved_job::SAVE), "Keep your choices for later. You’ll confirm sharing permission when you resume.");
                         shell::register_region(ui, shell::Region::Footer, save_job.id);
-                        save = save_job.clicked();
+                        save = Some(save_job);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if flow.test_in_progress() {
@@ -127,23 +116,10 @@ impl WizardApp {
                             }
                         } else if flow.page == Page::Done {
                             let enabled = !flow.busy() && !flow.modal_open();
-                            let open = dense::primary_action(ui, enabled, "Open Output Folder");
-                            if enabled {
-                                shell::register_region(ui, shell::Region::Footer, open.id);
-                            }
-                            if open.clicked() {
-                                if let Some(folder) = flow
-                                    .result
-                                    .as_ref()
-                                    .and_then(|delivery| delivery.artifact.parent())
-                                {
-                                    if let Err(error) = open_folder(folder) {
-                                        flow.error = Some(Failure::new(
-                                            "Could not open the output folder.",
-                                            error,
-                                        ));
-                                    }
-                                }
+                            if let Some(folder) = flow.result.as_ref().and_then(|delivery| delivery.artifact.parent()) {
+                                ui.add_enabled_ui(enabled, |ui| {
+                                    dense::view_text(ui, "View Output Folder", "Output folder", &folder.display().to_string(), true);
+                                });
                             }
                         } else if flow.can_stop() {
                             let stop = ui.button(if flow.intake_stop.is_some() {
@@ -175,8 +151,8 @@ impl WizardApp {
                         }
                     });
                 });
-                if save {
-                    self.save_app_job(ctx);
+                if let Some(save) = save {
+                    self.choose_save_location(&save);
                 }
             });
         if !self.folder_flow.open {
@@ -185,6 +161,7 @@ impl WizardApp {
         }
         dense::task_sidebar(ctx, |ui| self.folder_flow.show_roadmap(ui));
         self.update_heading_focus(ctx);
+        self.show_activity_side(ctx);
         egui::CentralPanel::default()
             .frame(dense::content_frame(ctx))
             .show(ctx, |ui| {
@@ -195,10 +172,8 @@ impl WizardApp {
                         self.folder_flow.show_body(ui)
                     })
                     .inner;
-                match choose {
-                    Some(SourcePicker::Files) => self.choose_app_files(ctx),
-                    Some(SourcePicker::Folder) => self.choose_app_folder(ctx),
-                    None => {}
+                if let Some(paths) = choose {
+                    self.inspect_app_inputs(ctx, paths, false);
                 }
             });
         if previous
@@ -348,7 +323,7 @@ impl Flow {
         }
     }
 
-    fn show_body(&mut self, ui: &mut egui::Ui) -> Option<SourcePicker> {
+    fn show_body(&mut self, ui: &mut egui::Ui) -> Option<Vec<PathBuf>> {
         if self.busy() {
             let title = if self.test_in_progress() {
                 copy::TEST_RUNNING
@@ -418,7 +393,7 @@ impl Flow {
         choose
     }
 
-    fn show_review(&mut self, ui: &mut egui::Ui) -> Option<SourcePicker> {
+    fn show_review(&mut self, ui: &mut egui::Ui) -> Option<Vec<PathBuf>> {
         let Some(scan) = self.scan.clone() else {
             dense::heading(ui, copy::CHOOSE_SOURCE, "");
             if !self.source.as_os_str().is_empty() {
@@ -426,23 +401,34 @@ impl Flow {
             }
             return ui
                 .horizontal_wrapped(|ui| {
-                    if ui.button(copy::CHOOSE_FILES).clicked() {
-                        Some(SourcePicker::Files)
-                    } else if ui.button(copy::CHOOSE_FOLDER).clicked() {
-                        Some(SourcePicker::Folder)
-                    } else {
-                        None
-                    }
+                    let files = ui.button(copy::CHOOSE_FILES);
+                    let folder = ui.button(copy::CHOOSE_FOLDER);
+                    file_picker::choose(
+                        &files,
+                        "Choose a ZIP or files for one app",
+                        file_picker::Mode::Files(&[]),
+                        None,
+                    )
+                    .or_else(|| {
+                        file_picker::choose(
+                            &folder,
+                            "Choose the unpacked app folder",
+                            file_picker::Mode::Folder,
+                            None,
+                        )
+                    })
                 })
                 .inner;
         };
         if scan.is_prepared() {
             dense::heading(ui, copy::PREPARED, copy::PREPARED_HELP);
             path_summary(ui, "Source", &self.source);
-            return ui
-                .button(copy::CHOOSE_FOLDER)
-                .clicked()
-                .then_some(SourcePicker::Folder);
+            return file_picker::choose(
+                &ui.button(copy::CHOOSE_FOLDER),
+                "Choose the unpacked app folder",
+                file_picker::Mode::Folder,
+                None,
+            );
         }
 
         package_review::overview(ui, "App Files", &self.source_label, &self.source);
@@ -454,8 +440,8 @@ impl Flow {
         if !self.draft.id.is_empty() && !self.output_parent.as_os_str().is_empty() {
             path_summary(ui, "Save To", &self.output());
         }
-        if self.selected.is_some() {
-            ui.horizontal_wrapped(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            if self.selected.is_some() {
                 if ui.button("Edit App Details").clicked() {
                     self.page = Page::App;
                 }
@@ -466,18 +452,10 @@ impl Flow {
                         self.open_artwork(edit.id);
                     }
                 }
-            });
-        }
-        ui.horizontal_wrapped(|ui| {
-            if self.selected.is_some() && ui.button("Build Tools and Output").clicked() {
-                self.page = Page::Files;
+                if ui.button("Build Tools and Output").clicked() {
+                    self.page = Page::Files;
+                }
             }
-            if ui.button(copy::CHANGE_SOURCE).clicked() {
-                self.back();
-                ui.ctx().request_repaint();
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
             if !scan.candidates.is_empty() {
                 let label = if self.selected.is_some() {
                     "Change Start File"
@@ -491,6 +469,10 @@ impl Flow {
             let findings = scan.issues.len() + self.issues.len();
             if ui.button(format!("Folder Findings ({findings})")).clicked() {
                 self.toggle_findings();
+            }
+            if ui.button(copy::CHANGE_SOURCE).clicked() {
+                self.back();
+                ui.ctx().request_repaint();
             }
         });
         if self.selected.is_some() {
@@ -702,14 +684,14 @@ impl Flow {
             "Launcher Generator",
             &mut self.launcher_tools,
             "Choose Launcher Folder…",
-            "Choose the folder containing the PortableApps.com Launcher Generator. PortableForge uses it to create the file that starts the portable app.",
+            "Choose the Launcher Generator folder. It builds the file that starts your portable app and applies its settings rules.",
         );
         folder_field(
             ui,
             "PortableApps.com Installer",
             &mut self.installer_tools,
             "Choose Installer Folder…",
-            "Choose the folder containing the PortableApps.com Installer tool. It combines the portable app and its settings into one installable file.",
+            "Choose the Installer tool folder. It packages your app and launcher into the .paf.exe you can install or share.",
         );
         folder_field(
             ui,
@@ -799,7 +781,10 @@ fn status_label(ui: &mut egui::Ui, status: &str) {
 
 fn path_summary(ui: &mut egui::Ui, label: &str, path: &Path) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(label).weak());
+        let name = ui.label(egui::RichText::new(label).weak());
+        if label == "Build Receipt" {
+            dense::field_help(&name, "Compare the receipt’s SHA-256 with the installer’s SHA-256 to check whether the file has changed.");
+        }
         let value = path.to_string_lossy();
         let view = dense::path_needs_view(ui, &value, ui.available_width());
         let width = if view {
@@ -842,11 +827,14 @@ fn folder_field(ui: &mut egui::Ui, label: &str, folder: &mut PathBuf, action: &s
         );
         let choose = ui.button(action);
         dense::field_help(&choose, help);
-        if choose.clicked() {
-            let dialog = rfd::FileDialog::new().set_title(label);
-            if let Some(path) = dialog.pick_folder() {
-                *folder = path;
-            }
+        let start = choose
+            .clicked()
+            .then(|| super::super::picker_start_dir(&folder.to_string_lossy()))
+            .flatten();
+        if let Some(path) = file_picker::choose(&choose, label, file_picker::Mode::Folder, start)
+            .and_then(|paths| paths.into_iter().next())
+        {
+            *folder = path;
         }
     });
 }

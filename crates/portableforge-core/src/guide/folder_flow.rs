@@ -1,16 +1,11 @@
 //! Primary wording for packaging an unpacked app folder.
 
 pub const PICK_TITLE: &str = "Choose an App";
-pub const PICK_HELP: &str = "Drop a ZIP, app folder, or the files for one app.";
+pub const PICK_HELP: &str = "Choose a setup or program files. You can also drop them here.";
 pub const CHOOSE_FOLDER: &str = "Choose App Folder…";
 pub const CHOOSE_FILES: &str = "Choose App Files…";
 pub const CHOOSE_SOURCE: &str = "Choose an App Source";
 pub const CHANGE_SOURCE: &str = "Change Source";
-pub const GUIDED: &str = "Guided";
-pub const AUTONOMOUS: &str = "Autonomous";
-pub const AUTONOMOUS_HELP: &str =
-    "Builds automatically once the app details, build settings, and permission are confirmed.";
-pub const AUTONOMOUS_HEADER: &str = "Autonomous Build";
 pub const CHECKING_SOURCE: &str = "Checking Your Source";
 pub const CHECKING_SELECTION: &str = "Checking the selected files…";
 pub const STAGING_SOURCE: &str = "Preparing the app files…";
