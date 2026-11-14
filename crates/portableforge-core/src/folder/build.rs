@@ -1,5 +1,8 @@
 //! Prepare a new package from a raw application folder without running it.
 
+use super::appdata::{
+    append_launcher_rules, launcher_directory_setup, validate_appdata_rules, AppDataScope,
+};
 use super::{
     open_inventory_file, scan, validate, EntryKind, FolderEntry, FolderScan, IssueSeverity,
 };
@@ -117,10 +120,21 @@ pub fn build_with_artwork(
     request: FolderBuildRequest<'_>,
     artwork: Option<&Artwork>,
     control: &FolderBuildControl,
+    progress: impl FnMut(&'static str),
+) -> Result<FolderBuildReport, String> {
+    build_with_appdata(request, artwork, &[], control, progress)
+}
+
+/// Apply selected AppData environment overrides to the generated portable launcher.
+pub fn build_with_appdata(
+    request: FolderBuildRequest<'_>,
+    artwork: Option<&Artwork>,
+    appdata_rules: &[AppDataScope],
+    control: &FolderBuildControl,
     mut progress: impl FnMut(&'static str),
 ) -> Result<FolderBuildReport, String> {
     control.begin()?;
-    let result = build_inner(request, artwork, control, &mut progress);
+    let result = build_inner(request, artwork, appdata_rules, control, &mut progress);
     let state = control.0.swap(DONE, Ordering::AcqRel);
     if state == STOPPED {
         match result {
@@ -146,10 +160,12 @@ fn checkpoint(
 fn build_inner(
     request: FolderBuildRequest<'_>,
     artwork: Option<&Artwork>,
+    appdata_rules: &[AppDataScope],
     control: &FolderBuildControl,
     progress: &mut dyn FnMut(&'static str),
 ) -> Result<FolderBuildReport, String> {
     checkpoint(control, progress, "Checking the folder and build options")?;
+    validate_appdata_rules(appdata_rules)?;
     let FolderBuildRequest {
         scan: original,
         selected,
@@ -269,7 +285,7 @@ fn build_inner(
 
         let app_info = package.join("App/AppInfo");
         let staged_artwork = stage_artwork(&package, &payload.join(selected), artwork)?;
-        write_launcher_settings(&package, &metadata, selected)?;
+        write_launcher_settings(&package, &metadata, selected, appdata_rules)?;
         copy_license(&payload, &app_info, &current.entries)?;
         if let Some(issue) = validate_tree(&package, &metadata)
             .into_iter()
@@ -379,6 +395,15 @@ fn build_inner(
             "tool_paths_are_historical": true,
             "tool_logs_retained": false,
         });
+        if !appdata_rules.is_empty() {
+            receipt["folder_build"]["appdata_rules"] = serde_json::json!(appdata_rules
+                .iter()
+                .map(|scope| serde_json::json!({
+                    "scope": scope,
+                    "data_folder": scope.data_folder(),
+                }))
+                .collect::<Vec<_>>());
+        }
         let receipt_bytes =
             serde_json::to_vec_pretty(&receipt).map_err(|cause| cause.to_string())?;
         let receipt_sha256 = sha256_hex(&receipt_bytes);
@@ -671,10 +696,10 @@ fn write_launcher_settings(
     package: &Path,
     meta: &PafMetadata,
     selected: &Path,
+    appdata_rules: &[AppDataScope],
 ) -> Result<(), String> {
-    let ini = package
-        .join("App/AppInfo/Launcher")
-        .join(format!("{}.ini", meta.app_id));
+    let launcher = package.join("App/AppInfo/Launcher");
+    let ini = launcher.join(format!("{}.ini", meta.app_id));
     let working = selected
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -686,11 +711,15 @@ fn write_launcher_settings(
         .launcher_ini(&[])
         .replace("DirectoryMoveOK=yes", "DirectoryMoveOK=warn")
         .replace("SupportsUNC=yes", "SupportsUNC=warn");
-    let settings = format!(
+    let mut settings = format!(
         "{}WorkingDirectory=%PAL:AppDir%\\{}{working}\n",
         settings, meta.base_app_name
     );
+    append_launcher_rules(&mut settings, appdata_rules);
     fs::write(ini, settings).map_err(io_message)?;
+    if let Some(setup) = launcher_directory_setup(appdata_rules) {
+        fs::write(launcher.join("Custom.nsh"), setup).map_err(io_message)?;
+    }
     let appinfo = package.join("App/AppInfo/appinfo.ini");
     let original = fs::read_to_string(&appinfo).map_err(io_message)?;
     let mut info = String::new();
@@ -828,6 +857,49 @@ fn io_message(cause: io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staged_launcher_keeps_working_directory_and_appdata_rules_in_their_sections() {
+        let package = owned_path(&std::env::temp_dir()).unwrap();
+        let metadata = PafMetadata {
+            name: "Fixture Portable".into(),
+            app_id: "FixturePortable".into(),
+            base_app_name: "Fixture".into(),
+            publisher: "Fixture Publisher".into(),
+            homepage: "https://example.com".into(),
+            category: "Utilities".into(),
+            description: "Test package".into(),
+            language: "English".into(),
+            shareable: true,
+            open_source: false,
+            freeware: true,
+            commercial_use: true,
+            package_version: "1.0.0.0".into(),
+            display_version: "1.0".into(),
+            requires_admin: false,
+            main_exe: r"bin\fixture.exe".into(),
+            main_exe_64bit: Some(true),
+            distribution: Distribution::Bundled {
+                redistribution_asserted: true,
+            },
+        };
+        let scope = AppDataScope::Local;
+        generate_tree(&package, &metadata, &[]).unwrap();
+        write_launcher_settings(&package, &metadata, Path::new("bin/fixture.exe"), &[scope])
+            .unwrap();
+        let launcher = fs::read_to_string(package.join("App/AppInfo/Launcher/FixturePortable.ini"));
+        let setup = fs::read_to_string(package.join("App/AppInfo/Launcher/Custom.nsh"));
+        fs::remove_dir_all(&package).unwrap();
+        let launcher = launcher.unwrap();
+        let (launch, environment) = launcher.split_once("\n[Environment]\n").unwrap();
+        assert!(launch.starts_with("[Launch]\n"));
+        assert!(launch.contains("WorkingDirectory=%PAL:AppDir%\\Fixture\\bin\n"));
+        assert_eq!(environment, "LOCALAPPDATA=%PAL:DataDir%\\AppData\\Local\n");
+        assert!(setup
+            .unwrap()
+            .contains("CreateDirectory \"$DataDirectory\\AppData\\Local\""));
+        assert!(crate::validate::check_launcher_ini(&launcher).is_empty());
+    }
 
     #[test]
     fn folder_artwork_staging_uses_the_applied_icon_for_sidebar_composition() {

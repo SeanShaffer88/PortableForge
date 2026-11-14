@@ -12,7 +12,7 @@ use portableforge_core::folder::input::{
 #[cfg(all(windows, target_arch = "x86_64"))]
 use portableforge_core::folder::FolderBuildControl;
 use portableforge_core::folder::{
-    self, AppProperties, FolderIssue, FolderScan, IssueSeverity, ScanError,
+    self, AppProperties, DependencyReport, FolderIssue, FolderScan, IssueSeverity, ScanError,
 };
 use portableforge_core::guide::folder_flow as copy;
 
@@ -37,6 +37,8 @@ pub(super) enum Page {
     Package,
     Rights,
     Findings,
+    Dependencies,
+    AppData,
     Icon,
     InstallerArtwork,
     Tools,
@@ -91,6 +93,8 @@ pub(super) struct Flow {
     roadmap_positions: [Option<usize>; 7],
     program_page: usize,
     issue_page: usize,
+    dependencies: Option<Result<DependencyReport, String>>,
+    dependency_page: usize,
     findings_from: Option<Page>,
     error: Option<Failure>,
     result: Option<Delivery>,
@@ -141,6 +145,7 @@ enum Outcome {
     LoadedSavedJob(Result<SavedJob, Failure>),
     SavedForLater,
     Selected(Selection, Vec<FolderIssue>),
+    Dependencies(Result<DependencyReport, String>),
     #[cfg(all(windows, target_arch = "x86_64"))]
     Built(Delivery),
     #[cfg(all(windows, target_arch = "x86_64"))]
@@ -251,6 +256,8 @@ impl Flow {
             Page::Output => "Choose where to save the installer.",
             Page::Build => "Check the package before building.",
             Page::Findings => "Review the findings.",
+            Page::Dependencies => "Check which DLLs the app lists.",
+            Page::AppData => "Choose where this app saves its settings.",
             Page::Review => "Review the source files and package choices.",
         })
     }
@@ -360,10 +367,12 @@ impl Flow {
             Page::Package => Page::About,
             Page::Rights => Page::Package,
             Page::Findings => self.findings_from.unwrap_or(Page::Rights),
-            Page::Icon => Page::Findings,
+            Page::Dependencies => Page::Findings,
+            Page::AppData => Page::Dependencies,
+            Page::Icon => Page::AppData,
             Page::InstallerArtwork => Page::Icon,
             Page::Tools if cfg!(windows) => Page::InstallerArtwork,
-            Page::Tools => Page::Findings,
+            Page::Tools => Page::AppData,
             Page::Output => Page::Tools,
             Page::Build => Page::Output,
             Page::Test => Page::Done,
@@ -566,12 +575,36 @@ impl Flow {
         });
     }
 
+    fn scan_dependencies(&mut self, ctx: &egui::Context) {
+        if self.busy() {
+            return;
+        }
+        let (Some(scan), Some(selected)) = (self.scan.clone(), self.selected.clone()) else {
+            return;
+        };
+        self.dependencies = None;
+        let staged = self.staged.clone();
+        self.start(
+            ctx,
+            "Reading the start file’s DLL list…",
+            move |_, _| {
+                let _staged = staged;
+                Ok(Outcome::Dependencies(
+                    scan.dependencies_for(&selected)
+                        .map_err(|error| error.to_string()),
+                ))
+            },
+        );
+    }
+
     fn accept_selection(&mut self, ctx: &egui::Context, selection: Selection) {
         if self.selected.as_ref() == Some(&selection.relative) {
             self.page = Page::Review;
             return;
         }
         self.draft = Draft::default();
+        self.dependencies = None;
+        self.dependency_page = 0;
         self.draft.language = Some(draft::Language::English);
         self.artwork = artwork_ui::Editor::default();
         let properties = selection.properties;
@@ -799,6 +832,10 @@ impl Flow {
                     self.page = Page::Program;
                 }
             }
+            Ok(Outcome::Dependencies(result)) => {
+                self.dependencies = Some(result);
+                self.dependency_page = 0;
+            }
             #[cfg(all(windows, target_arch = "x86_64"))]
             Ok(Outcome::Built(delivery)) => {
                 self.result = Some(delivery);
@@ -924,12 +961,13 @@ impl Flow {
         let installer_tools = self.installer_tools.clone();
         let output = self.output();
         let artwork = self.artwork.artwork().cloned();
+        let appdata_rules = self.draft.appdata_rules.clone();
         let staged = self.staged.clone();
         let control = FolderBuildControl::default();
         self.control = Some(control.clone());
         self.start(ctx, "Checking the app files…", move |tx, ctx| {
             let _staged = staged;
-            use portableforge_core::folder::{build_with_artwork, FolderBuildRequest};
+            use portableforge_core::folder::{build_with_appdata, FolderBuildRequest};
             let request = FolderBuildRequest {
                 scan: &scan,
                 selected: &selected,
@@ -939,11 +977,17 @@ impl Flow {
                 output: &output,
             };
             let mut stage = "";
-            match build_with_artwork(request, artwork.as_ref(), &control, |status| {
-                stage = status;
-                let _ = tx.send(Event::Stage(status));
-                ctx.request_repaint();
-            }) {
+            match build_with_appdata(
+                request,
+                artwork.as_ref(),
+                &appdata_rules,
+                &control,
+                |status| {
+                    stage = status;
+                    let _ = tx.send(Event::Stage(status));
+                    ctx.request_repaint();
+                },
+            ) {
                 Ok(report) => Ok(Outcome::Built(Delivery {
                     artifact: report.artifact,
                     manifest: report.manifest,
@@ -1479,6 +1523,29 @@ mod tests {
     }
 
     #[test]
+    fn saved_app_job_restores_redirected_appdata_scopes() {
+        use portableforge_core::folder::appdata::AppDataScope;
+
+        let fixture = AppJobFixture::new();
+        let ctx = egui::Context::default();
+        let mut wizard = fixture.wizard();
+        wizard.inspect_app_inputs(&ctx, vec![fixture.zip.clone()], false);
+        finish_folder_work(&mut wizard.folder_flow, &ctx);
+        wizard.folder_flow.draft.appdata_rules = vec![AppDataScope::Roaming, AppDataScope::Local];
+        wizard.save_app_job(&ctx, None);
+        finish_folder_work(&mut wizard.folder_flow, &ctx);
+        drop(wizard);
+
+        let mut reopened = fixture.wizard();
+        reopened.resume_app_job(&ctx);
+        finish_folder_work(&mut reopened.folder_flow, &ctx);
+        assert_eq!(
+            reopened.folder_flow.draft.appdata_rules,
+            [AppDataScope::Roaming, AppDataScope::Local]
+        );
+    }
+
+    #[test]
     fn autonomous_jobs_restore_applied_artwork_for_zip_and_loose_files() {
         use portableforge_core::artwork::render_sidebar;
 
@@ -1963,6 +2030,28 @@ mod tests {
             }
             wizard.folder_flow.open = true;
             wizard.folder_flow.source_kind = Some(SourceKind::Zip);
+            use portableforge_core::folder::{Dependency, DependencyStatus};
+            wizard.folder_flow.dependencies = Some(Ok(DependencyReport {
+                executable: "Widget.exe".into(),
+                architecture: portableforge_core::snapshot::PeArch::X64,
+                imports: vec![
+                    Dependency {
+                        name: format!("{}.dll", "dependency".repeat(24)),
+                        delayed: true,
+                        status: DependencyStatus::OtherFolder,
+                    },
+                    Dependency {
+                        name: "example.dll".into(),
+                        delayed: false,
+                        status: DependencyStatus::Unresolved,
+                    },
+                    Dependency {
+                        name: "api-ms-win-example.dll".into(),
+                        delayed: false,
+                        status: DependencyStatus::ApiSet,
+                    },
+                ],
+            }));
             let pages = [
                 (
                     Page::Review,
@@ -2017,6 +2106,23 @@ mod tests {
                 (
                     Page::Findings,
                     &["Folder Findings", "Review before moving the app"][..],
+                ),
+                (
+                    Page::Dependencies,
+                    &[
+                        "Check DLL Dependencies",
+                        "Scan Again",
+                        "View Path",
+                        "example.dll",
+                    ][..],
+                ),
+                (
+                    Page::AppData,
+                    &[
+                        "Keep AppData Settings Portable",
+                        "Redirect Roaming AppData",
+                        "Redirect Local AppData",
+                    ][..],
                 ),
                 (
                     Page::Done,

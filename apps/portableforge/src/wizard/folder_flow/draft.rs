@@ -2,6 +2,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use portableforge_core::folder::appdata::AppDataScope;
 use portableforge_core::paf::{pad_package_version, valid_app_id, CATEGORIES};
 use portableforge_core::{Distribution, PafMetadata};
 
@@ -36,6 +37,8 @@ pub(super) struct Draft {
     pub(super) freeware: bool,
     pub(super) commercial_use: bool,
     pub(super) requires_admin: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) appdata_rules: Vec<AppDataScope>,
     #[serde(skip)]
     pub(super) rights: bool,
 }
@@ -55,6 +58,7 @@ impl Default for Draft {
             freeware: false,
             commercial_use: false,
             requires_admin: false,
+            appdata_rules: Vec::new(),
             rights: false,
         }
     }
