@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
+use portableforge_core::folder::appdata::AppDataScope;
+use portableforge_core::folder::DependencyStatus;
 use portableforge_core::folder::IssueSeverity;
 use portableforge_core::guide::folder_flow as copy;
 use portableforge_core::paf::CATEGORIES;
@@ -30,8 +32,8 @@ const ROADMAP: [(&str, &[Page], &str); 7] = [
     ),
     (
         "File Findings",
-        &[Page::Findings],
-        "Read what PortableForge found in your source files.",
+        &[Page::Findings, Page::Dependencies, Page::AppData],
+        "Review file findings, check DLL dependencies, and manage app settings folders.",
     ),
     (
         "Package Artwork",
@@ -258,8 +260,10 @@ impl Flow {
             Page::About => Page::Package,
             Page::Package => Page::Rights,
             Page::Rights => Page::Findings,
-            Page::Findings if cfg!(windows) => Page::Icon,
-            Page::Findings => Page::Tools,
+            Page::Findings => Page::Dependencies,
+            Page::Dependencies => Page::AppData,
+            Page::AppData if cfg!(windows) => Page::Icon,
+            Page::AppData => Page::Tools,
             Page::Icon => Page::InstallerArtwork,
             Page::InstallerArtwork => return Some((Page::Tools, "Apply Artwork")),
             Page::Tools => Page::Output,
@@ -367,7 +371,9 @@ impl Flow {
 
     fn show_body(&mut self, ui: &mut egui::Ui) -> Option<Vec<PathBuf>> {
         if self.busy() {
-            let title = if self.test_in_progress() {
+            let title = if self.page == Page::Dependencies {
+                "Checking DLL Dependencies"
+            } else if self.test_in_progress() {
                 copy::TEST_RUNNING
             } else if self.status == Some(saved_job::SAVING) {
                 "Save App Job"
@@ -405,6 +411,14 @@ impl Flow {
             Page::Review => self.show_review(ui),
             Page::Program => {
                 self.show_programs(ui);
+                None
+            }
+            Page::Dependencies => {
+                self.show_dependencies(ui);
+                None
+            }
+            Page::AppData => {
+                self.show_appdata(ui);
                 None
             }
             Page::Tools => {
@@ -741,6 +755,92 @@ impl Flow {
         }
         #[cfg(not(windows))]
         let _ = ui;
+    }
+
+    fn show_dependencies(&mut self, ui: &mut egui::Ui) {
+        self.show_substep_heading(ui, "Check DLL Dependencies");
+        ui.label("Read the start file’s DLL list without running the app.");
+        let check = dense::explained(
+            ui.add_enabled(self.selected.is_some(), egui::Button::new(
+                if self.dependencies.is_some() { "Scan Again" } else { "Scan Dependencies" },
+            )),
+            "Checks DLLs listed in the start file, including those loaded on demand. Windows and the app can load more DLLs when it runs.",
+        );
+        if check.clicked() {
+            self.scan_dependencies(ui.ctx());
+        }
+        match &self.dependencies {
+            Some(Ok(report)) => {
+                if report.imports.is_empty() {
+                    ui.label("The start file lists no DLL imports.");
+                }
+                for index in dense::page(
+                    ui,
+                    &mut self.dependency_page,
+                    report.imports.len(),
+                    2,
+                    "DLLs",
+                ) {
+                    let import = &report.imports[index];
+                    let label = if import.delayed {
+                        "Delay-loaded DLL"
+                    } else {
+                        "DLL"
+                    };
+                    ui.push_id(index, |ui| {
+                        path_summary(ui, label, Path::new(&import.name));
+                        match &import.status {
+                        DependencyStatus::Bundled(path) => path_summary(ui, "Bundled", path),
+                        status => {
+                            ui.label(match status {
+                                DependencyStatus::OtherFolder => "Found elsewhere in the package. Check that the app can find it.",
+                                DependencyStatus::WrongArchitecture => "A matching name was found, but the DLL uses a different architecture.",
+                                DependencyStatus::Ambiguous => "Several files beside the start file match this DLL name.",
+                                DependencyStatus::ApiSet => "Windows API set.",
+                                DependencyStatus::Unresolved => "No compatible DLL verified in the package. Windows or an installed runtime may supply it.",
+                                DependencyStatus::Bundled(_) => unreachable!(),
+                            });
+                        }
+                        }
+                    });
+                }
+            }
+            Some(Err(error)) => {
+                ui.label("PortableForge could not read the DLL list.");
+                dense::view_text(ui, "Show Details", "Dependency Scan Details", error, true);
+            }
+            None => {}
+        }
+    }
+
+    fn show_appdata(&mut self, ui: &mut egui::Ui) {
+        self.show_substep_heading(ui, "Keep AppData Settings Portable");
+        ui.label("Choose which settings locations to redirect for this app.");
+        for (scope, label, help) in [
+            (
+                AppDataScope::Roaming,
+                "Redirect Roaming AppData",
+                "Some apps use Roaming AppData for preferences and profiles. Redirect it to the portable package.",
+            ),
+            (
+                AppDataScope::Local,
+                "Redirect Local AppData",
+                "Some apps use Local AppData for settings and caches. Redirect it to the portable package.",
+            ),
+        ] {
+            let mut enabled = self.draft.appdata_rules.contains(&scope);
+            let response = dense::explained(ui.checkbox(&mut enabled, label), help);
+            if response.changed() {
+                if enabled {
+                    self.draft.appdata_rules.push(scope);
+                } else {
+                    self.draft.appdata_rules.retain(|rule| *rule != scope);
+                }
+            }
+            ui.weak(format!("Saves to Data\\{}", scope.data_folder()));
+            ui.add_space(4.0);
+        }
+        ui.label("Works with apps that read the AppData environment variables. Test that your settings survive two launches.");
     }
 
     fn show_findings(&mut self, ui: &mut egui::Ui) {

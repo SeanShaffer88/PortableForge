@@ -41,6 +41,10 @@ Use **Save for Later** to pause one app package. Choose **Resume App Package** f
 
 ZIP and loose-file staging on Windows x64 leaves your originals intact and never runs them. ZIPs use standard stored or deflated files. If PortableForge cannot open an archive format, extract it with a trusted tool and drop the resulting app folder.
 
+Under **File Findings**, **Check DLL Dependencies** reads the selected start file’s ordinary and delay-load imports. It reports matching bundled files and uncertain dependencies. DLLs selected at runtime can require a separate test.
+
+On **Keep AppData Settings Portable**, optionally redirect Roaming or Local AppData to the package’s Data folder. The launcher sets the selected AppData environment variables for the app and its children. Apps that use Windows known-folder APIs or hardcoded paths may ignore these variables. Confirm that settings persist across two launches. Saved app jobs retain your choices.
+
 Open the test page under **Build Result**, then choose **Test Installer** to try it in a fresh Sandboxie-Plus box. Follow the prompts to finish setup and try the app twice. The result records what happened to the app’s portable data and whether the test box was removed.
 
 Use **Package Artwork** to edit the app icon and installer left pane on their own pages. Preview and apply your choices before building.

@@ -90,6 +90,10 @@ impl SavedJob {
             || !optional_absolute(&self.installer_tools)
             || !optional_absolute(&self.output_parent)
             || (self.artwork.is_some() && self.selected.is_none())
+            || portableforge_core::folder::appdata::validate_appdata_rules(
+                &self.draft.appdata_rules,
+            )
+            .is_err()
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
