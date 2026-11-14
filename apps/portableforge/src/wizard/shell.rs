@@ -642,7 +642,7 @@ impl WizardApp {
     }
 }
 
-fn region_focus(ctx: &egui::Context, region: Region) -> Option<egui::Id> {
+pub(super) fn region_focus(ctx: &egui::Context, region: Region) -> Option<egui::Id> {
     if matches!(region, Region::Sidebar) && !dense::room_for_sidebar(ctx) {
         return None;
     }

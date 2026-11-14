@@ -37,10 +37,9 @@ validation, needs a separate Windows assistive-technology pass.
 
 ## Activity and file selection
 
-**Activity** opens project progress in the current window. Close it to
-return focus to its opener. At compact widths, Activity takes the place of the
-current form until you close it. **Technical details** exposes available
-diagnostic messages separately. Windows contrast settings take precedence
+**Activity** stays on the right throughout the guided workspace, across from
+the roadmap. F6 moves focus between them and the other workspace regions.
+**Technical details** shows available diagnostic messages. Windows contrast settings take precedence
 over the app appearance. File pickers stay inside the current window and
 accept keyboard navigation and typed paths.
 
@@ -51,9 +50,8 @@ Long paths stay available in full. A long path can wrap in the field and
 opens in a full-value dialog when more room is needed. A copy action is
 available in that dialog.
 
-The left roadmap shows the current phase and available navigation. It moves
-above the configuration when the window is narrow so fields keep their width.
-F6 includes the roadmap when it is on the left. Available fields and artwork
+The left roadmap shows the current phase and available navigation. The two
+side panes have matching widths. Available fields and artwork
 controls send plain-language help to the fixed status bar on pointer hover or
 keyboard focus. The artwork dialog shows both previews when it fits and uses
 tabs in the compact layout. The charcoal work surface uses subtle circuit

@@ -219,7 +219,7 @@ impl Browser {
             ui.label("This folder has more entries. Open a subfolder or enter a full path.");
         }
         let rows = if ui.ctx().content_rect().height() < 560.0 {
-            4
+            3
         } else {
             7
         };
@@ -652,8 +652,16 @@ mod tests {
 
     #[test]
     fn modal_fit_and_cancel_restores_focus_without_selection() {
+        for size in [dense::MIN_CONTENT, super::super::window_scale::CANVAS] {
+            assert_modal_fit_and_cancel(size);
+        }
+    }
+
+    fn assert_modal_fit_and_cancel(size: [f32; 2]) {
         let ctx = egui::Context::default();
-        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0));
+        super::super::theme::install_fonts(&ctx);
+        let theme = std::cell::RefCell::new(super::super::theme::State::default());
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, size.into());
         let id = egui::Id::new("test-opener");
         let opener = std::cell::RefCell::new(None);
         let listing = Arc::new(Listing {
@@ -684,6 +692,9 @@ mod tests {
                 ..Default::default()
             };
             ctx.run(input, |ctx| {
+                theme
+                    .borrow_mut()
+                    .apply(ctx, portableforge_core::settings::Appearance::HighContrast);
                 egui::CentralPanel::default().show(ctx, |ui| {
                     *opener.borrow_mut() = Some(ui.interact(viewport, id, egui::Sense::click()));
                 });
@@ -701,10 +712,13 @@ mod tests {
         for name in ["Folder path", "Choose files", "Cancel"] {
             let shape = output.shapes.iter().find(|shape| {
                 matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == name)
-            }).expect("visible picker control");
+            }).unwrap_or_else(|| panic!("Missing {name} at {size:?}"));
             assert!(
-                viewport.contains_rect(shape.shape.visual_bounding_rect()),
-                "{name}"
+                viewport
+                    .intersect(shape.clip_rect)
+                    .expand(1.0)
+                    .contains_rect(shape.shape.visual_bounding_rect()),
+                "{name} at {size:?}"
             );
         }
         draw(vec![egui::Event::Key {

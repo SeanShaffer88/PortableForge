@@ -4,8 +4,6 @@ use eframe::egui;
 
 use super::{dense, shell, theme, WizardApp};
 
-const PANEL_WIDTH: f32 = 248.0;
-const WIDE_MIN: f32 = 1040.0;
 const HISTORY_LIMIT: usize = 40;
 const DETAIL_LIMIT: usize = 6000;
 
@@ -25,33 +23,13 @@ impl Notice {
 
 #[derive(Default)]
 pub(super) struct Activity {
-    open: bool,
     details: bool,
-    focus_pending: bool,
-    return_focus: bool,
-    opener: Option<egui::Id>,
-    heading: Option<egui::Id>,
-    bounds: Option<egui::Rect>,
-    had_focus: bool,
     history: VecDeque<Notice>,
     page: usize,
     detail_page: usize,
 }
 
 impl Activity {
-    #[cfg(test)]
-    pub(super) fn open_for_layout_test(&mut self) {
-        self.open = true;
-    }
-
-    pub(super) fn wide(ctx: &egui::Context) -> bool {
-        ctx.content_rect().width() >= WIDE_MIN
-    }
-
-    pub(super) fn compact(&self, ctx: &egui::Context) -> bool {
-        self.open && !Self::wide(ctx)
-    }
-
     fn record(&mut self, notice: Notice) {
         if self.history.back() == Some(&notice) {
             return;
@@ -63,93 +41,12 @@ impl Activity {
         self.page = 0;
     }
 
-    pub(super) fn toggle_button(&mut self, ui: &mut egui::Ui) {
-        let label = if self.open {
-            "Hide Activity"
-        } else {
-            "Activity"
-        };
-        let button = dense::explained(
-            ui.button(label),
-            "Open or close the record of progress and problems.",
-        );
-        self.opener = Some(button.id);
-        theme::focus_outline(ui, &button);
-        if button.clicked() {
-            if self.open {
-                self.close(ui.ctx());
-            } else {
-                self.open = true;
-                self.focus_pending = true;
-                ui.ctx().request_repaint();
-            }
-        }
-    }
-
-    fn close(&mut self, ctx: &egui::Context) {
-        self.open = false;
-        self.return_focus = true;
-        ctx.request_repaint();
-    }
-
-    pub(super) fn finish_frame(&mut self, ctx: &egui::Context) {
-        if std::mem::take(&mut self.return_focus) {
-            if let Some(opener) = self.opener {
-                ctx.memory_mut(|memory| memory.request_focus(opener));
-            }
-        }
-        self.had_focus = self.open
-            && ctx.memory(|memory| memory.focused()).is_some_and(|id| {
-                Some(id) == self.heading
-                    || self.bounds.is_some_and(|bounds| {
-                        ctx.read_response(id)
-                            .is_some_and(|response| bounds.contains(response.rect.center()))
-                    })
-            });
-    }
-
-    pub(super) fn handle_escape(&mut self, ctx: &egui::Context) -> bool {
-        if !self.open || ctx.memory(|memory| memory.top_modal_layer().is_some()) {
-            return false;
-        }
-        let can_close = self.had_focus || self.compact(ctx);
-        if can_close
-            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-        {
-            self.close(ctx);
-            return true;
-        }
-        false
-    }
-
-    pub(super) fn handle_compact_focus(&self, ctx: &egui::Context) {
-        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F6)) {
-            ctx.memory_mut(|memory| {
-                let next = if memory.focused() == self.heading {
-                    self.opener
-                } else {
-                    self.heading
-                };
-                if let Some(next) = next {
-                    memory.request_focus(next);
-                }
-            });
-        }
-    }
-
     fn show(&mut self, ui: &mut egui::Ui, technical: &[&str]) {
         let response = ui.add(
             egui::Label::new(egui::RichText::new("Activity").heading().strong())
                 .sense(egui::Sense::focusable_noninteractive()),
         );
-        self.bounds = Some(ui.max_rect());
-        let previous_heading = self.heading.replace(response.id);
-        let heading_moved = previous_heading
-            .is_some_and(|id| id != response.id && ui.ctx().memory(|memory| memory.has_focus(id)));
         shell::register_region(ui, shell::Region::Activity, response.id);
-        if std::mem::take(&mut self.focus_pending) || heading_moved {
-            response.request_focus();
-        }
         theme::focus_outline(ui, &response);
         let toggle = dense::explained(
             ui.button(if self.details {
@@ -172,8 +69,7 @@ impl Activity {
             }
             dense::diagnostic(ui, &report, &mut self.detail_page);
         } else {
-            let rows = if self.compact(ui.ctx()) { 5 } else { 3 };
-            for index in dense::page(ui, &mut self.page, self.history.len(), rows, "Activity") {
+            for index in dense::page(ui, &mut self.page, self.history.len(), 3, "Event") {
                 let notice = self.history[self.history.len() - index - 1];
                 let color = match notice {
                     Notice::Progress(_) => theme::rgb(theme::palette(ui.ctx()).foreground),
@@ -240,28 +136,13 @@ impl WizardApp {
 
     pub(super) fn show_activity_side(&mut self, ctx: &egui::Context) {
         shell::clear_activity_focus(ctx);
-        if !self.activity.open || !Activity::wide(ctx) {
+        if !dense::room_for_both_rails(ctx) {
             return;
         }
-        let visuals = &ctx.style().visuals;
         egui::SidePanel::right("wizard-activity")
             .resizable(false)
-            .exact_width(PANEL_WIDTH)
-            .frame(
-                egui::Frame::new()
-                    .fill(visuals.panel_fill)
-                    .stroke(visuals.window_stroke)
-                    .inner_margin(egui::Margin::same(12)),
-            )
-            .show(ctx, |ui| self.show_activity_contents(ui));
-    }
-
-    pub(super) fn show_activity_compact(&mut self, ctx: &egui::Context) {
-        shell::clear_activity_focus(ctx);
-        self.show_header(ctx, "", None);
-        dense::show_help_bar(ctx, "Choose Hide Activity to return to your work.");
-        egui::CentralPanel::default()
-            .frame(dense::content_frame(ctx))
+            .exact_width(dense::RAIL_WIDTH)
+            .frame(dense::rail_frame(ctx))
             .show(ctx, |ui| self.show_activity_contents(ui));
     }
 
@@ -282,88 +163,69 @@ impl WizardApp {
 mod tests {
     use super::*;
 
-    fn draw(
-        wizard: &mut WizardApp,
-        ctx: &egui::Context,
-        size: [f32; 2],
-        key: Option<egui::Key>,
-    ) -> egui::FullOutput {
-        let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(size));
-        let mut frame = eframe::Frame::_new_kittest();
-        ctx.run(
-            egui::RawInput {
-                screen_rect: Some(bounds),
-                events: key
-                    .into_iter()
-                    .map(|key| egui::Event::Key {
-                        key,
-                        physical_key: None,
-                        pressed: true,
-                        repeat: false,
-                        modifiers: egui::Modifiers::NONE,
-                    })
-                    .collect(),
-                ..Default::default()
-            },
-            |ctx| eframe::App::update(wizard, ctx, &mut frame),
-        )
-    }
-
-    fn text_is_visible(output: &egui::FullOutput, label: &str) -> bool {
-        output.shapes.iter().any(|clipped| {
-            matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text() == label)
-                && clipped
-                    .clip_rect
-                    .expand(0.9)
-                    .contains_rect(clipped.shape.visual_bounding_rect())
-        })
-    }
-
     #[test]
-    fn activity_stays_inside_the_window_at_minimum_and_wide_sizes() {
-        for (size, compact) in [
-            ([640.0, 480.0], true),
-            ([WIDE_MIN, 480.0], false),
-            ([1160.0, 800.0], false),
-        ] {
+    fn activity_and_roadmap_stay_visible_while_the_workspace_scales() {
+        use super::super::window_scale::CANVAS;
+
+        for scale in [0.75, 1.0, 1.25] {
             let ctx = egui::Context::default();
             theme::install_fonts(&ctx);
-            let mut wizard = WizardApp::default();
-            wizard.settings.text_scale = 1.5;
+            let mut wizard = WizardApp {
+                proportional_window: true,
+                ..Default::default()
+            };
             wizard.settings.welcomed = true;
-            assert!(!wizard.activity.open);
-            wizard.activity.open = true;
-            wizard.activity.focus_pending = true;
-            draw(&mut wizard, &ctx, size, None);
-            draw(&mut wizard, &ctx, size, None);
-            let output = draw(&mut wizard, &ctx, size, None);
-            assert_eq!(ctx.zoom_factor(), 1.5);
-            assert_eq!(wizard.activity.compact(&ctx), compact);
-            for label in [
-                "Technical details",
-                "Hide Activity",
-                "Choose an app to begin.",
-            ] {
-                assert!(text_is_visible(&output, label), "{label} at {size:?}");
+            let mut frame = eframe::Frame::_new_kittest();
+            let mut draw = |events| {
+                let logical = egui::Vec2::from(CANVAS) * (scale / ctx.zoom_factor());
+                ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, logical)),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| eframe::App::update(&mut wizard, ctx, &mut frame),
+                )
+            };
+            for _ in 0..3 {
+                draw(vec![]);
             }
-            assert_eq!(
-                text_is_visible(&output, portableforge_core::guide::folder_flow::PICK_TITLE),
-                !compact
-            );
-            assert_eq!(
-                ctx.memory(|memory| memory.focused()),
-                wizard.activity.heading
-            );
-            let output = draw(&mut wizard, &ctx, size, Some(egui::Key::Escape));
-            assert!(!wizard.activity.open, "Escape at {size:?}");
-            assert!(
-                !text_is_visible(&output, "Hide Activity"),
-                "Close label at {size:?}"
-            );
-            assert_eq!(
-                ctx.memory(|memory| memory.focused()),
-                wizard.activity.opener
-            );
+            let key = |key, pressed| egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            };
+            draw(vec![key(egui::Key::F6, true)]);
+            let activity = shell::region_focus(&ctx, shell::Region::Activity);
+            assert!(activity.is_some());
+            assert_eq!(ctx.memory(|memory| memory.focused()), activity);
+            let output = draw(vec![
+                key(egui::Key::F6, false),
+                key(egui::Key::Escape, true),
+            ]);
+            assert!((ctx.zoom_factor() - scale).abs() < 0.001);
+            assert_eq!(egui::TextStyle::Body.resolve(&ctx.style()).size, 18.0);
+            let clip_for = |label: &str| {
+                let shape = output.shapes.iter().find(|clipped| {
+                    matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text() == label)
+                }).unwrap_or_else(|| panic!("Missing {label} at {scale}"));
+                assert!(
+                    shape
+                        .clip_rect
+                        .expand(1.0)
+                        .contains_rect(shape.shape.visual_bounding_rect()),
+                    "{label} at {scale}"
+                );
+                shape.clip_rect
+            };
+            let left = clip_for("Roadmap");
+            let right = clip_for("Activity");
+            assert!((left.width() - right.width()).abs() < 1.0);
+            assert!((left.min.x - (CANVAS[0] - right.max.x)).abs() < 1.0);
+            clip_for("Technical details");
+            clip_for(portableforge_core::guide::folder_flow::PICK_TITLE);
         }
     }
 

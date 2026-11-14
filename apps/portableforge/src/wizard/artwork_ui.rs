@@ -186,7 +186,7 @@ impl Editor {
         };
         draft.poll_captured_icon();
         let viewport = ctx.content_rect();
-        let paired = viewport.width() >= 760.0 && viewport.height() >= 560.0;
+        let paired = viewport.width() >= 760.0 && viewport.height() >= 510.0;
         let width = (viewport.width() - 52.0).clamp(380.0, if paired { 860.0 } else { 560.0 });
         let response = egui::Modal::new(egui::Id::new(draft.copy.modal_id)).show(ctx, |ui| {
             ui.set_width(width);
@@ -549,6 +549,7 @@ impl Draft {
             ui.label(egui::RichText::new("Preview").strong());
         }
         let pane_height = match (paired, ui.ctx().content_rect().height()) {
+            (true, height) if height < 560.0 => 96.0,
             (true, height) if height < 620.0 => 112.0,
             (true, _) => 144.0,
             (false, _) => 184.0,
@@ -724,6 +725,7 @@ mod tests {
     fn paired_artwork_previews_fit_at_each_text_size() {
         assert_artwork_fits([760.0, 560.0], true);
         assert_artwork_fits([980.0, 620.0], true);
+        assert_artwork_fits(super::super::window_scale::CANVAS, true);
     }
 
     fn assert_artwork_fits(size: [f32; 2], paired: bool) {

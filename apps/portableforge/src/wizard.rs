@@ -1082,7 +1082,6 @@ impl WizardApp {
 impl eframe::App for WizardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_wizard(ctx);
-        self.activity.finish_frame(ctx);
         file_picker::show(ctx);
     }
 }
@@ -1118,16 +1117,7 @@ impl WizardApp {
             || self.folder_flow.modal_open()
             || file_picker::is_active(ctx)
             || ctx.memory(|memory| memory.top_modal_layer().is_some());
-        if self.activity.compact(ctx) && !modal_open && !close_after_cleanup {
-            self.activity.handle_escape(ctx);
-            if self.activity.compact(ctx) {
-                self.activity.handle_compact_focus(ctx);
-                self.show_activity_compact(ctx);
-                self.show_shell_popup(ctx);
-                return;
-            }
-        }
-        if !modal_open && !close_after_cleanup && !self.activity.handle_escape(ctx) {
+        if !modal_open && !close_after_cleanup {
             self.handle_shell_keys(ctx);
         }
         self.update_heading_focus(ctx);
