@@ -326,6 +326,19 @@ pub(super) fn page(
     let pages = total.div_ceil(per_page);
     *page = (*page).min(pages.saturating_sub(1));
     if pages > 1 {
+        let page_label = |page: usize| {
+            let first = page * per_page + 1;
+            let last = (first + per_page - 1).min(total);
+            if first == last {
+                format!("{item} {first} of {total}")
+            } else {
+                format!("{item} {first}–{last} of {total}")
+            }
+        };
+        let narrow = ui.available_width() < 275.0;
+        if narrow {
+            ui.label(page_label(*page));
+        }
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(*page > 0, egui::Button::new("‹ Previous"))
@@ -333,13 +346,9 @@ pub(super) fn page(
             {
                 *page -= 1;
             }
-            let first = *page * per_page + 1;
-            let last = (first + per_page - 1).min(total);
-            ui.label(if first == last {
-                format!("{item} {first} of {total}")
-            } else {
-                format!("{item} {first}–{last} of {total}")
-            });
+            if !narrow {
+                ui.label(page_label(*page));
+            }
             if ui
                 .add_enabled(*page + 1 < pages, egui::Button::new("Next ›"))
                 .clicked()
@@ -368,7 +377,12 @@ fn diagnostic_in_height(ui: &mut egui::Ui, text: &str, selected: &mut usize, hei
         )
     });
     let line_height = galley.rows.first().map_or(20.0, |row| row.rect().height());
-    let rows = ((height - 36.0) / line_height).floor().max(1.0) as usize;
+    let pager_height = if ui.available_width() < 275.0 {
+        (ui.spacing().interact_size.y + ui.spacing().item_spacing.y) * 2.0
+    } else {
+        36.0
+    };
+    let rows = ((height - pager_height) / line_height).floor().max(1.0) as usize;
     let range = page(ui, selected, galley.rows.len(), rows, "Line");
     let start = galley.rows[..range.start]
         .iter()
