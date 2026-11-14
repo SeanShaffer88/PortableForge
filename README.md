@@ -43,6 +43,8 @@ ZIP and loose-file staging on Windows x64 leaves your originals intact and never
 
 Under **File Findings**, **Check DLL Dependencies** reads the selected start file’s ordinary and delay-load imports. It reports matching bundled files and uncertain dependencies. DLLs selected at runtime can require a separate test.
 
+**Data Locations** shows bundled settings files and storage clues found in supported settings files. A clue can be a default or an example. Test the app to confirm where it writes.
+
 On **Keep AppData Settings Portable**, optionally redirect Roaming or Local AppData to the package’s Data folder. The launcher sets the selected AppData environment variables for the app and its children. Apps that use Windows known-folder APIs or hardcoded paths may ignore these variables. Confirm that settings persist across two launches. Saved app jobs retain your choices.
 
 Open the test page under **Build Result**, then choose **Test Installer** to try it in a fresh Sandboxie-Plus box. Follow the prompts to finish setup and try the app twice. The result records what happened to the app’s portable data and whether the test box was removed.
@@ -55,9 +57,11 @@ PortableForge leaves the source folder intact and preserves its directory layout
 
 1. On the first page choose **Capture with Sandboxie-Plus**. This needs Windows x64 and Sandboxie-Plus 1.18.8 x64. Choose a trusted setup `.exe` that can finish offline without elevation or a restart. In **Setup options**, enter one argument per line and explicitly choose any companion files. Enter the installed app path or leave it blank to pick an app after setup.
 2. Use **Check prerequisites**, confirm that you trust the selected inputs and installed app, and choose **Start capture**. If the dedicated box is unavailable, the wizard offers the portable test box folder and setup instructions. Finish setup inside the dedicated box, choose the installed app if prompted, then try and close it. **Cancel capture** requests cleanup of the dedicated box.
-3. **Review Your Package** opens after cleanup is confirmed. Choose **Review Findings** to see what changed. **Needs attention** shows unresolved warnings. If you close the wizard after a cleaned capture, **Pick up where I left off** rechecks its saved receipt and opens the review so you can recheck the choices. Captures whose receipts predate the selected app field need a fresh capture to reopen in the wizard.
+3. **Review Your Package** opens after cleanup is confirmed. **Data Locations** shows tracked file and registry locations observed during setup or first use. **Review Findings** shows changes and **Needs attention** shows unresolved warnings. If you close the wizard after a cleaned capture, **Pick up where I left off** rechecks its saved receipt and opens the review so you can recheck the choices. Captures whose receipts predate the selected app field need a fresh capture to reopen in the wizard.
 4. Enter the portable copy's name, publisher, full HTTP or HTTPS homepage, and a short description. Confirm permission to bundle the app. Select the official PortableApps.com Launcher Generator 2.2.9 folder and a new profile folder. To customize the visuals, choose **Edit package artwork…**, then **Apply artwork**. Choose **Save profile** to approve the package.
 5. Choose **Build installer**, or choose **Open saved profiles** on the first page later. Select the matching setup, the official PortableApps.com Installer 3.9.19 folder, and a new build folder. The build checks the setup bytes, saved profile approval, staged package, and installer tools before publishing the installer and receipt.
+
+Setup runs inside the verified box. PortableForge copies the captured app files into the package’s `App` directory during staging. Installer registrations stay in the box and are removed with it. Data locations reflect the observed capture. Exercise the features you plan to use before closing the app.
 
 Use printable ASCII for the capture and build paths. Leave out `$`, `%`, single and double quotes, and backticks. Use **Setup options** to pick a capture folder if the default path contains one of these characters.
 

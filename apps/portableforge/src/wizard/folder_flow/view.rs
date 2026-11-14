@@ -9,7 +9,7 @@ use portableforge_core::paf::CATEGORIES;
 
 #[cfg(windows)]
 use super::super::artwork_ui::ArtworkPage;
-use super::super::{dense, file_picker, package_review, shell, theme, WizardApp};
+use super::super::{dense, file_picker, package_review, shell, storage_report, theme, WizardApp};
 use super::draft::{suggested_id, Language};
 use super::saved_job;
 use super::{Flow, Page};
@@ -32,8 +32,13 @@ const ROADMAP: [(&str, &[Page], &str); 7] = [
     ),
     (
         "File Findings",
-        &[Page::Findings, Page::Dependencies, Page::AppData],
-        "Review file findings, check DLL dependencies, and manage app settings folders.",
+        &[
+            Page::Findings,
+            Page::Dependencies,
+            Page::Storage,
+            Page::AppData,
+        ],
+        "Review file findings, dependencies, and where the app may store data.",
     ),
     (
         "Package Artwork",
@@ -261,7 +266,8 @@ impl Flow {
             Page::Package => Page::Rights,
             Page::Rights => Page::Findings,
             Page::Findings => Page::Dependencies,
-            Page::Dependencies => Page::AppData,
+            Page::Dependencies => Page::Storage,
+            Page::Storage => Page::AppData,
             Page::AppData if cfg!(windows) => Page::Icon,
             Page::AppData => Page::Tools,
             Page::Icon => Page::InstallerArtwork,
@@ -415,6 +421,11 @@ impl Flow {
             }
             Page::Dependencies => {
                 self.show_dependencies(ui);
+                None
+            }
+            Page::Storage => {
+                self.show_substep_heading(ui, storage_report::TITLE);
+                storage_report::show(ui, &self.storage, &mut self.storage_page, false);
                 None
             }
             Page::AppData => {

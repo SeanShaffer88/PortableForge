@@ -922,6 +922,7 @@ pub struct CaptureOutcome {
     pub install_diff: crate::diff::Diff,
     pub runtime_diff: crate::diff::Diff,
     pub review: crate::review::Review,
+    pub storage: crate::storage::StorageReport,
     pub specimens: Vec<Specimen>,
     pub hints: MetadataHints,
     /// Names of Start Menu shortcuts the install added (without the
@@ -1054,6 +1055,7 @@ pub fn read_capture(layout: &SessionLayout) -> Result<CaptureOutcome, String> {
 
     Ok(CaptureOutcome {
         review: crate::review::Review::from_classifications(classifications),
+        storage: crate::storage::observe_capture(&install_diff, &runtime_diff),
         specimens: specimen_plan(&runtime_diff),
         hints: MetadataHints::from_snapshot(&after_install),
         shortcut_candidates: shortcut_candidates(&before, &after_runtime),
@@ -1409,6 +1411,9 @@ mod tests {
         after_install
             .files
             .push(entry(r"C:\Program Files\Widget\widget.exe"));
+        after_install
+            .files
+            .push(entry(r"C:\ProgramData\Acme\Widget\defaults.ini"));
         let mut after_runtime = after_install.clone();
         after_runtime.label = "post-run".into();
         after_runtime.files.push(entry(
@@ -1461,6 +1466,13 @@ mod tests {
             .unwrap();
         let outcome = post_capture(&layout).unwrap();
         assert!(!outcome.review.items.is_empty(), "review should have cards");
+        use crate::storage::StorageSource;
+        assert!(outcome.storage.findings.iter().any(|finding| {
+            finding.source == StorageSource::Setup && finding.location.contains("Widget")
+        }));
+        assert!(outcome.storage.findings.iter().any(|finding| {
+            finding.source == StorageSource::FirstRun && finding.location.contains("Widget")
+        }));
         assert_eq!(outcome.specimens.len(), 1);
         assert_eq!(outcome.specimens[0].data_relative, r"Widget\settings.ini");
         assert_eq!(outcome.hints.display_name.as_deref(), Some("Widget"));

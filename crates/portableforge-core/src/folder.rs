@@ -26,7 +26,7 @@ mod dependencies;
 pub use dependencies::{Dependency, DependencyReport, DependencyStatus};
 
 pub mod input;
-mod validation;
+pub(crate) mod validation;
 pub use validation::validate;
 
 const MAX_ENTRIES: usize = 20_000;

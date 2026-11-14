@@ -4,13 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
-use super::{EntryKind, FolderIssue, FolderScan, IssueSeverity};
+use super::{EntryKind, FolderEntry, FolderIssue, FolderScan, IssueSeverity, ScanError};
 use crate::path_safety::safe_name;
 
 const APPINFO: &str = "App/AppInfo/appinfo.ini";
 const INSTALLER: &str = "App/AppInfo/installer.ini";
 const MAX_TEXT_BYTES: usize = 128 * 1024;
-const MAX_RAW_CONFIGS: usize = 32;
+pub(crate) const MAX_RAW_CONFIGS: usize = 32;
 
 pub fn validate(scan: &FolderScan, selected: Option<&Path>) -> Vec<FolderIssue> {
     let mut issues = Vec::new();
@@ -500,50 +500,61 @@ fn check_installer(scan: &FolderScan, issues: &mut Vec<FolderIssue>) {
     }
 }
 
-fn check_raw_configs(scan: &FolderScan, issues: &mut Vec<FolderIssue>) {
-    let configs = scan.entries.iter().filter(|entry| {
+pub(crate) fn raw_configs(scan: &FolderScan) -> impl Iterator<Item = &FolderEntry> {
+    scan.entries.iter().filter(|entry| {
         entry.kind == EntryKind::File
             && entry
                 .relative_path
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .is_some_and(|extension| {
-                    matches!(
-                        extension.to_ascii_lowercase().as_str(),
-                        "ini"
-                            | "cfg"
-                            | "conf"
-                            | "config"
-                            | "json"
-                            | "toml"
-                            | "yaml"
-                            | "yml"
-                            | "properties"
-                    )
+                    [
+                        "ini",
+                        "cfg",
+                        "conf",
+                        "config",
+                        "json",
+                        "toml",
+                        "yaml",
+                        "yml",
+                        "properties",
+                    ]
+                    .iter()
+                    .any(|format| extension.eq_ignore_ascii_case(format))
                 })
-    });
-    for (index, entry) in configs.enumerate() {
+    })
+}
+
+pub(crate) fn read_raw_config(
+    scan: &FolderScan,
+    entry: &FolderEntry,
+) -> Result<Option<String>, ScanError> {
+    if entry.size_bytes > MAX_TEXT_BYTES as u64 {
+        return Ok(None);
+    }
+    let bytes = scan.read_small(&entry.relative_path, MAX_TEXT_BYTES)?;
+    Ok(decode_text(&bytes))
+}
+
+fn check_raw_configs(scan: &FolderScan, issues: &mut Vec<FolderIssue>) {
+    for (index, entry) in raw_configs(scan).enumerate() {
         if index == MAX_RAW_CONFIGS {
             issues.push(issue("configuration_scan_limit", IssueSeverity::Warning, None,
                 "The folder contains more settings files than this scan checks. The remaining files are unverified."));
             break;
         }
         let path = entry.relative_path.as_path();
-        let text = if entry.size_bytes <= MAX_TEXT_BYTES as u64 {
-            match scan.read_small(path, MAX_TEXT_BYTES) {
-                Ok(bytes) => decode_text(&bytes),
-                Err(_) => {
-                    issues.push(issue(
-                        "configuration_read_failed",
-                        IssueSeverity::Error,
-                        Some(path),
-                        "This settings file could not be read safely. Scan the folder again after checking the file.",
-                    ));
-                    continue;
-                }
+        let text = match read_raw_config(scan, entry) {
+            Ok(text) => text,
+            Err(_) => {
+                issues.push(issue(
+                    "configuration_read_failed",
+                    IssueSeverity::Error,
+                    Some(path),
+                    "This settings file could not be read safely. Scan the folder again after checking the file.",
+                ));
+                continue;
             }
-        } else {
-            None
         };
         let Some(text) = text else {
             issues.push(issue("configuration_unverified", IssueSeverity::Warning, Some(path),

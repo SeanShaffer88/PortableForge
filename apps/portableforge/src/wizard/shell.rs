@@ -19,6 +19,7 @@ struct PageKey {
     step: usize,
     details: bool,
     setup_findings: bool,
+    setup_storage: bool,
     folder: Option<(folder_flow::Page, bool)>,
 }
 
@@ -140,6 +141,7 @@ impl WizardApp {
             step: self.step,
             details: self.show_details,
             setup_findings: self.showing_setup_findings(),
+            setup_storage: self.showing_setup_storage(),
             folder: self
                 .folder_flow
                 .open
@@ -164,7 +166,7 @@ impl WizardApp {
                 )
             });
         }
-        if self.show_details || self.profile_flow.replay_open {
+        if self.show_details || self.profile_flow.replay_open || self.showing_setup_storage() {
             return None;
         }
         if self.offer_setup_findings() {

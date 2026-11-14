@@ -36,6 +36,7 @@ pub mod sbie_verified;
 pub mod session;
 pub mod settings;
 pub mod snapshot;
+pub mod storage;
 pub mod timeutil;
 pub mod tools;
 pub mod validate;

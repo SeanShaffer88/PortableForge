@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Show data locations from archive settings clues and observed setup or first-use changes.
 - Check the start file’s DLL dependencies and redirect Roaming or Local AppData for the launched app under File Findings.
 - Give folder, ZIP, and loose-file packaging a page per substep. The seven roadmap rows show substep progress. Status help uses larger text and grows only when it wraps. Activity text is smaller.
 - Guide each package through review and an explicit build. Dark High Contrast is the default for new settings, with persistent Activity and in-window pickers.
