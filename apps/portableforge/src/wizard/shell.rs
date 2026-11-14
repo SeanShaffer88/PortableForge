@@ -18,6 +18,7 @@ struct PageKey {
     profile_replay: bool,
     step: usize,
     details: bool,
+    setup_findings: bool,
     folder: Option<(folder_flow::Page, bool)>,
 }
 
@@ -39,6 +40,7 @@ struct Dialog {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WizardAction {
     Continue,
+    ReviewFindings,
     StartCapture,
     StartMsi,
     SaveProfile,
@@ -51,6 +53,7 @@ impl WizardAction {
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Continue => "Continue",
+            Self::ReviewFindings => "Review Findings",
             Self::StartCapture => "Start capture",
             Self::StartMsi => "Start Windows Sandbox",
             Self::SaveProfile => "Save profile",
@@ -122,6 +125,7 @@ impl WizardApp {
             profile_replay: self.profile_flow.replay_open,
             step: self.step,
             details: self.show_details,
+            setup_findings: self.showing_setup_findings(),
             folder: self
                 .folder_flow
                 .open
@@ -147,6 +151,9 @@ impl WizardApp {
         }
         if self.show_details || self.profile_flow.replay_open {
             return None;
+        }
+        if self.offer_setup_findings() {
+            return Some((WizardAction::ReviewFindings, !self.profile_flow.busy()));
         }
         let verified = self.use_verified_capture();
         Some(match self.step {
@@ -178,7 +185,7 @@ impl WizardApp {
             WizardAction::SaveProfile => self.start_profile_save(ctx),
             WizardAction::BuildInstaller => self.open_profile_replay(true),
             WizardAction::BuildFromFolder => self.folder_flow.build(ctx),
-            WizardAction::Continue | WizardAction::Finish => {
+            WizardAction::Continue | WizardAction::ReviewFindings | WizardAction::Finish => {
                 self.advance();
             }
         }
@@ -671,6 +678,49 @@ mod tests {
             command_rank("erase", "Open saved profiles", "library"),
             None
         );
+    }
+
+    #[test]
+    fn escape_from_setup_findings_focuses_the_review_overview() {
+        let ctx = egui::Context::default();
+        super::super::theme::install_fonts(&ctx);
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut wizard = WizardApp {
+            step: 6,
+            setup_findings_open: true,
+            ..Default::default()
+        };
+        let draw = |wizard: &mut WizardApp, frame: &mut eframe::Frame, events| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    eframe::App::update(wizard, ctx, frame);
+                },
+            );
+            let heading = region_focus(&ctx, Region::Body).unwrap();
+            assert_eq!(ctx.memory(|memory| memory.focused()), Some(heading));
+            heading
+        };
+        draw(&mut wizard, &mut frame, vec![]);
+        assert!(wizard.shell.page.unwrap().setup_findings);
+        let after = draw(
+            &mut wizard,
+            &mut frame,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(wizard.step, 6);
+        assert!(!wizard.showing_setup_findings());
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(after));
+        assert!(!wizard.shell.page.unwrap().setup_findings);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use portableforge_core::folder::IssueSeverity;
 use portableforge_core::guide::folder_flow as copy;
 use portableforge_core::paf::CATEGORIES;
 
-use super::super::{dense, open_folder, shell, theme, WizardApp};
+use super::super::{dense, open_folder, package_review, shell, theme, WizardApp};
 use super::draft::{suggested_id, Language};
 use super::{Failure, Flow, IntakeMode, Page};
 
@@ -258,22 +258,11 @@ impl Flow {
                 .then_some(SourcePicker::Folder);
         }
 
-        dense::heading(ui, copy::REVIEW, "");
-        if !self.source_label.is_empty() {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(format!("Source · {}", self.source_label)).weak(),
-                )
-                .truncate(),
-            )
-            .on_hover_text(self.source.display().to_string());
-        }
+        package_review::overview(ui, "App Files", &self.source_label, &self.source);
         if self.selected.is_some() {
             self.show_app_summary(ui);
             let selected = self.selected.as_deref().unwrap_or_else(|| Path::new(""));
             path_summary(ui, "Starts With", selected);
-        } else if self.source_label.is_empty() {
-            path_summary(ui, "Source", &self.source);
         }
         if !self.draft.id.is_empty() && !self.output_parent.as_os_str().is_empty() {
             path_summary(ui, "Save To", &self.output());

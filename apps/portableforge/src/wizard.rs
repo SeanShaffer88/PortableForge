@@ -19,6 +19,7 @@ mod dense;
 mod folder_flow;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod installer_test;
+mod package_review;
 mod profiles;
 mod shell;
 mod theme;
@@ -33,6 +34,7 @@ pub struct WizardApp {
     show_details: bool,
     detail_page: usize,
     review_page: usize,
+    setup_findings_open: bool,
     review_needs_attention: bool,
     msi_review_ready: bool,
     safety_page: usize,
@@ -105,6 +107,7 @@ impl Default for WizardApp {
             show_details: false,
             detail_page: 0,
             review_page: 0,
+            setup_findings_open: false,
             review_needs_attention: false,
             msi_review_ready: false,
             safety_page: 0,
@@ -305,6 +308,7 @@ fn card(ui: &egui::Ui) -> egui::Frame {
 
 impl WizardApp {
     fn setup_changed(&mut self) {
+        self.setup_findings_open = false;
         self.profile_flow.detach_capture();
         self.artwork = artwork_ui::Editor::default();
         self.layout = None;
@@ -621,6 +625,7 @@ impl WizardApp {
     }
 
     fn apply_capture(&mut self, outcome: portableforge_core::orchestrate::CaptureOutcome) {
+        self.setup_findings_open = false;
         self.log
             .push(format!("Notes read in. {}", outcome.review.summary()));
         self.review = outcome.review;
@@ -880,6 +885,7 @@ impl WizardApp {
         if let Some(pos) = STEPS.iter().position(|s| s.id == draft.step) {
             self.step = pos;
         }
+        self.setup_findings_open = false;
         self.resume_offer = false;
         self.profile_flow.update_base = draft.profile_update_base;
         if let Some(capture) = draft.cleaned_capture {
@@ -908,6 +914,10 @@ impl WizardApp {
         if !self.can_go_back() {
             return;
         }
+        if self.showing_setup_findings() {
+            self.setup_findings_open = false;
+            return;
+        }
         self.step = match (self.use_verified_capture(), self.step) {
             (true, 2) if self.profile_flow.selected_capture => {
                 self.profile_flow.selected_capture = false;
@@ -925,6 +935,18 @@ impl WizardApp {
             && !self.profile_flow.profile_saved()
             && !(self.use_verified_capture() && self.step == 2 && self.profile_flow.captured)
             && !(self.uses_guided_msi() && self.step == 2 && self.layout.is_some())
+    }
+
+    fn at_setup_review(&self) -> bool {
+        STEPS[self.step].id == "changes"
+    }
+
+    fn showing_setup_findings(&self) -> bool {
+        self.at_setup_review() && self.setup_findings_open
+    }
+
+    fn offer_setup_findings(&self) -> bool {
+        self.at_setup_review() && !self.setup_findings_open && !self.review.items.is_empty()
     }
 
     fn can_advance(&self) -> bool {
@@ -967,6 +989,10 @@ impl WizardApp {
     /// the log, never a trap). Returns true when the step moved or
     /// the run finished.
     fn advance(&mut self) -> bool {
+        if self.offer_setup_findings() && !self.profile_flow.busy() {
+            self.setup_findings_open = true;
+            return true;
+        }
         if !self.can_advance() {
             return false;
         }
@@ -1047,6 +1073,7 @@ impl WizardApp {
             return false;
         }
         if self.step + 1 < STEPS.len() {
+            self.setup_findings_open = false;
             self.step += 1;
             self.log
                 .push(format!("Moved to: {}", STEPS[self.step].title));
@@ -1132,7 +1159,8 @@ impl eframe::App for WizardApp {
             return;
         }
 
-        let step = &STEPS[self.step];
+        let shown_step = self.step;
+        let step = &STEPS[shown_step];
         let verified = self.use_verified_capture();
         let guided_msi = self.uses_guided_msi();
         let (title, what_happens, what_you_do) = match (guided_msi, step.id) {
@@ -1202,11 +1230,34 @@ impl eframe::App for WizardApp {
         };
         self.show_header(ctx, step.title, Some((self.step + 1, STEPS.len())));
         self.show_navigation(ctx, what_you_do);
+        if self.step == shown_step {
+            self.update_heading_focus(ctx);
+        }
         egui::CentralPanel::default()
             .frame(dense::content_frame(ctx))
             .show(ctx, |ui| {
             if self.show_details {
                 self.show_step_details(ui, step);
+                return;
+            }
+            if step.id == "changes" && !self.setup_findings_open {
+                let path = std::path::Path::new(self.installer_path.trim());
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                package_review::overview(ui, "Setup", &name, path);
+                let count = self.review.items.len();
+                if verified && count == 0 {
+                    self.show_update_review(ui);
+                }
+                ui.label(if count == 0 {
+                    "No captured findings to review".to_owned()
+                } else {
+                    format!("Captured Findings ({count})")
+                });
+                ui.label(if verified {
+                    "Next · App Details → Sharing → Save Profile"
+                } else {
+                    "Next · App Details → Sharing → Build Package Folder"
+                });
                 return;
             }
             dense::heading(ui, title, what_happens);
@@ -1900,7 +1951,10 @@ mod tests {
 
     #[test]
     fn changing_setup_detaches_previous_capture_and_approval() {
-        let mut wizard = WizardApp::default();
+        let mut wizard = WizardApp {
+            setup_findings_open: true,
+            ..Default::default()
+        };
         wizard.profile_flow.captured = true;
         wizard.profile_flow.cleaned_capture = Some(settings::CleanedCapture {
             folder: "old-capture".into(),
@@ -1910,11 +1964,96 @@ mod tests {
         wizard.sharing = Some(SharingAnswer::IMadeIt);
         wizard.installer_path = "replacement.exe".into();
         wizard.setup_changed();
+        assert!(!wizard.setup_findings_open);
         assert!(!wizard.profile_flow.captured);
         assert!(wizard.profile_flow.cleaned_capture.is_none());
         assert!(wizard.main_exe.is_empty());
         assert!(wizard.sharing.is_none());
         assert_eq!(wizard.installer_path, "replacement.exe");
+    }
+
+    #[test]
+    fn setup_review_routes_through_existing_warning_and_metadata_gates() {
+        use portableforge_core::classify::{Classification, Finding, Severity};
+        use portableforge_core::review::Decision;
+        use shell::WizardAction;
+
+        for (source, verified) in [
+            ("widget.exe", true),
+            ("widget.exe", false),
+            ("widget.msi", false),
+        ] {
+            let mut wizard = WizardApp {
+                installer_path: source.into(),
+                ..Default::default()
+            };
+            if verified {
+                wizard.enter_verified_capture();
+            }
+            wizard.step = 6;
+            wizard.review = Review::from_classifications(vec![Classification {
+                finding: Finding::RegistryKey {
+                    key: "Test warning".into(),
+                },
+                severity: Severity::RedFlag,
+                confidence: 1.0,
+                why: "Fixture warning".into(),
+            }]);
+            let ctx = egui::Context::default();
+            assert_eq!(
+                wizard.current_wizard_action(),
+                Some((WizardAction::ReviewFindings, true))
+            );
+            wizard.run_wizard_action(&ctx, WizardAction::Continue);
+            assert!(!wizard.showing_setup_findings());
+            wizard.run_wizard_action(&ctx, WizardAction::ReviewFindings);
+            assert!(wizard.showing_setup_findings());
+            assert_eq!(wizard.step, 6);
+            let before = wizard.log.len();
+            assert!(!wizard.advance());
+            assert_eq!(wizard.step, 6);
+            assert_eq!(wizard.log.len() > before, !verified);
+            wizard.go_back();
+            assert!(!wizard.showing_setup_findings());
+            assert_eq!(wizard.step, 6);
+            wizard.run_wizard_action(&ctx, WizardAction::ReviewFindings);
+            assert!(!wizard.review.all_acknowledged());
+            wizard.review.items[0].decision = Decision::Acknowledge { seen: true };
+            wizard.run_wizard_action(&ctx, WizardAction::Continue);
+            assert_eq!(wizard.step, 7);
+            assert!(!wizard.setup_findings_open);
+            assert!(!wizard.advance());
+            assert_eq!(wizard.step, 7);
+            assert!(wizard
+                .log
+                .last()
+                .unwrap()
+                .contains("Give your portable copy a name"));
+            wizard.go_back();
+            assert_eq!(wizard.step, 6);
+            assert!(!wizard.showing_setup_findings());
+            assert!(wizard.review.all_acknowledged());
+        }
+    }
+
+    #[test]
+    fn setup_review_without_findings_advances_and_keeps_legacy_back() {
+        let mut wizard = WizardApp {
+            step: 6,
+            ..Default::default()
+        };
+        assert_eq!(
+            wizard.current_wizard_action(),
+            Some((shell::WizardAction::Continue, true))
+        );
+        assert!(wizard.advance());
+        assert_eq!(wizard.step, 7);
+        wizard.go_back();
+        wizard.go_back();
+        assert_eq!(wizard.step, 5);
+        wizard.step = 1;
+        wizard.go_back();
+        assert_eq!(wizard.step, 0);
     }
 
     #[test]
@@ -1964,6 +2103,7 @@ mod tests {
             .chain(include_str!("wizard/profiles.rs").lines())
             .chain(include_str!("wizard/dense.rs").lines())
             .chain(include_str!("wizard/artwork_ui.rs").lines())
+            .chain(include_str!("wizard/package_review.rs").lines())
         {
             if !line.trim_start().starts_with("//") {
                 cleaned.push_str(line);

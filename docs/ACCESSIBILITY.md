@@ -27,6 +27,7 @@ task surface. Warnings and outcomes include text. [TesselGUI revision 2 verifica
 - Escape dismisses a dialog or goes back when the current step allows it.
   Commands, Appearance, and Package artwork restore focus to their opener.
   Task navigation focuses the heading so the next controls follow in reading order.
+  Back and Escape return from captured findings to **Review Your Package**.
 - **Needs attention** shows unresolved required warnings. Review choices
   remain with their findings when you page, filter, or go back.
 

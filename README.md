@@ -23,12 +23,12 @@ The desktop wizard guides capture, review, and packaging. GitHub Dark is the def
 
 ## How it works
 
-In the standard package flow, select a setup file and review the system checks. Install and try the app in the selected test environment. Close the app and collect the final capture before closing Windows Sandbox. Review the findings, enter the app details and sharing choice, and prepare the package folder. The wizard displays recorded test results when available.
+In the standard package flow, select a setup file and review the system checks. Install and try the app in the selected test environment. Close the app and collect the final capture before closing Windows Sandbox. Open **Review Your Package** to see the selected source and next steps. Review captured findings, enter the app details and sharing choice, and prepare the package folder. The wizard displays recorded test results when available.
 
 ## Build from a ZIP, app folder, or app files
 
 1. Drop one ZIP or app folder on the first page, or select the files for one app together. For loose files, include the app's executable and its companion files from the same folder. To include subfolders, drop the whole app folder or its ZIP. Setup files still use the capture workflow.
-2. In **Guided**, review the suggested program, name, version, publisher, and icon. Choose the main program if several look plausible. Fill in missing details, confirm permission to include the files, and select the official Launcher Generator 2.2.9 and Installer 3.9.19 folders.
+2. In **Guided**, use **Review Your Package** to review the suggested program, name, version, publisher, and icon. Choose the main program if several look plausible. Fill in missing details, confirm permission to include the files, and select the official Launcher Generator 2.2.9 and Installer 3.9.19 folders.
 3. Choose a new output folder and build. In **Autonomous**, PortableForge starts the build once the required choices and checks are complete. The installer and build receipt appear together in the output folder.
 
 ZIP and loose-file staging on Windows x64 leaves your originals intact and never runs them. ZIPs use standard stored or deflated files. If PortableForge cannot open an archive format, extract it with a trusted tool and drop the resulting app folder.
@@ -43,7 +43,7 @@ PortableForge leaves the source folder intact and preserves its directory layout
 
 1. On the first page choose **Capture with Sandboxie-Plus**. This needs Windows x64 and Sandboxie-Plus 1.18.8 x64. Choose a trusted setup `.exe` that can finish offline without elevation or a restart. In **Setup options**, enter one argument per line and explicitly choose any companion files. Enter the installed app path or leave it blank to pick an app after setup.
 2. Use **Check prerequisites**, confirm that you trust the selected inputs and installed app, and choose **Start capture**. If the dedicated box is unavailable, the wizard offers the portable test box folder and setup instructions. Finish setup inside the dedicated box, choose the installed app if prompted, then try and close it. **Cancel capture** requests cleanup of the dedicated box.
-3. The review opens after cleanup is confirmed. **Needs attention** shows unresolved warnings. If you close the wizard after a cleaned capture, **Pick up where I left off** rechecks its saved receipt and opens the review so you can recheck the choices. Captures whose receipts predate the selected app field need a fresh capture to reopen in the wizard.
+3. **Review Your Package** opens after cleanup is confirmed. Choose **Review Findings** to see what changed. **Needs attention** shows unresolved warnings. If you close the wizard after a cleaned capture, **Pick up where I left off** rechecks its saved receipt and opens the review so you can recheck the choices. Captures whose receipts predate the selected app field need a fresh capture to reopen in the wizard.
 4. Enter the portable copy's name, publisher, full HTTP or HTTPS homepage, and a short description. Confirm permission to bundle the app. Select the official PortableApps.com Launcher Generator 2.2.9 folder and a new profile folder. To customize the visuals, choose **Edit package artwork…**, then **Apply artwork**. Choose **Save profile** to approve the package.
 5. Choose **Build installer**, or choose **Open saved profiles** on the first page later. Select the matching setup, the official PortableApps.com Installer 3.9.19 folder, and a new build folder. The build checks the setup bytes, saved profile approval, staged package, and installer tools before publishing the installer and receipt.
 

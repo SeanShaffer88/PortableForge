@@ -1350,8 +1350,8 @@ mod tests {
                 (
                     Page::Review,
                     &[
-                        "Review Your App",
-                        "Source · Widget.zip",
+                        "Review Your Package",
+                        "App Files · Widget.zip",
                         #[cfg(windows)]
                         "Edit Package Artwork…",
                         "Build Installer",
