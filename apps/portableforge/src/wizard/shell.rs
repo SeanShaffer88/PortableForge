@@ -3,7 +3,7 @@
 use eframe::egui;
 use portableforge_core::settings::{Appearance, TEXT_SCALES};
 
-use super::{folder_flow, theme, WizardApp};
+use super::{dense, folder_flow, theme, WizardApp};
 
 #[derive(Default)]
 pub(super) struct State {
@@ -88,6 +88,7 @@ struct Entry {
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Region {
     Header,
+    Sidebar,
     Body,
     Footer,
 }
@@ -104,6 +105,10 @@ fn heading_pending() -> egui::Id {
 
 pub(super) fn register_region(ui: &egui::Ui, region: Region, id: egui::Id) {
     ui.data_mut(|data| data.insert_temp(region.key(), id));
+}
+
+pub(super) fn clear_sidebar_focus(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.remove::<egui::Id>(Region::Sidebar.key()));
 }
 
 pub(super) fn register_heading(ui: &egui::Ui, response: &egui::Response) {
@@ -132,6 +137,7 @@ impl WizardApp {
                 .then(|| (self.folder_flow.page(), self.folder_flow.busy())),
         };
         if self.shell.page != Some(page) {
+            dense::clear_help_targets(ctx);
             self.shell.page = Some(page);
             ctx.data_mut(|data| {
                 data.remove::<egui::Id>(Region::Footer.key());
@@ -192,53 +198,82 @@ impl WizardApp {
         ctx.request_repaint();
     }
 
-    pub(super) fn show_phase_navigation(&mut self, ui: &mut egui::Ui, index: usize, total: usize) {
+    pub(super) fn show_phase_navigation(
+        &mut self,
+        ui: &mut egui::Ui,
+        index: usize,
+        total: usize,
+        vertical: bool,
+    ) {
         let phases = if self.use_verified_capture() {
             [
-                ("Capture", 0),
-                ("Review", 6),
-                ("Save profile", 9),
-                ("Build", 11),
+                ("Capture", 0, "Choose the setup and capture what it changes inside the test box."),
+                ("Review", 6, "Review the captured changes and fill in the app details and sharing permission."),
+                ("Save profile", 9, "Save the reviewed choices so you can build from the same setup later."),
+                ("Build", 11, "Use the saved profile to create the PortableApps.com installer."),
             ]
         } else {
-            [("Capture", 0), ("Review", 6), ("Package", 9), ("Test", 10)]
+            [
+                ("Capture", 0, "Choose the setup and follow the guided steps to record what it changes."),
+                ("Review", 6, "Review the captured changes, then enter the app details and sharing permission."),
+                ("Package", 9, "Prepare the files and settings for the portable copy."),
+                ("Test", 10, "Check the portable copy and review the result before you finish."),
+            ]
         };
         let current = phases
             .iter()
-            .rposition(|(_, start)| *start <= self.step)
+            .rposition(|(_, start, _)| *start <= self.step)
             .unwrap_or(0);
-        ui.horizontal_wrapped(|ui| {
+        let mut show = |ui: &mut egui::Ui| {
             ui.spacing_mut().interact_size.y = theme::compact_row_height();
-            for (phase, (label, start)) in phases.into_iter().enumerate() {
-                if phase > 0 {
+            for (phase, (label, start, help)) in phases.into_iter().enumerate() {
+                if !vertical && phase > 0 {
                     ui.label(egui::RichText::new("›").weak());
                 }
                 let selected = phase == current;
-                let response = ui.add_enabled(
-                    selected || (phase < current && self.can_go_back() && !self.show_details),
-                    egui::Button::selectable(selected, label),
-                );
-                if selected {
-                    let y = response.rect.bottom() - 1.0;
-                    ui.painter()
-                        .hline(response.rect.x_range(), y, ui.visuals().selection.stroke);
-                }
-                if response
-                    .on_hover_text(if selected {
-                        format!("Step {index} of {total}")
+                let enabled =
+                    selected || (phase < current && self.can_go_back() && !self.show_details);
+                let response = if vertical {
+                    dense::roadmap_item(ui, label, selected, enabled, help)
+                } else {
+                    let response =
+                        ui.add_enabled(enabled, egui::Button::selectable(selected, label));
+                    dense::mark_roadmap_selection(&response, selected);
+                    if selected {
+                        let y = response.rect.bottom() - 1.0;
+                        ui.painter().hline(
+                            response.rect.x_range(),
+                            y,
+                            ui.visuals().selection.stroke,
+                        );
+                    }
+                    let explanation = if selected {
+                        format!("Step {index} of {total}. {help}")
                     } else {
-                        label.to_owned()
-                    })
-                    .clicked()
-                    && phase < current
-                {
+                        help.to_owned()
+                    };
+                    dense::field_help(&response, &explanation);
+                    response
+                };
+                if selected && vertical {
+                    register_region(ui, Region::Sidebar, response.id);
+                }
+                if response.clicked() && phase < current {
                     while self.step > start && self.can_go_back() {
                         self.go_back();
                     }
                     ui.ctx().request_repaint();
                 }
             }
-        });
+            if vertical {
+                ui.weak(format!("Step {index} of {total}"));
+            }
+        };
+        if vertical {
+            show(ui);
+        } else {
+            ui.horizontal_wrapped(show);
+        }
     }
 
     pub(super) fn toggle_step_details(&mut self) {
@@ -621,16 +656,24 @@ impl WizardApp {
 }
 
 fn region_focus(ctx: &egui::Context, region: Region) -> Option<egui::Id> {
+    if matches!(region, Region::Sidebar) && !dense::room_for_sidebar(ctx) {
+        return None;
+    }
     ctx.data(|data| data.get_temp::<egui::Id>(region.key()))
 }
 
 fn focus_next_region(ctx: &egui::Context) {
     let current = ctx.memory(|memory| memory.focused());
-    let regions = [Region::Header, Region::Body, Region::Footer];
+    let regions = [
+        Region::Header,
+        Region::Sidebar,
+        Region::Body,
+        Region::Footer,
+    ];
     let start = regions
         .iter()
         .position(|region| current.is_some() && region_focus(ctx, *region) == current)
-        .unwrap_or(1);
+        .unwrap_or(2);
     for offset in 1..=regions.len() {
         if let Some(next) = region_focus(ctx, regions[(start + offset) % regions.len()]) {
             ctx.memory_mut(|memory| memory.request_focus(next));
@@ -659,6 +702,49 @@ fn command_rank(query: &str, label: &str, keywords: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roadmap_keeps_future_capture_phases_locked_at_both_sizes() {
+        for size in [[640.0, 480.0], [768.0, 480.0]] {
+            let ctx = egui::Context::default();
+            theme::install_fonts(&ctx);
+            ctx.enable_accesskit();
+            let mut wizard = WizardApp::default();
+            wizard.enter_verified_capture();
+            let mut frame = eframe::Frame::_new_kittest();
+            let mut draw = || {
+                ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size.into())),
+                        ..Default::default()
+                    },
+                    |ctx| eframe::App::update(&mut wizard, ctx, &mut frame),
+                )
+            };
+            draw();
+            let output = draw();
+            let access = output
+                .platform_output
+                .accesskit_update
+                .expect("accessibility data");
+            for (label, locked) in [
+                ("Capture", false),
+                ("Review", true),
+                ("Save profile", true),
+                ("Build", true),
+            ] {
+                let entry = access
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| node.label() == Some(label))
+                    .unwrap_or_else(|| panic!("missing {label} at {size:?}"));
+                assert_eq!(entry.1.is_disabled(), locked, "{label} at {size:?}");
+                if !locked {
+                    assert_eq!(entry.1.is_selected(), Some(true));
+                }
+            }
+        }
+    }
 
     #[test]
     fn command_filter_matches_plain_words_and_subsequences() {

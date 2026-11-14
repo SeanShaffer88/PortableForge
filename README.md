@@ -21,6 +21,10 @@ The desktop wizard guides capture, review, and packaging. GitHub Dark is the def
 - Shows the exact location and suggested handling for each captured finding.
 - Prepares a PortableApps.com Format 3.9 package, or uses a verified profile and the official tools to build a `.paf.exe`.
 
+The roadmap keeps the current step visible. On wider windows it sits on the
+left, with configuration on the right and actions at the bottom. Narrow
+windows move the roadmap above the configuration. Focus a field or point to it to read plain-language help in the bottom status bar.
+
 ## How it works
 
 In the standard package flow, select a setup file and review the system checks. Install and try the app in the selected test environment. Close the app and collect the final capture before closing Windows Sandbox. Open **Review Your Package** to see the selected source and next steps. Review captured findings, enter the app details and sharing choice, and prepare the package folder. The wizard displays recorded test results when available.

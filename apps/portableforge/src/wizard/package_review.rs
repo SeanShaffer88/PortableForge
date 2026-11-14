@@ -27,8 +27,12 @@ pub(super) fn overview(ui: &mut egui::Ui, source_type: &str, display_name: &str,
             egui::vec2(width.max(0.0), ui.spacing().interact_size.y),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.add(egui::Label::new(egui::RichText::new(&label).weak()).truncate())
-                    .on_hover_text(path.as_ref());
+                let response =
+                    ui.add(egui::Label::new(egui::RichText::new(&label).weak()).truncate());
+                dense::field_help(
+                    &response,
+                    "This is the selected input. Choose View Source to see its full location.",
+                );
             },
         );
         dense::view_text(ui, "View Source", "Package Source", &path, show_path);

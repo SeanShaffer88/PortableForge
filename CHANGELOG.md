@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Use a shared project roadmap, grouped app settings, and paired artwork previews on wider windows.
 - Keep the applied app icon and installer left pane when saving and resuming an Autonomous job.
 - Pause an Autonomous app package and resume it after restarting the wizard. Resuming scans the original selection and asks for sharing permission again.
 - Use the same review overview for a captured setup, a ZIP, an app folder, or selected app files. Each source keeps its own findings and package actions.

@@ -21,13 +21,14 @@ impl WizardApp {
             let guided =
                 ui.selectable_value(&mut self.folder_flow.mode, IntakeMode::Guided, copy::GUIDED);
             theme::focus_outline(ui, &guided);
-            let autonomous = ui
-                .selectable_value(
+            let autonomous = dense::explained(
+                ui.selectable_value(
                     &mut self.folder_flow.mode,
                     IntakeMode::Autonomous,
                     copy::AUTONOMOUS,
-                )
-                .on_hover_text(copy::AUTONOMOUS_HELP);
+                ),
+                copy::AUTONOMOUS_HELP,
+            );
             theme::focus_outline(ui, &autonomous);
             ui.separator();
             if ui.button(copy::CHOOSE_FILES).clicked() {
@@ -40,10 +41,11 @@ impl WizardApp {
         let saved_path = saved_job::path(&self.settings_path);
         if saved_job::revision(&saved_path).is_ok_and(|slot| slot.is_some()) {
             ui.horizontal_wrapped(|ui| {
-                if ui
-                    .button(saved_job::RESUME)
-                    .on_hover_text("Check the original files again and reopen the saved choices.")
-                    .clicked()
+                if dense::explained(
+                    ui.button(saved_job::RESUME),
+                    "Check the original files again and reopen the saved choices.",
+                )
+                .clicked()
                 {
                     self.resume_app_job(ui.ctx());
                 }
@@ -71,6 +73,10 @@ impl WizardApp {
             copy::HEADER
         };
         self.show_header(ctx, heading, None);
+        dense::show_help_bar(
+            ctx,
+            self.folder_flow.status.unwrap_or("Review the source and choose how to build this package. Move over a control or press Tab for help."),
+        );
         let visuals = &ctx.style().visuals;
         let frame = egui::Frame::new()
             .fill(visuals.window_fill)
@@ -86,6 +92,8 @@ impl WizardApp {
                         !flow.busy() && !flow.modal_open(),
                         egui::Button::new(if flow.page == Page::Done {
                             "Choose Another App"
+                        } else if flow.details_next_step().is_some() {
+                            "Back to Review"
                         } else {
                             "Back"
                         }),
@@ -97,7 +105,7 @@ impl WizardApp {
                         shell::register_region(ui, shell::Region::Footer, back.id);
                     }
                     if flow.can_save_for_later() {
-                        let save_job = ui.button(saved_job::SAVE).on_hover_text("Keep your choices for later. You’ll confirm sharing permission when you resume.");
+                        let save_job = dense::explained(ui.button(saved_job::SAVE), "Keep your choices for later. You’ll confirm sharing permission when you resume.");
                         shell::register_region(ui, shell::Region::Footer, save_job.id);
                         save = save_job.clicked();
                     }
@@ -147,6 +155,15 @@ impl WizardApp {
                             if stop.clicked() {
                                 flow.stop();
                             }
+                        } else if let Some((next, label)) = flow.details_next_step() {
+                            let enabled = !flow.busy() && !flow.modal_open();
+                            let action = dense::primary_action(ui, enabled, label);
+                            if enabled {
+                                shell::register_region(ui, shell::Region::Footer, action.id);
+                            }
+                            if action.clicked() {
+                                flow.page = next;
+                            }
                         } else if flow.show_build_action() {
                             let build = dense::primary_action(ui, flow.build_ready(), copy::BUILD);
                             if flow.build_ready() {
@@ -166,9 +183,13 @@ impl WizardApp {
             ctx.request_repaint();
             return;
         }
+        dense::task_sidebar(ctx, |ui| self.folder_flow.show_roadmap(ui));
+        self.update_heading_focus(ctx);
         egui::CentralPanel::default()
             .frame(dense::content_frame(ctx))
             .show(ctx, |ui| {
+                theme::paint_work_area(ui);
+                dense::compact_body(ui);
                 let choose = ui
                     .add_enabled_ui(!self.folder_flow.modal_open(), |ui| {
                         self.folder_flow.show_body(ui)
@@ -193,6 +214,140 @@ impl WizardApp {
 }
 
 impl Flow {
+    fn details_next_step(&self) -> Option<(Page, &'static str)> {
+        match self.page {
+            Page::App => Some((Page::About, "Next: About")),
+            Page::About => Some((Page::Package, "Next: Package")),
+            Page::Package => Some((Page::Rights, "Next: License")),
+            Page::Rights => Some((Page::Review, "Return to Review")),
+            _ => None,
+        }
+    }
+
+    pub(in crate::wizard) fn show_compact_roadmap(&mut self, ui: &mut egui::Ui) {
+        let finished = self.page == Page::Done;
+        let review = self.page == Page::Review;
+        let can_review = !self.busy() && !self.modal_open() && !finished;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().interact_size.y = theme::compact_row_height();
+            let review_item = ui.add_enabled(
+                can_review, egui::Button::selectable(review, "Review package"),
+            );
+            dense::field_help(&review_item, "Review the source files and the choices needed to build the package.");
+            if review_item.clicked() {
+                self.page = Page::Review;
+            }
+            ui.label(egui::RichText::new("›").weak());
+            let current = match self.page {
+                Page::Review => "Configuration",
+                Page::Program => "Start file",
+                Page::App | Page::About | Page::Package | Page::Rights => "App details",
+                Page::Files => "Tools and output",
+                Page::Findings => "File findings",
+                Page::Done => "Configuration",
+            };
+            if review || finished {
+                ui.weak(current);
+            } else {
+                let step = ui.selectable_label(true, current);
+                dense::field_help(&step, "You are editing this part of the package. Review your choices before building.");
+            }
+            ui.label(egui::RichText::new("›").weak());
+            if finished {
+                let _result = ui.selectable_label(true, "Result");
+            } else {
+                ui.weak("Result");
+            }
+        });
+    }
+
+    fn show_roadmap(&mut self, ui: &mut egui::Ui) {
+        let ready = !self.busy()
+            && !self.modal_open()
+            && self.scan.as_ref().is_some_and(|scan| !scan.is_prepared())
+            && self.page != Page::Done;
+        let selected_file = ready && self.selected.is_some();
+        let finished = self.page == Page::Done;
+        for (label, page, active, enabled, help) in [
+            (
+                "Package Review",
+                Page::Review,
+                self.page == Page::Review,
+                ready || self.page == Page::Review,
+                "Check the source, start file and required choices before creating your installer.",
+            ),
+            (
+                "Start File",
+                Page::Program,
+                self.page == Page::Program,
+                ready && self.scan.as_ref().is_some_and(|scan| !scan.candidates.is_empty()),
+                "Choose which program to open when someone runs the portable app. Use the file you would normally open to start this app.",
+            ),
+            (
+                "App Details",
+                Page::App,
+                matches!(self.page, Page::App | Page::About | Page::Package | Page::Rights),
+                selected_file,
+                "Set the name, publisher, version, website, and license information that appear in the portable package.",
+            ),
+            (
+                "File Findings",
+                Page::Findings,
+                self.page == Page::Findings,
+                ready,
+                "Read what PortableForge found in the source files. Resolve anything marked to fix before building.",
+            ),
+        ] {
+            let item = dense::roadmap_item(ui, label, active, enabled, help);
+            if active && enabled {
+                shell::register_region(ui, shell::Region::Sidebar, item.id);
+            }
+            if item.clicked() && !active {
+                if page == Page::Findings {
+                    self.toggle_findings();
+                } else {
+                    self.page = page;
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            let item = dense::roadmap_item(
+                ui,
+                "Package Artwork",
+                self.artwork.is_open(),
+                selected_file,
+                "Preview the app icon and the image shown on the left side of the installer. Apply changes to include them in this package.",
+            );
+            if item.clicked() {
+                self.open_artwork(item.id);
+            }
+        }
+        let item = dense::roadmap_item(
+            ui,
+            "Build & Output",
+            self.page == Page::Files,
+            selected_file,
+            "Choose the installed PortableApps.com tools and the folder that will receive your new installer.",
+        );
+        if self.page == Page::Files && selected_file {
+            shell::register_region(ui, shell::Region::Sidebar, item.id);
+        }
+        if item.clicked() {
+            self.page = Page::Files;
+        }
+        let item = dense::roadmap_item(
+            ui,
+            "Build Result",
+            finished,
+            finished,
+            "Find the installer and its build receipt after the package has been created.",
+        );
+        if finished {
+            shell::register_region(ui, shell::Region::Sidebar, item.id);
+        }
+    }
+
     fn show_body(&mut self, ui: &mut egui::Ui) -> Option<SourcePicker> {
         if self.busy() {
             let title = if self.test_in_progress() {
@@ -339,7 +494,11 @@ impl Flow {
             }
         });
         if self.selected.is_some() {
-            ui.checkbox(&mut self.draft.rights, copy::RIGHTS);
+            let rights = ui.checkbox(&mut self.draft.rights, copy::RIGHTS);
+            dense::field_help(
+                &rights,
+                "Confirm that the app’s license or publisher lets you distribute these files in your installer. PortableForge needs your confirmation before it can include them.",
+            );
         }
         if let Some((page, message)) = self.blocker() {
             ui.horizontal_wrapped(|ui| {
@@ -370,8 +529,12 @@ impl Flow {
                 ui.add(image);
             }
             ui.vertical(|ui| {
-                ui.add(egui::Label::new(egui::RichText::new(&self.draft.name).strong()).truncate())
-                    .on_hover_text(&self.draft.name);
+                dense::explained(
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&self.draft.name).strong()).truncate(),
+                    ),
+                    &self.draft.name,
+                );
                 let details = match (self.draft.publisher.trim(), self.draft.version.trim()) {
                     ("", "") if self.inferred_name => Some("Suggested app name".into()),
                     ("", "") => None,
@@ -380,8 +543,10 @@ impl Flow {
                     (publisher, version) => Some(format!("{publisher} · Version {version}")),
                 };
                 if let Some(details) = details {
-                    ui.add(egui::Label::new(egui::RichText::new(&details).weak()).truncate())
-                        .on_hover_text(details);
+                    dense::explained(
+                        ui.add(egui::Label::new(egui::RichText::new(&details).weak()).truncate()),
+                        details,
+                    );
                 }
             });
         });
@@ -427,21 +592,65 @@ impl Flow {
         match self.page {
             Page::App => {
                 let old_id = suggested_id(&self.draft.name);
-                if dense::text_field(ui, "App Name", &mut self.draft.name) {
+                let name_help = "Enter the name people will see in the installer and the PortableApps.com menu. A recognizable name helps people find the portable app later.";
+                let publisher_help = "Enter the person or organization that publishes the original app. Use the name on its website or About screen.";
+                let changed = if ui.available_width() >= 480.0 {
+                    ui.columns(2, |columns| {
+                        let changed = dense::explained_text_field(
+                            &mut columns[0],
+                            "App Name",
+                            &mut self.draft.name,
+                            name_help,
+                        );
+                        dense::explained_text_field(
+                            &mut columns[1],
+                            "Publisher",
+                            &mut self.draft.publisher,
+                            publisher_help,
+                        );
+                        changed
+                    })
+                } else {
+                    let changed = dense::explained_text_field(
+                        ui,
+                        "App Name",
+                        &mut self.draft.name,
+                        name_help,
+                    );
+                    dense::explained_text_field(
+                        ui,
+                        "Publisher",
+                        &mut self.draft.publisher,
+                        publisher_help,
+                    );
+                    changed
+                };
+                if changed {
                     self.inferred_name = false;
                     if old_id == self.draft.id {
                         self.draft.id = suggested_id(&self.draft.name);
                     }
                 }
-                dense::text_field(ui, "Publisher", &mut self.draft.publisher);
-                dense::text_field(ui, "Version Number", &mut self.draft.version);
+                dense::explained_text_field(
+                    ui, "Version Number", &mut self.draft.version,
+                    "Enter the version of this app in numbers, such as 2.4 or 2.4.1. The platform uses this to recognize newer packages.",
+                );
             }
             Page::About => {
-                dense::text_field(ui, "App Website", &mut self.draft.homepage);
-                dense::text_field(ui, "Short Description", &mut self.draft.description);
+                dense::explained_text_field(
+                    ui, "App Website", &mut self.draft.homepage,
+                    "Enter the app’s official website, starting with https:// or http://. This lets people learn about the original app.",
+                );
+                dense::explained_text_field(
+                    ui, "Short Description", &mut self.draft.description,
+                    "Write a brief explanation of what the app does. People may read it to decide whether they want to install the package.",
+                );
             }
             Page::Package => {
-                dense::text_field(ui, "Package Name", &mut self.draft.id);
+                dense::explained_text_field(
+                    ui, "Package Name", &mut self.draft.id,
+                    "This name identifies the package and its install folder. Use a short name without spaces, such as WidgetPortable.",
+                );
                 ui.label("Category");
                 egui::Grid::new("folder-package-categories")
                     .num_columns(3)
@@ -467,13 +676,15 @@ impl Flow {
             }
             Page::Rights => {
                 ui.label("Select what applies to this app.");
-                ui.checkbox(&mut self.draft.open_source, "Open source");
-                ui.checkbox(&mut self.draft.freeware, "Free of charge");
-                ui.checkbox(&mut self.draft.commercial_use, "Commercial use allowed");
-                ui.checkbox(
-                    &mut self.draft.requires_admin,
-                    "Requires administrator access",
-                );
+                for (value, label, help) in [
+                    (&mut self.draft.open_source, "Open source", "Select this when the publisher makes the source code available under an open-source license."),
+                    (&mut self.draft.freeware, "Free of charge", "Select this if people can use the app without paying. Check the publisher’s license for any limits."),
+                    (&mut self.draft.commercial_use, "Commercial use allowed", "Select this when the publisher’s license allows people to use the app for work or business."),
+                    (&mut self.draft.requires_admin, "Requires administrator access", "Select this if the app itself needs administrator access to run. People without that access may be unable to use it."),
+                ] {
+                    let choice = ui.checkbox(value, label);
+                    dense::field_help(&choice, help);
+                }
             }
             _ => {}
         }
@@ -491,18 +702,21 @@ impl Flow {
             "Launcher Generator",
             &mut self.launcher_tools,
             "Choose Launcher Folder…",
+            "Choose the folder containing the PortableApps.com Launcher Generator. PortableForge uses it to create the file that starts the portable app.",
         );
         folder_field(
             ui,
             "PortableApps.com Installer",
             &mut self.installer_tools,
             "Choose Installer Folder…",
+            "Choose the folder containing the PortableApps.com Installer tool. It combines the portable app and its settings into one installable file.",
         );
         folder_field(
             ui,
             "Save In",
             &mut self.output_parent,
             "Change Save Location…",
+            "Choose an existing folder. PortableForge creates a new output folder there for the installer and its build receipt.",
         );
         if !self.output_parent.as_os_str().is_empty() {
             path_summary(ui, "New Folder", &self.output());
@@ -597,15 +811,17 @@ fn path_summary(ui: &mut egui::Ui, label: &str, path: &Path) {
             egui::vec2(width.max(0.0), ui.spacing().interact_size.y),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.add(egui::Label::new(value.as_ref()).truncate())
-                    .on_hover_text(value.as_ref());
+                dense::explained(
+                    ui.add(egui::Label::new(value.as_ref()).truncate()),
+                    value.as_ref(),
+                );
             },
         );
         dense::view_text(ui, "View Path", label, &value, view);
     });
 }
 
-fn folder_field(ui: &mut egui::Ui, label: &str, folder: &mut PathBuf, action: &str) {
+fn folder_field(ui: &mut egui::Ui, label: &str, folder: &mut PathBuf, action: &str, help: &str) {
     ui.label(label);
     ui.horizontal(|ui| {
         let value = if folder.as_os_str().is_empty() {
@@ -618,11 +834,15 @@ fn folder_field(ui: &mut egui::Ui, label: &str, folder: &mut PathBuf, action: &s
             egui::vec2(width, ui.spacing().interact_size.y),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.add(egui::Label::new(value.as_ref()).truncate())
-                    .on_hover_text(value.as_ref());
+                dense::explained(
+                    ui.add(egui::Label::new(value.as_ref()).truncate()),
+                    value.as_ref(),
+                );
             },
         );
-        if ui.button(action).clicked() {
+        let choose = ui.button(action);
+        dense::field_help(&choose, help);
+        if choose.clicked() {
             let dialog = rfd::FileDialog::new().set_title(label);
             if let Some(path) = dialog.pick_folder() {
                 *folder = path;

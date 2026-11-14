@@ -43,13 +43,14 @@ the artwork tabs, and paged review. A long path can wrap in the field and
 opens in a full-value dialog when more room is needed. A copy action is
 available in that dialog.
 
-At minimum size the capture task stays in one column so file paths have the
-full width. Prerequisites sit with the capture controls. The wizard uses
-32-point Compact controls there and 40-point Comfortable controls when
-the available layout is at least 700 × 620 logical points. Phase and data
-rows use the Compact row height. Text and primary fills follow the Tessel
-tokens. The app reads installed Windows fonts and uses egui's local
-fallbacks when the requested font is unavailable.
+The left roadmap shows the current phase and available navigation. It moves
+above the configuration when the window is narrow so fields keep their width.
+F6 includes the roadmap when it is on the left. Available fields and artwork
+controls send plain-language help to the fixed status bar on pointer hover or
+keyboard focus. The artwork dialog shows both previews when it fits and uses
+tabs in the compact layout. The charcoal work surface uses subtle circuit
+traces in Dark appearance. Light and Windows contrast appearances use
+plain backgrounds.
 
 The interface uses flat task surfaces and a fixed action strip. Task
 progress appears as status text. Geometry tests establish layout fit for
