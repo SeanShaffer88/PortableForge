@@ -1,13 +1,16 @@
 //! Run an installer test from a previously approved build identity.
 
-use std::path::{Path, PathBuf};
+use std::fmt::Write as _;
+use std::path::Path;
 use std::time::Duration;
 
 use portableforge_core::compile::{verify_build_result, VerifiedBuild};
 use portableforge_core::sbie_verified::{
-    preflight, test_built_paf, CancellationToken, RuntimeDataStatus, RuntimeReport, RuntimeRequest,
+    preflight, test_built_paf, CancellationToken, RuntimeDataChangeKind, RuntimeDataReopenStatus,
+    RuntimeDataStatus, RuntimeReport, RuntimeRequest,
 };
 use portableforge_core::settings::SavedBuild;
+use portableforge_core::storage::display_path;
 
 use super::{sessions_base, unique_folder};
 
@@ -52,8 +55,8 @@ impl BuildIdentity<'_> {
 
 #[derive(Debug)]
 pub(super) struct InstallerTest {
-    report: RuntimeReport,
-    output: PathBuf,
+    data_message: &'static str,
+    details: String,
 }
 
 #[derive(Debug)]
@@ -99,7 +102,7 @@ impl TestFailure {
 impl InstallerTest {
     pub(super) fn checked(
         report: RuntimeReport,
-        output: PathBuf,
+        output: &Path,
         expected_sha256: &str,
     ) -> Result<Self, TestFailure> {
         if !report.cleanup_verified {
@@ -115,11 +118,10 @@ impl InstallerTest {
                 "The installer test did not finish with the approved build.".into(),
             ));
         }
-        Ok(Self { report, output })
-    }
-
-    pub(super) fn data_message(&self) -> &'static str {
-        match self.report.data_status {
+        let data_message = match report.data_status {
+            RuntimeDataStatus::NoDataFilesChanged if !report.data_file_changes.is_empty() => {
+                "Portable data files changed after reopening."
+            }
             RuntimeDataStatus::NoDataFilesChanged => {
                 "No portable data files changed during the first launch."
             }
@@ -129,22 +131,76 @@ impl InstallerTest {
             RuntimeDataStatus::ObservedChangesDifferAfterReopen => {
                 "Some observed portable data changes differed after reopening."
             }
-        }
+        };
+        Ok(Self {
+            data_message,
+            details: Self::format_details(&report, output, data_message),
+        })
     }
 
-    pub(super) fn details(&self) -> String {
-        let report = &self.report;
-        let state = self.data_message();
-        format!(
-            "Installer finished with exit code {}.\nApp launches finished with exit codes {} and {}.\nDedicated box removed · Yes\n\n{state}\nNew or changed data files · {}\nDeleted data files · {}\nUnchanged on reopen · {}\n\nTest folder\n{}",
+    pub(super) fn data_message(&self) -> &'static str {
+        self.data_message
+    }
+
+    pub(super) fn details(&self) -> &str {
+        &self.details
+    }
+
+    fn format_details(report: &RuntimeReport, output: &Path, state: &str) -> String {
+        let mut details = format!(
+            "Installer finished with exit code {}.\nApp launches finished with exit codes {} and {}.\nDedicated box removed · Yes\n\n{state}\nFirst launch · Created or updated · {}\nFirst launch · Removed · {}\nFirst-launch writes with the same contents on reopen · {}\n\nTest folder\n{}",
             report.install_exit,
             report.launch_exits[0],
             report.launch_exits[1],
             report.data_files_created_or_changed,
             report.data_files_deleted,
             report.data_files_unchanged_on_reopen,
-            self.output.display(),
-        )
+            output.display(),
+        );
+        details.push_str(
+            "\n\nPortable data changes\nThis report covers files in the package’s Data folder.\n",
+        );
+        if report.data_file_changes.is_empty() {
+            details.push_str("No file changes were recorded across the two launches.\n");
+        }
+        let mut shortened_paths = false;
+        for change in &report.data_file_changes {
+            let path = display_path(&format!("Data\\{}", change.path.replace('/', "\\")));
+            shortened_paths |= path.ends_with('…');
+            let _ = writeln!(details, "\n{path}");
+            if let Some(first) = change.first_launch {
+                let line = match first {
+                    RuntimeDataChangeKind::Added => "Created on first launch",
+                    RuntimeDataChangeKind::Updated => "Updated on first launch",
+                    RuntimeDataChangeKind::Removed => "Removed on first launch",
+                };
+                let _ = write!(details, "{line} · ");
+            }
+            let reopen = match change.reopen {
+                RuntimeDataReopenStatus::Retained => "Same contents after reopening",
+                RuntimeDataReopenStatus::ChangedAgain => "Changed again after reopening",
+                RuntimeDataReopenStatus::Missing => "Missing after reopening",
+                RuntimeDataReopenStatus::StillRemoved => "Still absent after reopening",
+                RuntimeDataReopenStatus::Returned => "Present again after reopening",
+                RuntimeDataReopenStatus::CreatedOnReopen => "Created on reopen",
+                RuntimeDataReopenStatus::UpdatedOnReopen => "Updated on reopen",
+                RuntimeDataReopenStatus::RemovedOnReopen => "Removed on reopen",
+            };
+            let _ = writeln!(details, "{reopen}");
+        }
+        if shortened_paths {
+            details.push_str(
+                "\nFull paths are listed in sandboxie-runtime.json in the test folder.\n",
+            );
+        }
+        if report.data_file_changes_omitted > 0 {
+            let _ = write!(
+                details,
+                "\nAdditional changed files omitted · {}",
+                report.data_file_changes_omitted,
+            );
+        }
+        details
     }
 }
 
@@ -176,14 +232,16 @@ pub(super) fn run(
         cancellation,
     )
     .map_err(TestFailure::from_runtime)?;
-    InstallerTest::checked(report, output, build.artifact_sha256)
+    InstallerTest::checked(report, &output, build.artifact_sha256)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use portableforge_core::sbie_verified::RuntimeDataFileChange;
     use portableforge_core::snapshot::sha256_hex;
     use std::fs;
+    use std::path::PathBuf;
 
     const TOOLS: &[(&str, &str)] = &[
         (
@@ -296,6 +354,8 @@ mod tests {
             data_files_created_or_changed: 0,
             data_files_deleted: 0,
             data_files_unchanged_on_reopen: 0,
+            data_file_changes: Vec::new(),
+            data_file_changes_omitted: 0,
             data_status: RuntimeDataStatus::NoDataFilesChanged,
             cleanup_verified,
         };
@@ -304,11 +364,11 @@ mod tests {
             report(true, [1, 0], "approved"),
             report(true, [0, 0], "changed"),
         ] {
-            assert!(InstallerTest::checked(unsuccessful, PathBuf::new(), "approved").is_err());
+            assert!(InstallerTest::checked(unsuccessful, Path::new(""), "approved").is_err());
         }
         assert!(InstallerTest::checked(
             report(true, [0, 0], "approved"),
-            PathBuf::new(),
+            Path::new(""),
             "approved"
         )
         .is_ok());
@@ -318,5 +378,52 @@ mod tests {
             ),
             TestFailure::Cleanup(_)
         ));
+    }
+
+    #[test]
+    fn details_show_reopen_only_changes_as_bounded_relative_paths() {
+        let report = RuntimeReport {
+            installer_sha256: "approved".into(),
+            install_exit: 0,
+            launch_exits: [0, 0],
+            data_files_created_or_changed: 0,
+            data_files_deleted: 0,
+            data_files_unchanged_on_reopen: 0,
+            data_status: RuntimeDataStatus::NoDataFilesChanged,
+            data_file_changes: vec![
+                RuntimeDataFileChange {
+                    path: "profiles/session.log".into(),
+                    first_launch: None,
+                    reopen: RuntimeDataReopenStatus::CreatedOnReopen,
+                },
+                RuntimeDataFileChange {
+                    path: format!("preferences/\u{202e}{}", "a".repeat(300)),
+                    first_launch: None,
+                    reopen: RuntimeDataReopenStatus::UpdatedOnReopen,
+                },
+            ],
+            data_file_changes_omitted: 3,
+            cleanup_verified: true,
+        };
+        let test = InstallerTest::checked(report, Path::new(""), "approved").unwrap();
+        assert_eq!(
+            test.data_message(),
+            "Portable data files changed after reopening."
+        );
+        let details = test.details();
+        assert!(details.contains("First launch · Created or updated · 0"));
+        assert!(details.contains(
+            "Portable data changes\nThis report covers files in the package’s Data folder."
+        ));
+        assert!(details.contains("Data\\profiles\\session.log\nCreated on reopen"));
+        let long_path = details
+            .lines()
+            .find(|line| line.starts_with("Data\\preferences\\"))
+            .unwrap();
+        assert!(long_path.ends_with('…'));
+        assert!(long_path.len() <= 256);
+        assert!(!long_path.contains('\u{202e}'));
+        assert!(details.contains("Full paths are listed in sandboxie-runtime.json"));
+        assert!(details.contains("Additional changed files omitted · 3"));
     }
 }

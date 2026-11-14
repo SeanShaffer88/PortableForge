@@ -23,7 +23,10 @@ use crate::profile::{fingerprint, inventory, local_file, read_small, tree_sha256
 use crate::regfile::{decode_reg_export, parse_reg_with_report};
 use crate::snapshot::{normalise_path, sha256_hex, FileEntry, Snapshot};
 use crate::{Phase, SandboxMode, Session};
-pub use runtime::{test_built_paf, RuntimeDataStatus, RuntimeReport, RuntimeRequest};
+pub use runtime::{
+    test_built_paf, RuntimeDataChangeKind, RuntimeDataFileChange, RuntimeDataReopenStatus,
+    RuntimeDataStatus, RuntimeReport, RuntimeRequest,
+};
 use sources::{setup_args_sha256, PreparedSetup};
 pub(crate) use sources::{verify_capture_sources, SetupCompanion};
 pub use windows::CancellationToken;

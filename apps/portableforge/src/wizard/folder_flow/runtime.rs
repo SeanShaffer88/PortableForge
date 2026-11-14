@@ -165,7 +165,7 @@ impl Flow {
                 dense::heading(ui, copy::TEST_FINISHED, copy::TEST_FINISHED_HELP);
                 ui.label(test.data_message());
                 ui.weak(copy::UNVERIFIED);
-                std::borrow::Cow::Owned(test.details())
+                test.details()
             }
             Err(error) => {
                 let (title, help) = match error {
@@ -177,14 +177,14 @@ impl Flow {
                 };
                 dense::heading(ui, title, help);
                 ui.weak(copy::UNVERIFIED);
-                std::borrow::Cow::Borrowed(error.detail())
+                error.detail()
             }
         };
         dense::view_text(
             ui,
             copy::TEST_DETAILS,
             "Installer Test Details",
-            &details,
+            details,
             true,
         );
         true
@@ -195,8 +195,10 @@ impl Flow {
 mod tests {
     use super::*;
     use crate::wizard::{theme, WizardApp};
-    use portableforge_core::sbie_verified::{RuntimeDataStatus, RuntimeReport};
-    use std::path::PathBuf;
+    use portableforge_core::sbie_verified::{
+        RuntimeDataChangeKind, RuntimeDataFileChange, RuntimeDataReopenStatus, RuntimeDataStatus,
+        RuntimeReport,
+    };
     use std::sync::mpsc;
 
     struct Frame {
@@ -334,10 +336,16 @@ mod tests {
                 data_files_created_or_changed: 1,
                 data_files_deleted: 0,
                 data_files_unchanged_on_reopen: 1,
+                data_file_changes: vec![RuntimeDataFileChange {
+                    path: "settings.ini".into(),
+                    first_launch: Some(RuntimeDataChangeKind::Added),
+                    reopen: RuntimeDataReopenStatus::Retained,
+                }],
+                data_file_changes_omitted: 0,
                 data_status: RuntimeDataStatus::ObservedChangesRetained,
                 cleanup_verified: true,
             },
-            PathBuf::from(r"C:\Tests\Installer-Test"),
+            std::path::Path::new(r"C:\Tests\Installer-Test"),
             "approved",
         )
         .unwrap()
@@ -465,6 +473,45 @@ mod tests {
                     copy::TEST_DETAILS,
                     "View Output Folder",
                 ],
+            );
+            frame.click(&mut wizard, copy::TEST_DETAILS);
+            frame.fit(
+                &mut wizard,
+                &["Installer Test Details", "Copy full text", "Close"],
+            );
+            let expected = [
+                "Portable data changes",
+                r"Data\settings.ini",
+                "Same contents after reopening",
+            ];
+            let mut displayed = String::new();
+            for _ in 0..5 {
+                let output = frame.draw(&mut wizard, Default::default());
+                for shape in &output.shapes {
+                    let egui::Shape::Text(text) = &shape.shape else {
+                        continue;
+                    };
+                    let content = text.galley.text();
+                    if expected.iter().any(|part| content.contains(part)) {
+                        assert!(
+                            frame
+                                .bounds
+                                .intersect(shape.clip_rect)
+                                .expand(1.0)
+                                .contains_rect(shape.shape.visual_bounding_rect()),
+                            "Details clipped at text scale {scale}"
+                        );
+                        displayed.push_str(content);
+                    }
+                }
+                if expected.iter().all(|part| displayed.contains(part)) {
+                    break;
+                }
+                frame.click(&mut wizard, "Next ›");
+            }
+            assert!(
+                expected.iter().all(|part| displayed.contains(part)),
+                "{displayed}"
             );
         }
     }

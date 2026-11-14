@@ -47,7 +47,7 @@ Under **File Findings**, **Check DLL Dependencies** reads the selected start fil
 
 On **Keep AppData Settings Portable**, optionally redirect Roaming or Local AppData to the package’s Data folder. The launcher sets the selected AppData environment variables for the app and its children. Apps that use Windows known-folder APIs or hardcoded paths may ignore these variables. Confirm that settings persist across two launches. Saved app jobs retain your choices.
 
-Open the test page under **Build Result**, then choose **Test Installer** to try it in a fresh Sandboxie-Plus box. Follow the prompts to finish setup and try the app twice. The result records what happened to the app’s portable data and whether the test box was removed.
+Open the test page under **Build Result**, then choose **Test Installer** to try it in a fresh Sandboxie-Plus box. Follow the prompts to finish setup and try the app twice. **Show Test Details** lists changes inside the package’s `Data` folder and what happened to those files after reopening. The report keeps up to 100 file paths and counts omitted entries. The test also checks that the box was removed.
 
 Use **Package Artwork** to edit the app icon and installer left pane on their own pages. Preview and apply your choices before building.
 

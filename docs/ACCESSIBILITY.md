@@ -90,5 +90,6 @@ has initial focus, and **Start Test** opens the installer in a fresh
 Sandboxie-Plus box after checking the original build receipt. The running
 screen shows the setup and two-launch instructions. **Cancel Test**
 requests cancellation, and the wizard waits for the cleanup result.
-**Show Test Details** opens a paged report. The built installer remains
+**Show Test Details** opens a paged report with text labels for file changes
+after each launch. The built installer remains
 available after the test.

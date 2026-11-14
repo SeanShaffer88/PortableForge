@@ -268,7 +268,8 @@ fn captured_registry(key: &str) -> Option<(String, String)> {
     ))
 }
 
-fn display_path(path: &str) -> String {
+/// Shorten paths and replace formatting controls for display only.
+pub fn display_path(path: &str) -> String {
     let mut display = String::with_capacity(path.len().min(MAX_DISPLAY_BYTES));
     for char in path.chars() {
         let char = if char.is_control()

@@ -1,5 +1,13 @@
 # Decisions — PortableForge
 
+## 2026-11-14 — Per-file installer test evidence
+
+Compare the existing post-install, first-launch, and second-launch inventory
+of the installed package’s `Data` directory. Keep the first-launch summary
+and include second-launch-only changes in the detailed report. Store at most
+100 package-relative paths with an exact count of omitted rows. This scope
+covers files inside `Data`.
+
 ## 2026-11-14 — Resume an autonomous app package
 
 Save one paused app package independently of setup drafts and profile approvals.
