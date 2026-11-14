@@ -757,9 +757,11 @@ impl Sandboxie {
     }
 
     pub(super) fn verify_global(&self) -> Result<(), String> {
+        const GLOBAL: &str = "GlobalSettings";
+        const FORCE_MARK_OF_THE_WEB: &str = "ForceMarkOfTheWeb";
         // Driver-enforced defaults from the pinned vendor installation are
         // supported. Explicit local/global compatibility exceptions are not.
-        for key in self.setting_names(Some("GlobalSettings"))? {
+        for key in self.setting_names(Some(GLOBAL))? {
             let lower = key.to_ascii_lowercase();
             if !matches!(
                 lower.as_str(),
@@ -772,6 +774,8 @@ impl Sandboxie {
                     | "autostartsandman"
                     | "maxprocesses"
                     | "maxsize"
+                    | "markofthewebbox"
+                    | "forcemarkoftheweb"
             ) && !lower.starts_with("sbiectrl_")
             {
                 return Err(format!(
@@ -779,6 +783,11 @@ impl Sandboxie {
                 ));
             }
         }
+        // In the pinned driver, process_force.c reads MarkOfTheWebBox only
+        // when the global ForceMarkOfTheWeb switch selects that branch.
+        verify_mark_of_the_web_disabled(|index| {
+            self.setting(Some(GLOBAL), Some(FORCE_MARK_OF_THE_WEB), index)
+        })?;
         // Explicit local sections come before the vendor template sections in
         // the driver's unexpanded enumeration. Reject local definitions that
         // can replace or extend settings from the pinned Templates.ini file.
@@ -1394,6 +1403,18 @@ fn checked(action: &str, status: i32) -> Result<(), String> {
     }
 }
 
+fn verify_mark_of_the_web_disabled(
+    mut setting: impl FnMut(u32) -> Result<Option<String>, String>,
+) -> Result<(), String> {
+    for index in [DIRECT_CONF, CONF_NO_EXPAND] {
+        let first = setting(index)?;
+        if !matches!(first.as_deref(), None | Some("n" | "N")) || setting(index | 1)?.is_some() {
+            return Err("Sandboxie has an unqualified global setting ForceMarkOfTheWeb.".into());
+        }
+    }
+    Ok(())
+}
+
 fn os_error(action: &str) -> String {
     format!("Could not {action}: {}.", io::Error::last_os_error())
 }
@@ -1401,6 +1422,41 @@ fn os_error(action: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mark_of_the_web_box_is_supported_only_with_an_inactive_force_switch() {
+        let check = |values: [Option<&str>; 4]| {
+            verify_mark_of_the_web_disabled(|index| {
+                let value = match index {
+                    DIRECT_CONF => values[0],
+                    CONF_NO_EXPAND => values[2],
+                    next if next == DIRECT_CONF | 1 => values[1],
+                    next if next == CONF_NO_EXPAND | 1 => values[3],
+                    _ => panic!("unexpected query index {index:x}"),
+                };
+                Ok(value.map(str::to_owned))
+            })
+        };
+        assert!(check([None, None, None, None]).is_ok());
+        assert!(check([Some("n"), None, Some("n"), None]).is_ok());
+        assert!(check([Some("N"), None, Some("n"), None]).is_ok());
+        assert!(check([None, None, Some("n"), None]).is_ok());
+        for invalid in [
+            [Some("y"), None, Some("y"), None],
+            [Some("n"), None, Some("y"), None],
+            [None, None, Some("n"), Some("n")],
+            [Some("n"), Some("n"), Some("n"), None],
+            [None, Some("n"), None, None],
+            [Some(""), None, None, None],
+            [Some("no"), None, Some("no"), None],
+        ] {
+            assert!(check(invalid).is_err(), "{invalid:?}");
+        }
+        assert_eq!(
+            verify_mark_of_the_web_disabled(|_| Err("query failed".into())).unwrap_err(),
+            "query failed"
+        );
+    }
 
     #[test]
     fn service_image_paths_accept_installed_and_portable_native_forms() {
